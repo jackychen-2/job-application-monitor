@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.venv/
+.venv-new/
+venv/
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Node
+node_modules/
+frontend/dist/
+
+# Logs
+*.log
+
+# Old files (from original monolith)
+job_application_tracker.numbers
+job_application_tracker.xlsx
+.job_monitor_state.json
+
+# Test / Coverage
+.pytest_cache/
+htmlcov/
+.coverage
