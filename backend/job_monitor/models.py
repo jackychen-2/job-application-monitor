@@ -35,6 +35,7 @@ class Application(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     company: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    normalized_company: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
     job_title: Mapped[str | None] = mapped_column(String(300), nullable=True)
     email_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
     email_sender: Mapped[str | None] = mapped_column(String(300), nullable=True)
@@ -90,12 +91,18 @@ class ProcessedEmail(Base):
     __tablename__ = "processed_emails"
     __table_args__ = (
         UniqueConstraint("uid", "email_account", "email_folder", name="uq_uid_account_folder"),
+        UniqueConstraint("gmail_message_id", name="uq_gmail_message_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     uid: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     email_account: Mapped[str] = mapped_column(String(300), nullable=False)
     email_folder: Mapped[str] = mapped_column(String(100), nullable=False, default="INBOX")
+    
+    # Gmail-specific identifiers for thread linking
+    gmail_message_id: Mapped[str | None] = mapped_column(String(200), nullable=True, unique=True)
+    gmail_thread_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    
     subject: Mapped[str | None] = mapped_column(Text, nullable=True)
     sender: Mapped[str | None] = mapped_column(String(300), nullable=True)
     email_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -110,12 +117,16 @@ class ProcessedEmail(Base):
     processed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+    
+    # Linking metadata
+    link_method: Mapped[str | None] = mapped_column(String(20), nullable=True)  # 'thread', 'company', 'manual', 'new'
+    needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # Relationship
     application: Mapped[Application | None] = relationship(back_populates="processed_emails")
 
     def __repr__(self) -> str:
-        return f"<ProcessedEmail uid={self.uid} job={self.is_job_related} app_id={self.application_id}>"
+        return f"<ProcessedEmail uid={self.uid} thread={self.gmail_thread_id} app_id={self.application_id}>"
 
 
 class ScanState(Base):

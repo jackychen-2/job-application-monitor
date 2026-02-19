@@ -29,6 +29,9 @@ class ParsedEmailData:
     date_pt: str
     date_dt: Optional[datetime]
     body_text: str
+    # Gmail-specific identifiers for thread linking
+    message_id: Optional[str] = None  # Standard Message-ID header
+    gmail_thread_id: Optional[str] = None  # X-GM-THRID header (Gmail IMAP extension)
 
 
 # ── Noise detection tokens ────────────────────────────────
@@ -152,14 +155,49 @@ def extract_body_text(msg: Message) -> str:
 # ── Top-level parser ─────────────────────────────────────
 
 
-def parse_email_message(msg: Message) -> ParsedEmailData:
-    """Parse a stdlib ``email.Message`` into a structured ``ParsedEmailData``."""
+def _extract_message_id(msg: Message) -> Optional[str]:
+    """Extract and normalize the Message-ID header."""
+    raw = msg.get("Message-ID", "") or msg.get("Message-Id", "")
+    if not raw:
+        return None
+    # Clean up angle brackets and whitespace
+    cleaned = raw.strip().strip("<>").strip()
+    return cleaned if cleaned else None
+
+
+def _extract_gmail_thread_id(msg: Message, gmail_thread_id_override: Optional[str] = None) -> Optional[str]:
+    """Extract Gmail thread ID from X-GM-THRID header or override.
+    
+    The gmail_thread_id_override is passed when using Gmail IMAP extension
+    to fetch X-GM-THRID directly via FETCH command (more reliable).
+    """
+    if gmail_thread_id_override:
+        return gmail_thread_id_override
+    # Fallback: check X-GM-THRID header (may not always be present)
+    raw = msg.get("X-GM-THRID", "")
+    if raw:
+        return raw.strip()
+    return None
+
+
+def parse_email_message(
+    msg: Message,
+    gmail_thread_id: Optional[str] = None,
+) -> ParsedEmailData:
+    """Parse a stdlib ``email.Message`` into a structured ``ParsedEmailData``.
+    
+    Args:
+        msg: The email message object.
+        gmail_thread_id: Optional Gmail thread ID from IMAP X-GM-THRID extension.
+    """
     subject = decode_mime_text(msg.get("Subject", ""))
     sender = decode_mime_text(msg.get("From", ""))
     date_raw = decode_mime_text(msg.get("Date", ""))
     date_pt = normalize_date_to_pt(date_raw)
     date_dt = parse_date(date_raw)
     body_text = extract_body_text(msg)
+    message_id = _extract_message_id(msg)
+    thread_id = _extract_gmail_thread_id(msg, gmail_thread_id)
 
     return ParsedEmailData(
         subject=subject,
@@ -168,4 +206,6 @@ def parse_email_message(msg: Message) -> ParsedEmailData:
         date_pt=date_pt,
         date_dt=date_dt,
         body_text=body_text,
+        message_id=message_id,
+        gmail_thread_id=thread_id,
     )

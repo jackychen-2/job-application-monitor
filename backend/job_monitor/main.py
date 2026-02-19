@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from job_monitor.api.applications import router as applications_router
+from job_monitor.api.emails import router as emails_router
 from job_monitor.api.export import router as export_router
 from job_monitor.api.scan import router as scan_router
 from job_monitor.api.stats import router as stats_router
@@ -72,6 +73,7 @@ def create_app() -> FastAPI:
 
     # Register routers
     app.include_router(applications_router)
+    app.include_router(emails_router)
     app.include_router(scan_router)
     app.include_router(stats_router)
     app.include_router(export_router)

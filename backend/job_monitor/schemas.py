@@ -43,6 +43,44 @@ class StatusHistoryOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class LinkedEmailOut(BaseModel):
+    """Email linked to this application (via thread or company)."""
+    id: int
+    uid: int
+    subject: Optional[str] = None
+    sender: Optional[str] = None
+    email_date: Optional[datetime] = None
+    gmail_thread_id: Optional[str] = None
+    processed_at: Optional[datetime] = None
+    link_method: Optional[str] = None
+    needs_review: bool = False
+
+    model_config = {"from_attributes": True}
+
+
+class PendingReviewEmailOut(BaseModel):
+    """Email that needs user review for linking."""
+    id: int
+    uid: int
+    subject: Optional[str] = None
+    sender: Optional[str] = None
+    email_date: Optional[datetime] = None
+    application_id: Optional[int] = None
+    application_company: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class LinkEmailRequest(BaseModel):
+    """Request to manually link an email to an application."""
+    application_id: int
+
+
+class MergeApplicationRequest(BaseModel):
+    """Request to merge another application into this one."""
+    source_application_id: int
+
+
 class ApplicationOut(BaseModel):
     id: int
     company: str
@@ -55,14 +93,17 @@ class ApplicationOut(BaseModel):
     notes: Optional[str]
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
+    email_count: int = 0  # Number of linked emails (for expandable row)
 
     model_config = {"from_attributes": True}
 
 
 class ApplicationDetailOut(ApplicationOut):
-    """Application with full status history."""
+    """Application with full status history and linked emails."""
 
     status_history: List[StatusHistoryOut] = []
+    linked_emails: List[LinkedEmailOut] = []
+    email_count: int = 0
 
 
 class ApplicationListOut(BaseModel):

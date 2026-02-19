@@ -9,6 +9,8 @@ import type {
   ApplicationDetail,
   ApplicationListResponse,
   ApplicationUpdate,
+  LinkedEmail,
+  PendingReviewEmail,
   ScanResult,
   ScanState,
   Stats,
@@ -73,6 +75,38 @@ export async function updateApplication(
 
 export async function deleteApplication(id: number): Promise<void> {
   return request<void>(`/applications/${id}`, { method: "DELETE" });
+}
+
+export async function getApplicationEmails(id: number): Promise<LinkedEmail[]> {
+  return request<LinkedEmail[]>(`/applications/${id}/emails`);
+}
+
+export async function mergeApplications(targetId: number, sourceId: number): Promise<Application> {
+  return request<Application>(`/applications/${targetId}/merge`, {
+    method: "POST",
+    body: JSON.stringify({ source_application_id: sourceId }),
+  });
+}
+
+// ── Emails (review/linking) ──────────────────────────────
+
+export async function getPendingReviewEmails(): Promise<PendingReviewEmail[]> {
+  return request<PendingReviewEmail[]>("/emails/pending-review");
+}
+
+export async function linkEmail(emailId: number, applicationId: number): Promise<LinkedEmail> {
+  return request<LinkedEmail>(`/emails/${emailId}/link`, {
+    method: "PATCH",
+    body: JSON.stringify({ application_id: applicationId }),
+  });
+}
+
+export async function unlinkEmail(emailId: number): Promise<LinkedEmail> {
+  return request<LinkedEmail>(`/emails/${emailId}/link`, { method: "DELETE" });
+}
+
+export async function dismissReview(emailId: number): Promise<void> {
+  return request<void>(`/emails/${emailId}/dismiss-review`, { method: "POST" });
 }
 
 // ── Scan ─────────────────────────────────────────────────

@@ -12,6 +12,7 @@ export interface Application {
   notes: string | null;
   created_at: string | null;
   updated_at: string | null;
+  email_count: number;  // Number of linked emails in thread
 }
 
 export interface StatusHistory {
@@ -22,8 +23,32 @@ export interface StatusHistory {
   changed_at: string | null;
 }
 
+export interface LinkedEmail {
+  id: number;
+  uid: number;
+  subject: string | null;
+  sender: string | null;
+  email_date: string | null;
+  gmail_thread_id: string | null;
+  processed_at: string | null;
+  link_method: string | null;
+  needs_review: boolean;
+}
+
+export interface PendingReviewEmail {
+  id: number;
+  uid: number;
+  subject: string | null;
+  sender: string | null;
+  email_date: string | null;
+  application_id: number | null;
+  application_company: string | null;
+}
+
 export interface ApplicationDetail extends Application {
   status_history: StatusHistory[];
+  linked_emails: LinkedEmail[];
+  email_count: number;
 }
 
 export interface ApplicationListResponse {

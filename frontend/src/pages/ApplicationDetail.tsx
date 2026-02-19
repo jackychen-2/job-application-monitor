@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { getApplication, updateApplication, deleteApplication } from "../api/client";
-import type { ApplicationDetail as AppDetail } from "../types";
+import { getApplication, updateApplication, deleteApplication, mergeApplications, listApplications } from "../api/client";
+import type { ApplicationDetail as AppDetail, Application } from "../types";
 import { STATUSES } from "../types";
 import StatusBadge from "../components/StatusBadge";
 
@@ -14,6 +14,9 @@ export default function ApplicationDetail() {
   const [newStatus, setNewStatus] = useState("");
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
+  const [showMergeModal, setShowMergeModal] = useState(false);
+  const [applications, setApplications] = useState<Application[]>([]);
+  const [selectedMergeId, setSelectedMergeId] = useState<number | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -58,6 +61,29 @@ export default function ApplicationDetail() {
       await deleteApplication(app.id);
       navigate("/");
     }
+  };
+
+  const handleMerge = async () => {
+    if (!app || !selectedMergeId) return;
+    setSaving(true);
+    try {
+      await mergeApplications(app.id, selectedMergeId);
+      const updated = await getApplication(app.id);
+      setApp(updated);
+      setShowMergeModal(false);
+      setSelectedMergeId(null);
+    } catch (err) {
+      console.error("Failed to merge:", err);
+      alert("Failed to merge applications");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const openMergeModal = async () => {
+    const appsData = await listApplications({ page_size: 100 });
+    setApplications(appsData.items.filter(a => a.id !== app?.id));
+    setShowMergeModal(true);
   };
 
   function formatDateTime(dateStr: string | null): string {
@@ -135,6 +161,13 @@ export default function ApplicationDetail() {
               </span>
             )}
             <button
+              onClick={openMergeModal}
+              className="text-blue-400 hover:text-blue-600 text-sm px-2 py-1"
+              title="Merge with another application"
+            >
+              🔗 Merge
+            </button>
+            <button
               onClick={handleDelete}
               className="text-red-400 hover:text-red-600 text-lg"
               title="Delete"
@@ -183,6 +216,44 @@ export default function ApplicationDetail() {
         </button>
       </div>
 
+      {/* Linked Emails (Thread) */}
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <h2 className="text-sm font-medium text-gray-700 mb-3">
+          Linked Emails
+          {app.email_count > 0 && (
+            <span className="ml-2 inline-flex items-center rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-700">
+              {app.email_count} email{app.email_count !== 1 ? "s" : ""} in thread
+            </span>
+          )}
+        </h2>
+        {!app.linked_emails || app.linked_emails.length === 0 ? (
+          <p className="text-sm text-gray-400">No linked emails</p>
+        ) : (
+          <div className="space-y-3">
+            {app.linked_emails.map((email) => (
+              <div key={email.id} className="border-l-2 border-indigo-200 pl-3 py-1">
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="text-gray-400 text-xs w-32 flex-shrink-0">
+                    {formatDateTime(email.email_date)}
+                  </span>
+                  <span className="text-gray-900 font-medium truncate flex-1">
+                    {email.subject || "(No subject)"}
+                  </span>
+                </div>
+                <div className="text-xs text-gray-500 mt-0.5 ml-32">
+                  From: {email.sender || "Unknown"}
+                  {email.gmail_thread_id && (
+                    <span className="ml-2 text-gray-400">
+                      Thread: {email.gmail_thread_id.slice(0, 12)}...
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Status History */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
         <h2 className="text-sm font-medium text-gray-700 mb-3">Status History</h2>
@@ -212,6 +283,46 @@ export default function ApplicationDetail() {
           </div>
         )}
       </div>
+
+      {/* Merge Modal */}
+      {showMergeModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+            <h3 className="text-lg font-bold mb-4">Merge Applications</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Select an application to merge into <strong>{app.company}</strong>.
+              All emails and history from the selected app will be moved here.
+            </p>
+            <select
+              className="w-full border border-gray-300 rounded px-3 py-2 mb-4"
+              value={selectedMergeId || ""}
+              onChange={(e) => setSelectedMergeId(Number(e.target.value))}
+            >
+              <option value="">Select application...</option>
+              {applications.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.company} — {a.job_title || "Unknown"} ({a.email_count} emails)
+                </option>
+              ))}
+            </select>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => { setShowMergeModal(false); setSelectedMergeId(null); }}
+                className="px-4 py-2 text-gray-600 hover:text-gray-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleMerge}
+                disabled={!selectedMergeId || saving}
+                className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {saving ? "Merging..." : "Merge"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

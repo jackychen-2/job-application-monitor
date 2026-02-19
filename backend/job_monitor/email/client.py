@@ -142,19 +142,46 @@ class IMAPClient:
         wait=wait_exponential(multiplier=1, min=1, max=5),
         reraise=True,
     )
-    def fetch_message(self, uid: int) -> Tuple[int, Message | None]:
-        """Fetch a single email by UID and return (uid, parsed Message or None)."""
+    def fetch_message(self, uid: int) -> Tuple[int, Message | None, str | None]:
+        """Fetch a single email by UID and return (uid, parsed Message or None, gmail_thread_id or None).
+        
+        For Gmail IMAP, also fetches X-GM-THRID (thread ID) via IMAP extension.
+        """
         mail = self._ensure_connected()
+        gmail_thread_id: str | None = None
 
-        status, fetched = mail.uid("FETCH", str(uid), "(RFC822)")
+        # Try to fetch with Gmail-specific X-GM-THRID extension
+        # This works on Gmail IMAP; other providers will ignore unknown items
+        try:
+            status, fetched = mail.uid("FETCH", str(uid), "(RFC822 X-GM-THRID)")
+        except Exception:
+            # Fallback for non-Gmail servers
+            status, fetched = mail.uid("FETCH", str(uid), "(RFC822)")
+            
         if status != "OK" or not fetched or fetched[0] is None:
             logger.warning("imap_fetch_failed", uid=uid)
-            return uid, None
+            return uid, None, None
 
-        raw = fetched[0][1]
-        if not raw:
+        # Parse the response - format varies between Gmail and standard IMAP
+        raw_data = fetched[0]
+        raw_email: bytes | None = None
+        
+        if isinstance(raw_data, tuple) and len(raw_data) >= 2:
+            # Standard format: (b'header info', b'email content')
+            raw_email = raw_data[1] if isinstance(raw_data[1], bytes) else None
+            # Try to extract X-GM-THRID from response header
+            header_info = raw_data[0].decode() if isinstance(raw_data[0], bytes) else str(raw_data[0])
+            if "X-GM-THRID" in header_info:
+                import re
+                match = re.search(r'X-GM-THRID\s+(\d+)', header_info)
+                if match:
+                    gmail_thread_id = match.group(1)
+        else:
+            raw_email = raw_data[1] if len(raw_data) > 1 else None
+
+        if not raw_email:
             logger.warning("imap_empty_payload", uid=uid)
-            return uid, None
+            return uid, None, None
 
-        msg = email_lib.message_from_bytes(raw)
-        return uid, msg
+        msg = email_lib.message_from_bytes(raw_email)
+        return uid, msg, gmail_thread_id

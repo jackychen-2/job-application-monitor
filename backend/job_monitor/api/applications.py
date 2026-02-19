@@ -10,13 +10,15 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from job_monitor.database import get_db
-from job_monitor.models import Application, StatusHistory
+from job_monitor.models import Application, ProcessedEmail, StatusHistory
 from job_monitor.schemas import (
     ApplicationCreate,
     ApplicationDetailOut,
     ApplicationListOut,
     ApplicationOut,
     ApplicationUpdate,
+    LinkedEmailOut,
+    MergeApplicationRequest,
     StatusHistoryOut,
 )
 
@@ -57,8 +59,30 @@ def list_applications(
     offset = (page - 1) * page_size
     items = query.offset(offset).limit(page_size).all()
 
+    # Get email counts for each application (for expandable rows)
+    app_ids = [app.id for app in items]
+    email_counts = {}
+    if app_ids:
+        counts = (
+            db.query(ProcessedEmail.application_id, func.count(ProcessedEmail.id))
+            .filter(
+                ProcessedEmail.application_id.in_(app_ids),
+                ProcessedEmail.is_job_related == True,  # noqa: E712
+            )
+            .group_by(ProcessedEmail.application_id)
+            .all()
+        )
+        email_counts = {app_id: count for app_id, count in counts}
+
+    # Build response with email_count
+    items_out = []
+    for app in items:
+        app_dict = ApplicationOut.model_validate(app).model_dump()
+        app_dict["email_count"] = email_counts.get(app.id, 0)
+        items_out.append(ApplicationOut(**app_dict))
+
     return ApplicationListOut(
-        items=[ApplicationOut.model_validate(app) for app in items],
+        items=items_out,
         total=total,
         page=page,
         page_size=page_size,
@@ -70,7 +94,7 @@ def get_application(
     application_id: int,
     db: Session = Depends(get_db),
 ) -> ApplicationDetailOut:
-    """Get a single application with its full status history."""
+    """Get a single application with its full status history and linked emails."""
     app = db.query(Application).filter(Application.id == application_id).first()
     if not app:
         raise HTTPException(status_code=404, detail="Application not found")
@@ -82,10 +106,48 @@ def get_application(
         .all()
     )
 
-    return ApplicationDetailOut(
-        **ApplicationOut.model_validate(app).model_dump(),
-        status_history=[StatusHistoryOut.model_validate(h) for h in history],
+    # Get all emails linked to this application (via thread linking or direct)
+    linked_emails = (
+        db.query(ProcessedEmail)
+        .filter(
+            ProcessedEmail.application_id == application_id,
+            ProcessedEmail.is_job_related == True,  # noqa: E712
+        )
+        .order_by(ProcessedEmail.email_date.desc())
+        .all()
     )
+
+    app_dict = ApplicationOut.model_validate(app).model_dump()
+    app_dict["email_count"] = len(linked_emails)
+    return ApplicationDetailOut(
+        **app_dict,
+        status_history=[StatusHistoryOut.model_validate(h) for h in history],
+        linked_emails=[LinkedEmailOut.model_validate(e) for e in linked_emails],
+    )
+
+
+@router.get("/{application_id}/emails", response_model=list[LinkedEmailOut])
+def get_application_emails(
+    application_id: int,
+    db: Session = Depends(get_db),
+) -> list[LinkedEmailOut]:
+    """Get all linked emails for an application (for expandable row in table)."""
+    # Verify application exists
+    app = db.query(Application).filter(Application.id == application_id).first()
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    linked_emails = (
+        db.query(ProcessedEmail)
+        .filter(
+            ProcessedEmail.application_id == application_id,
+            ProcessedEmail.is_job_related == True,  # noqa: E712
+        )
+        .order_by(ProcessedEmail.email_date.asc())  # Chronological order for timeline
+        .all()
+    )
+
+    return [LinkedEmailOut.model_validate(e) for e in linked_emails]
 
 
 @router.post("", response_model=ApplicationOut, status_code=201)
@@ -179,3 +241,63 @@ def delete_application(
     db.delete(app)
     db.commit()
     logger.info("application_deleted", id=application_id)
+
+
+@router.post("/{application_id}/merge", response_model=ApplicationOut)
+def merge_applications(
+    application_id: int,
+    body: MergeApplicationRequest,
+    db: Session = Depends(get_db),
+) -> ApplicationOut:
+    """Merge source application into target. Moves all emails and history, deletes source."""
+    target = db.query(Application).filter(Application.id == application_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target application not found")
+
+    source = db.query(Application).filter(Application.id == body.source_application_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="Source application not found")
+
+    if target.id == source.id:
+        raise HTTPException(status_code=400, detail="Cannot merge application with itself")
+
+    # Move all processed emails from source to target
+    moved_emails = (
+        db.query(ProcessedEmail)
+        .filter(ProcessedEmail.application_id == source.id)
+        .update({ProcessedEmail.application_id: target.id})
+    )
+
+    # Move status history from source to target
+    moved_history = (
+        db.query(StatusHistory)
+        .filter(StatusHistory.application_id == source.id)
+        .update({StatusHistory.application_id: target.id})
+    )
+
+    # Delete the source application
+    db.delete(source)
+    db.commit()
+    db.refresh(target)
+
+    logger.info(
+        "applications_merged",
+        target_id=target.id,
+        source_id=body.source_application_id,
+        moved_emails=moved_emails,
+        moved_history=moved_history,
+    )
+
+    # Recount emails
+    email_count = (
+        db.query(func.count(ProcessedEmail.id))
+        .filter(
+            ProcessedEmail.application_id == target.id,
+            ProcessedEmail.is_job_related == True,  # noqa: E712
+        )
+        .scalar() or 0
+    )
+
+    app_dict = ApplicationOut.model_validate(target).model_dump()
+    app_dict["email_count"] = email_count
+    return ApplicationOut(**app_dict)

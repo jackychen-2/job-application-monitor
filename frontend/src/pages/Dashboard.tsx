@@ -8,6 +8,7 @@ import ScanButton from "../components/ScanButton";
 import ActivityHeatmap from "../components/ActivityHeatmap";
 import SankeyFlow from "../components/SankeyFlow";
 import CostChart from "../components/CostChart";
+import ReviewQueue from "../components/ReviewQueue";
 
 export default function Dashboard() {
   const [applications, setApplications] = useState<Application[]>([]);
@@ -140,6 +141,9 @@ export default function Dashboard() {
           />
         </div>
       </div>
+
+      {/* Review Queue (shows only if there are pending emails) */}
+      <ReviewQueue onResolved={handleRefresh} />
 
       {/* Filters + Table */}
       <div className="space-y-4">
