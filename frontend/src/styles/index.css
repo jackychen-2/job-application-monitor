@@ -5,3 +5,24 @@
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
+
+/* react-day-picker overrides */
+.rdp {
+  --rdp-accent-color: #4f46e5;
+  --rdp-accent-background-color: #eef2ff;
+  font-size: 0.875rem;
+}
+
+.rdp-dropdowns {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.rdp-dropdowns select {
+  font-size: 0.8rem;
+  padding: 0.15rem 0.3rem;
+  border: 1px solid #d1d5db;
+  border-radius: 0.375rem;
+  background: white;
+  cursor: pointer;
+}

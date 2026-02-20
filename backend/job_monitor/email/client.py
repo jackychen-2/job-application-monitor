@@ -6,7 +6,7 @@ import email as email_lib
 import imaplib
 import socket
 from email.message import Message
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import structlog
 from tenacity import (
@@ -117,6 +117,41 @@ class IMAPClient:
             )
 
         logger.info("imap_uids_found", count=len(uids))
+        return uids
+
+    def fetch_uids_by_date_range(self, since_date: Optional[str] = None, before_date: Optional[str] = None) -> List[int]:
+        """Return UIDs for emails within a date range using IMAP SINCE/BEFORE criteria.
+
+        Args:
+            since_date: Start date in 'YYYY-MM-DD' format (inclusive)
+            before_date: End date in 'YYYY-MM-DD' format (exclusive, IMAP BEFORE is exclusive)
+        """
+        mail = self._ensure_connected()
+        from datetime import datetime, timedelta
+
+        criteria_parts = []
+        if since_date:
+            # IMAP date format: DD-Mon-YYYY
+            dt = datetime.strptime(since_date, "%Y-%m-%d")
+            criteria_parts.append(f'SINCE {dt.strftime("%d-%b-%Y")}')
+        if before_date:
+            dt = datetime.strptime(before_date, "%Y-%m-%d")
+            # Add 1 day because IMAP BEFORE is exclusive and we want inclusive end date
+            dt = dt + timedelta(days=1)
+            criteria_parts.append(f'BEFORE {dt.strftime("%d-%b-%Y")}')
+
+        if not criteria_parts:
+            # Fallback to ALL
+            criteria_parts.append("ALL")
+
+        search_str = " ".join(criteria_parts)
+        # Wrap in parentheses for IMAP
+        status, data = mail.uid("SEARCH", None, f'({search_str})')
+        if status != "OK":
+            raise RuntimeError("IMAP UID SEARCH failed")
+        uid_tokens = (data[0] or b"").split()
+        uids = sorted(int(t) for t in uid_tokens)
+        logger.info("imap_date_range_uids", since=since_date, before=before_date, count=len(uids))
         return uids
 
     def fetch_latest_uids(self, count: int) -> List[int]:

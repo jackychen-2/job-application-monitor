@@ -4,9 +4,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Optional
+from typing import Callable, Optional, TypedDict
 
 import structlog
+
+
+class ProgressInfo(TypedDict):
+    """Progress information passed to the progress callback."""
+    processed: int
+    total: int
+    current_subject: str
+    status: str  # "processing", "completed", "cancelled", "error"
+
+
+# Type alias for progress callback
+ProgressCallback = Callable[[ProgressInfo], None]
+
 from sqlalchemy.orm import Session
 
 from job_monitor.config import AppConfig
@@ -450,6 +463,7 @@ def run_scan(
     config: AppConfig,
     session: Session,
     should_cancel: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> ScanSummary:
     """Execute a full email scan: fetch the latest N emails, extract, persist.
 
@@ -460,6 +474,7 @@ def run_scan(
         config: Application configuration
         session: Database session
         should_cancel: Optional callable that returns True if scan should be cancelled
+        progress_callback: Optional callback for progress updates (for SSE streaming)
     """
     summary = ScanSummary()
 
@@ -486,6 +501,13 @@ def run_scan(
                 logger.warning("scan_cancelled", processed=idx-1, total=len(uids))
                 summary.cancelled = True
                 summary.emails_scanned = idx - 1
+                if progress_callback:
+                    progress_callback({
+                        "processed": idx - 1,
+                        "total": len(uids),
+                        "current_subject": "",
+                        "status": "cancelled",
+                    })
                 break
 
             logger.info("processing_email", index=idx, total=len(uids), uid=uid)
@@ -495,18 +517,44 @@ def run_scan(
                 if msg is None:
                     continue
                 parsed = parse_email_message(msg, gmail_thread_id=gmail_thread_id)
+                
+                # Send progress update before processing
+                if progress_callback:
+                    progress_callback({
+                        "processed": idx,
+                        "total": len(uids),
+                        "current_subject": parsed.subject[:100] if parsed.subject else "",
+                        "status": "processing",
+                    })
+                
                 _process_single_email(session, config, llm_provider, uid, parsed, summary)
                 max_uid = max(max_uid, uid)
             except Exception as exc:
                 error_msg = f"uid={uid}: {exc}"
                 logger.error("email_processing_error", uid=uid, error=str(exc))
                 summary.errors.append(error_msg)
+                if progress_callback:
+                    progress_callback({
+                        "processed": idx,
+                        "total": len(uids),
+                        "current_subject": "",
+                        "status": "error",
+                    })
 
         # Update scan state with the highest UID processed
         if max_uid > 0:
             _update_scan_state(session, config.email_username, config.email_folder, max_uid)
 
     session.commit()
+
+    # Send completion progress
+    if progress_callback and not summary.cancelled:
+        progress_callback({
+            "processed": summary.emails_scanned,
+            "total": summary.emails_scanned,
+            "current_subject": "",
+            "status": "completed",
+        })
 
     if summary.cancelled:
         logger.info(
@@ -531,10 +579,122 @@ def run_scan(
     return summary
 
 
+def run_date_range_scan(
+    config: AppConfig,
+    session: Session,
+    since_date: Optional[str] = None,
+    before_date: Optional[str] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> ScanSummary:
+    """Execute an email scan filtering by date range.
+
+    Args:
+        config: Application configuration
+        session: Database session
+        since_date: Start date in 'YYYY-MM-DD' format (inclusive)
+        before_date: End date in 'YYYY-MM-DD' format (exclusive)
+        should_cancel: Optional callable that returns True if scan should be cancelled
+        progress_callback: Optional callback for progress updates (for SSE streaming)
+    """
+    summary = ScanSummary()
+
+    # Resolve LLM provider
+    llm_provider: Optional[LLMProvider] = None
+    if config.llm_enabled:
+        try:
+            llm_provider = create_llm_provider(config)
+            logger.info("llm_provider_ready", provider=config.llm_provider, model=config.llm_model)
+        except Exception as exc:
+            logger.warning("llm_provider_init_failed", error=str(exc))
+
+    logger.info("date_range_scan_start", since=since_date, before=before_date)
+
+    with IMAPClient(config) as imap:
+        uids = imap.fetch_uids_by_date_range(since_date, before_date)
+        summary.emails_scanned = len(uids)
+
+        max_uid = 0
+        for idx, uid in enumerate(uids, start=1):
+            # Check for cancellation
+            if should_cancel and should_cancel():
+                logger.warning("scan_cancelled", processed=idx-1, total=len(uids))
+                summary.cancelled = True
+                summary.emails_scanned = idx - 1
+                if progress_callback:
+                    progress_callback({
+                        "processed": idx - 1,
+                        "total": len(uids),
+                        "current_subject": "",
+                        "status": "cancelled",
+                    })
+                break
+
+            logger.info("processing_email", index=idx, total=len(uids), uid=uid)
+
+            try:
+                _, msg, gmail_thread_id = imap.fetch_message(uid)
+                if msg is None:
+                    continue
+                parsed = parse_email_message(msg, gmail_thread_id=gmail_thread_id)
+
+                # Send progress update before processing
+                if progress_callback:
+                    progress_callback({
+                        "processed": idx,
+                        "total": len(uids),
+                        "current_subject": parsed.subject[:100] if parsed.subject else "",
+                        "status": "processing",
+                    })
+
+                _process_single_email(session, config, llm_provider, uid, parsed, summary)
+                max_uid = max(max_uid, uid)
+            except Exception as exc:
+                error_msg = f"uid={uid}: {exc}"
+                logger.error("email_processing_error", uid=uid, error=str(exc))
+                summary.errors.append(error_msg)
+                if progress_callback:
+                    progress_callback({
+                        "processed": idx,
+                        "total": len(uids),
+                        "current_subject": "",
+                        "status": "error",
+                    })
+
+        # Update scan state with the highest UID processed
+        if max_uid > 0:
+            _update_scan_state(session, config.email_username, config.email_folder, max_uid)
+
+    session.commit()
+
+    # Send completion progress
+    if progress_callback and not summary.cancelled:
+        progress_callback({
+            "processed": summary.emails_scanned,
+            "total": summary.emails_scanned,
+            "current_subject": "",
+            "status": "completed",
+        })
+
+    logger.info(
+        "date_range_scan_complete",
+        since=since_date,
+        before=before_date,
+        scanned=summary.emails_scanned,
+        matched=summary.emails_matched,
+        created=summary.applications_created,
+        updated=summary.applications_updated,
+        cost=f"${summary.total_estimated_cost:.6f}",
+        errors=len(summary.errors),
+    )
+    return summary
+
+
 def run_incremental_scan(
     config: AppConfig,
     session: Session,
     should_cancel: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> ScanSummary:
     """Execute an incremental scan: only process emails after the last scanned UID.
     
@@ -544,6 +704,7 @@ def run_incremental_scan(
         config: Application configuration
         session: Database session
         should_cancel: Optional callable that returns True if scan should be cancelled
+        progress_callback: Optional callback for progress updates (for SSE streaming)
     """
     summary = ScanSummary()
 
@@ -566,6 +727,13 @@ def run_incremental_scan(
         
         if not uids:
             logger.info("incremental_scan_no_new_emails", last_uid=last_uid)
+            if progress_callback:
+                progress_callback({
+                    "processed": 0,
+                    "total": 0,
+                    "current_subject": "",
+                    "status": "completed",
+                })
             return summary
 
         max_uid = last_uid
@@ -574,6 +742,13 @@ def run_incremental_scan(
                 logger.warning("scan_cancelled", processed=idx-1, total=len(uids))
                 summary.cancelled = True
                 summary.emails_scanned = idx - 1
+                if progress_callback:
+                    progress_callback({
+                        "processed": idx - 1,
+                        "total": len(uids),
+                        "current_subject": "",
+                        "status": "cancelled",
+                    })
                 break
 
             logger.info("processing_email", index=idx, total=len(uids), uid=uid)
@@ -583,18 +758,44 @@ def run_incremental_scan(
                 if msg is None:
                     continue
                 parsed = parse_email_message(msg, gmail_thread_id=gmail_thread_id)
+                
+                # Send progress update before processing
+                if progress_callback:
+                    progress_callback({
+                        "processed": idx,
+                        "total": len(uids),
+                        "current_subject": parsed.subject[:100] if parsed.subject else "",
+                        "status": "processing",
+                    })
+                
                 _process_single_email(session, config, llm_provider, uid, parsed, summary)
                 max_uid = max(max_uid, uid)
             except Exception as exc:
                 error_msg = f"uid={uid}: {exc}"
                 logger.error("email_processing_error", uid=uid, error=str(exc))
                 summary.errors.append(error_msg)
+                if progress_callback:
+                    progress_callback({
+                        "processed": idx,
+                        "total": len(uids),
+                        "current_subject": "",
+                        "status": "error",
+                    })
 
         # Update scan state with the highest UID processed
         if max_uid > last_uid:
             _update_scan_state(session, config.email_username, config.email_folder, max_uid)
 
     session.commit()
+
+    # Send completion progress
+    if progress_callback and not summary.cancelled:
+        progress_callback({
+            "processed": summary.emails_scanned,
+            "total": summary.emails_scanned,
+            "current_subject": "",
+            "status": "completed",
+        })
 
     logger.info(
         "incremental_scan_complete",

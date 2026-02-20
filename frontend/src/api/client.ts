@@ -138,6 +138,36 @@ export async function cancelScan(): Promise<{ message: string }> {
   return request<{ message: string }>("/scan/cancel", { method: "POST" });
 }
 
+// ── SSE Scan Stream ──────────────────────────────────────
+
+export function getScanStreamUrl(options: {
+  max_emails?: number;
+  incremental?: boolean;
+  since_date?: string;  // YYYY-MM-DD
+  before_date?: string; // YYYY-MM-DD
+}): string {
+  const params = new URLSearchParams();
+  if (options.max_emails) params.set('max_emails', String(options.max_emails));
+  if (options.incremental) params.set('incremental', 'true');
+  if (options.since_date) params.set('since_date', options.since_date);
+  if (options.before_date) params.set('before_date', options.before_date);
+  return `${BASE}/scan/stream?${params.toString()}`;
+}
+
+export async function cancelScanStream(): Promise<{ message: string }> {
+  return request<{ message: string }>("/scan/stream/cancel", { method: "POST" });
+}
+
+export async function getScanProgress(): Promise<{
+  type: string;
+  processed: number;
+  total: number;
+  current_subject: string;
+  status: string;
+}> {
+  return request("/scan/progress");
+}
+
 // ── Stats ────────────────────────────────────────────────
 
 export async function getStats(): Promise<Stats> {

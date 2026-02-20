@@ -9,11 +9,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tanstack/react-table": "^8.11.0",
+    "date-fns": "^4.1.0",
     "react": "^18.3.1",
+    "react-day-picker": "^9.13.2",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.22.0",
-    "recharts": "^2.12.0",
-    "@tanstack/react-table": "^8.11.0"
+    "recharts": "^2.12.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.1",
