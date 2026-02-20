@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from job_monitor.config import AppConfig, get_config
 from job_monitor.database import get_db, get_session_factory
-from job_monitor.extraction.pipeline import ScanSummary, run_scan
+from job_monitor.extraction.pipeline import ScanSummary, run_scan, run_incremental_scan
 from job_monitor.models import ScanState
 from job_monitor.schemas import ScanResultOut, ScanStateOut
 
@@ -31,7 +31,7 @@ def _should_cancel() -> bool:
     return _cancel_requested
 
 
-def _run_scan_background(config: AppConfig, max_emails: int) -> None:
+def _run_scan_background(config: AppConfig, max_emails: int, incremental: bool = False) -> None:
     """Run scan in background thread."""
     global _last_result, _cancel_requested, _scan_running
 
@@ -44,8 +44,12 @@ def _run_scan_background(config: AppConfig, max_emails: int) -> None:
         
         try:
             config = config.model_copy(update={"max_scan_emails": max_emails})
-            logger.info("scan_triggered_via_api", max_emails=max_emails)
-            summary: ScanSummary = run_scan(config, session, should_cancel=_should_cancel)
+            if incremental:
+                logger.info("incremental_scan_triggered_via_api")
+                summary: ScanSummary = run_incremental_scan(config, session, should_cancel=_should_cancel)
+            else:
+                logger.info("scan_triggered_via_api", max_emails=max_emails)
+                summary: ScanSummary = run_scan(config, session, should_cancel=_should_cancel)
 
             result = ScanResultOut(
                 emails_scanned=summary.emails_scanned,
@@ -82,12 +86,14 @@ def _run_scan_background(config: AppConfig, max_emails: int) -> None:
 @router.post("", response_model=dict)
 def trigger_scan(
     max_emails: int = 100,
+    incremental: bool = False,
     config: AppConfig = Depends(get_config),
 ) -> dict:
-    """Trigger an email scan in the background. Always scans the latest N emails.
+    """Trigger an email scan in the background.
 
     Args:
         max_emails: Number of latest emails to scan (default: 100).
+        incremental: If True, only scan emails after the last scanned UID.
     
     Returns:
         A dict with message indicating scan started.
@@ -100,12 +106,13 @@ def trigger_scan(
     # Start background thread
     _scan_thread = threading.Thread(
         target=_run_scan_background,
-        args=(config, max_emails),
+        args=(config, max_emails, incremental),
         daemon=True,
     )
     _scan_thread.start()
     
-    return {"message": "Scan started", "max_emails": max_emails}
+    mode = "incremental (new emails only)" if incremental else f"full (latest {max_emails})"
+    return {"message": f"Scan started ({mode})", "max_emails": max_emails, "incremental": incremental}
 
 
 @router.get("/status", response_model=ScanStateOut | None)

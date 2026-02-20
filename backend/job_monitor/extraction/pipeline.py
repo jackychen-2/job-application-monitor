@@ -83,15 +83,19 @@ def _get_or_create_application(
     """Find an existing application or create a new one.
 
     Returns (application, created) where created=True for new rows.
-    Deduplicates by company + job_title (treats empty titles as equivalent).
+    Deduplicates by normalized_company + job_title (treats empty titles as equivalent).
+    Updates existing record if data has changed.
     """
-    # Try to find existing (company + job_title match)
+    # Use normalized_company for matching to handle variations like "Qventus, Inc" vs "Qventus"
+    normalized = normalize_company(company)
+    
+    # Try to find existing (normalized_company + job_title match)
     # Handle NULL/empty job_title: treat all empty titles for same company as one
     if job_title:
         existing = (
             session.query(Application)
             .filter(
-                Application.company == company,
+                Application.normalized_company == normalized,
                 Application.job_title == job_title,
             )
             .first()
@@ -100,12 +104,25 @@ def _get_or_create_application(
         existing = (
             session.query(Application)
             .filter(
-                Application.company == company,
+                Application.normalized_company == normalized,
                 (Application.job_title == None) | (Application.job_title == ""),  # noqa: E711
             )
             .first()
         )
     if existing:
+        # Update fields - merge old into most recent
+        if existing.company != company:
+            existing.company = company
+            existing.normalized_company = normalized
+        if job_title and existing.job_title != job_title:
+            existing.job_title = job_title
+        # Always update to most recent email info
+        if email_date and (existing.email_date is None or email_date > existing.email_date):
+            existing.email_date = email_date
+            existing.email_subject = email_subject
+            existing.email_sender = email_sender
+        existing.updated_at = datetime.utcnow()
+        logger.info("application_merged", app_id=existing.id, company=company, job_title=job_title)
         return existing, False
 
     app = Application(
@@ -288,7 +305,12 @@ def _process_single_email(
     if llm_result is not None and llm_result.is_job_application:
         company = llm_result.company or extract_company(subject, sender)
         job_title = _validate_job_title(llm_result.job_title) or _validate_job_title(extract_job_title(subject, body))
-        status = llm_result.status or extract_status(subject, body)
+        # 如果 LLM 返回空或 "Unknown"，使用规则提取
+        llm_status = llm_result.status
+        if llm_status and llm_status.lower() != "unknown":
+            status = llm_status
+        else:
+            status = extract_status(subject, body)
     else:
         company = extract_company(subject, sender)
         job_title = _validate_job_title(extract_job_title(subject, body))
@@ -457,6 +479,7 @@ def run_scan(
         uids = imap.fetch_latest_uids(scan_count)
         summary.emails_scanned = len(uids)
 
+        max_uid = 0
         for idx, uid in enumerate(uids, start=1):
             # Check for cancellation
             if should_cancel and should_cancel():
@@ -473,10 +496,15 @@ def run_scan(
                     continue
                 parsed = parse_email_message(msg, gmail_thread_id=gmail_thread_id)
                 _process_single_email(session, config, llm_provider, uid, parsed, summary)
+                max_uid = max(max_uid, uid)
             except Exception as exc:
                 error_msg = f"uid={uid}: {exc}"
                 logger.error("email_processing_error", uid=uid, error=str(exc))
                 summary.errors.append(error_msg)
+
+        # Update scan state with the highest UID processed
+        if max_uid > 0:
+            _update_scan_state(session, config.email_username, config.email_folder, max_uid)
 
     session.commit()
 
@@ -500,4 +528,81 @@ def run_scan(
             cost=f"${summary.total_estimated_cost:.6f}",
             errors=len(summary.errors),
         )
+    return summary
+
+
+def run_incremental_scan(
+    config: AppConfig,
+    session: Session,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> ScanSummary:
+    """Execute an incremental scan: only process emails after the last scanned UID.
+    
+    This is more efficient than run_scan as it only processes new emails.
+    
+    Args:
+        config: Application configuration
+        session: Database session
+        should_cancel: Optional callable that returns True if scan should be cancelled
+    """
+    summary = ScanSummary()
+
+    # Get the last scanned UID
+    last_uid = _get_scan_state(session, config.email_username, config.email_folder)
+    logger.info("incremental_scan_starting", last_uid=last_uid)
+
+    # Resolve LLM provider
+    llm_provider: Optional[LLMProvider] = None
+    if config.llm_enabled:
+        try:
+            llm_provider = create_llm_provider(config)
+            logger.info("llm_provider_ready", provider=config.llm_provider, model=config.llm_model)
+        except Exception as exc:
+            logger.warning("llm_provider_init_failed", error=str(exc))
+
+    with IMAPClient(config) as imap:
+        uids = imap.fetch_uids_after(last_uid)
+        summary.emails_scanned = len(uids)
+        
+        if not uids:
+            logger.info("incremental_scan_no_new_emails", last_uid=last_uid)
+            return summary
+
+        max_uid = last_uid
+        for idx, uid in enumerate(uids, start=1):
+            if should_cancel and should_cancel():
+                logger.warning("scan_cancelled", processed=idx-1, total=len(uids))
+                summary.cancelled = True
+                summary.emails_scanned = idx - 1
+                break
+
+            logger.info("processing_email", index=idx, total=len(uids), uid=uid)
+
+            try:
+                _, msg, gmail_thread_id = imap.fetch_message(uid)
+                if msg is None:
+                    continue
+                parsed = parse_email_message(msg, gmail_thread_id=gmail_thread_id)
+                _process_single_email(session, config, llm_provider, uid, parsed, summary)
+                max_uid = max(max_uid, uid)
+            except Exception as exc:
+                error_msg = f"uid={uid}: {exc}"
+                logger.error("email_processing_error", uid=uid, error=str(exc))
+                summary.errors.append(error_msg)
+
+        # Update scan state with the highest UID processed
+        if max_uid > last_uid:
+            _update_scan_state(session, config.email_username, config.email_folder, max_uid)
+
+    session.commit()
+
+    logger.info(
+        "incremental_scan_complete",
+        scanned=summary.emails_scanned,
+        matched=summary.emails_matched,
+        created=summary.applications_created,
+        updated=summary.applications_updated,
+        cost=f"${summary.total_estimated_cost:.6f}",
+        errors=len(summary.errors),
+    )
     return summary

@@ -14,7 +14,6 @@ from fastapi.staticfiles import StaticFiles
 
 from job_monitor.api.applications import router as applications_router
 from job_monitor.api.emails import router as emails_router
-from job_monitor.api.export import router as export_router
 from job_monitor.api.scan import router as scan_router
 from job_monitor.api.stats import router as stats_router
 from job_monitor.config import AppConfig, get_config
@@ -76,7 +75,6 @@ def create_app() -> FastAPI:
     app.include_router(emails_router)
     app.include_router(scan_router)
     app.include_router(stats_router)
-    app.include_router(export_router)
 
     @app.get("/api/health", tags=["health"])
     def health_check() -> dict[str, str]:

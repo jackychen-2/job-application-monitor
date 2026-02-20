@@ -71,11 +71,17 @@ class OpenAIProvider:
         "job alert digests ('we found jobs for you'), promotional emails, unsubscribe confirmations, "
         "general company newsletters even if from a careers/talent team. "
         "\n\n"
-        "Rules: company should be the real hiring company, not ATS vendor. "
-        "job_title should be the specific role applied for. If you cannot determine the job title, "
-        "use empty string (do NOT guess or use generic text). "
-        "status must be one of: 已申请, 面试, 拒绝, Offer, Unknown. "
-        "If uncertain, set confidence <= 0.5."
+        "Rules:\n"
+        "- company: the real hiring company name, not ATS vendor.\n"
+        "- job_title: a specific role name (e.g., 'Software Engineer', 'Product Manager'). "
+        "Do NOT use sentences or phrases from email body. Return empty string if not found.\n"
+        "- status: infer from BOTH email subject AND body. Must be one of:\n"
+        "  * 'Offer' - offer letter, congratulations\n"
+        "  * '面试' - interview, assessment, coding challenge\n"
+        "  * '拒绝' - rejection ('unfortunately', 'regret', 'not moving forward')\n"
+        "  * '已申请' - application received/confirmed\n"
+        "  * 'Unknown' - only if truly unclear\n"
+        "- confidence: <= 0.5 if uncertain."
     )
 
     def extract_fields(

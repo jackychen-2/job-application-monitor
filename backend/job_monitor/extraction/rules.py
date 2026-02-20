@@ -69,7 +69,7 @@ def extract_company_from_subject(subject: str) -> str:
         if matched:
             company = _clean_text(matched.group(1))
             company = re.sub(
-                r"\b(team|careers?|jobs?)\b$", "", company, flags=re.IGNORECASE
+                r"\b(team|careers?|jobs?|hiring|recruiting)\b$", "", company, flags=re.IGNORECASE
             ).strip()
             company = re.sub(
                 r"\b(application|applied|position|role)\b.*$",

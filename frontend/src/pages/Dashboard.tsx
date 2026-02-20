@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { listApplications, getStats, getExportUrl } from "../api/client";
+import { listApplications, getStats } from "../api/client";
 import type { Application, ScanResult, Stats } from "../types";
 import StatsCards from "../components/StatsCards";
 import FilterBar from "../components/FilterBar";
@@ -88,12 +88,6 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-3">
           <ScanButton onScanComplete={handleScanComplete} />
-          <button
-            onClick={() => window.open(getExportUrl("csv"), "_blank")}
-            className="inline-flex items-center gap-1 rounded-md bg-white border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50"
-          >
-            📥 Export CSV
-          </button>
         </div>
       </div>
 

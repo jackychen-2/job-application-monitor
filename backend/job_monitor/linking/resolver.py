@@ -68,10 +68,10 @@ def normalize_company(name: str | None) -> str | None:
 
     # Remove legal suffixes
     suffixes = [
-        ", inc.", " inc.", " inc",
+        ", inc.", " inc.", ", inc", " inc",
         ", llc", " llc",
-        ", corp.", " corp.", " corp",
-        ", ltd.", " ltd.", " ltd",
+        ", corp.", " corp.", ", corp", " corp",
+        ", ltd.", " ltd.", ", ltd", " ltd",
         ", gmbh", " gmbh",
         " limited", ", limited",
         " co.", ", co.",

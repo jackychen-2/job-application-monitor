@@ -143,9 +143,3 @@ export async function cancelScan(): Promise<{ message: string }> {
 export async function getStats(): Promise<Stats> {
   return request<Stats>("/stats");
 }
-
-// ── Export ────────────────────────────────────────────────
-
-export function getExportUrl(format: "csv" | "excel"): string {
-  return `${BASE}/export?format=${format}`;
-}

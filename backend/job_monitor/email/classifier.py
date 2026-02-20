@@ -60,6 +60,7 @@ NEGATIVE_KEYWORDS: list[str] = [
     "grow your career",
     "empower your",
     "we found",
+    "wotc",
     "推荐职位",
     "验证码",
     "密码重置",
