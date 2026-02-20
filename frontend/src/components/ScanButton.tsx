@@ -189,10 +189,40 @@ export default function ScanButton({ onScanComplete }: Props) {
       es.close();
       eventSourceRef.current = null;
       if (scanInProgressRef.current) {
-        scanInProgressRef.current = false;
-        setScanning(false);
-        setProgress(null);
-        setError('Connection lost during scan');
+        // SSE connection dropped but scan may still be running on the backend.
+        // Fall back to polling for completion instead of giving up.
+        const pollInterval = setInterval(async () => {
+          try {
+            const prog = await getScanProgress();
+            if (prog.type === 'idle') {
+              // Scan finished while we were polling
+              clearInterval(pollInterval);
+              scanInProgressRef.current = false;
+              setScanning(false);
+              setProgress(null);
+              // Fetch final result and notify parent
+              try {
+                const result = await getLastScanResult();
+                if (result) onScanComplete(result);
+              } catch { /* ignore */ }
+              return;
+            }
+            if (prog.type === 'progress') {
+              setProgress({
+                processed: prog.processed,
+                total: prog.total,
+                currentSubject: prog.current_subject || '',
+              });
+            }
+          } catch {
+            // API error — stop polling and show error
+            clearInterval(pollInterval);
+            scanInProgressRef.current = false;
+            setScanning(false);
+            setProgress(null);
+            setError('Connection lost during scan');
+          }
+        }, 1000);
       }
     };
   }, [onScanComplete]);

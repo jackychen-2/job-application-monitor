@@ -205,7 +205,7 @@ def _run_scan_with_queue(
     before_date: Optional[str] = None,
 ) -> None:
     """Run scan and push progress updates to queue."""
-    global _sse_cancel_requested, _sse_scan_running, _current_progress
+    global _sse_cancel_requested, _sse_scan_running, _current_progress, _last_result
     
     def progress_callback(info: ProgressInfo) -> None:
         """Push progress info to the queue and store for polling."""
@@ -250,6 +250,18 @@ def _run_scan_with_queue(
                 )
             
             # Send complete event with full result
+            scan_result = ScanResultOut(
+                emails_scanned=summary.emails_scanned,
+                emails_matched=summary.emails_matched,
+                applications_created=summary.applications_created,
+                applications_updated=summary.applications_updated,
+                total_prompt_tokens=summary.total_prompt_tokens,
+                total_completion_tokens=summary.total_completion_tokens,
+                total_estimated_cost=summary.total_estimated_cost,
+                errors=summary.errors,
+                cancelled=summary.cancelled,
+            )
+            _last_result = scan_result
             result = {
                 "type": "complete",
                 "result": {
