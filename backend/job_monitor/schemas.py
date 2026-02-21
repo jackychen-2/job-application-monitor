@@ -121,6 +121,7 @@ class ScanResultOut(BaseModel):
     emails_matched: int
     applications_created: int
     applications_updated: int
+    applications_deleted: int = 0
     total_prompt_tokens: int
     total_completion_tokens: int
     total_estimated_cost: float

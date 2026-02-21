@@ -106,6 +106,7 @@ export default function Dashboard() {
             <>
               Scan complete: {lastScan.emails_scanned} emails scanned, {lastScan.emails_matched} matched,{" "}
               {lastScan.applications_created} new, {lastScan.applications_updated} updated
+              {lastScan.applications_deleted > 0 && `, ${lastScan.applications_deleted} deleted`}
               {" · "}LLM cost: <span className="font-semibold">${lastScan.total_estimated_cost.toFixed(4)}</span>
               {lastScan.errors.length > 0 && ` · ${lastScan.errors.length} error(s)`}
             </>

@@ -78,6 +78,7 @@ export interface ScanResult {
   emails_matched: number;
   applications_created: number;
   applications_updated: number;
+  applications_deleted: number;
   total_prompt_tokens: number;
   total_completion_tokens: number;
   total_estimated_cost: number;

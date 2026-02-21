@@ -72,6 +72,7 @@ class ScanSummary:
     emails_matched: int = 0
     applications_created: int = 0
     applications_updated: int = 0
+    applications_deleted: int = 0
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     total_estimated_cost: float = 0.0
@@ -187,6 +188,54 @@ def _update_status_if_changed(
     return True
 
 
+def _cleanup_orphaned_app(session: Session, app_id: Optional[int], exclude_uid: int, summary: Optional[ScanSummary] = None) -> None:
+    """删除孤立的Application（没有其他邮件引用时）。
+
+    当邮件被重新分类（非求职）或关联到不同Application时调用。
+    - 检查是否有其他 processed_email 记录引用该 application_id
+    - 如果没有其他引用，删除 Application 和关联的 StatusHistory
+    - 如果有其他引用，保留（其他邮件还需要它）
+    """
+    if app_id is None:
+        return
+    other_refs = (
+        session.query(ProcessedEmail)
+        .filter(
+            ProcessedEmail.application_id == app_id,
+            ProcessedEmail.uid != exclude_uid,
+        )
+        .count()
+    )
+    if other_refs == 0:
+        app = session.query(Application).get(app_id)
+        if app:
+            session.query(StatusHistory).filter(
+                StatusHistory.application_id == app_id
+            ).delete()
+            session.delete(app)
+            if summary is not None:
+                summary.applications_deleted += 1
+            logger.info("application_deleted_orphaned", app_id=app_id, uid=exclude_uid,
+                        company=app.company, job_title=app.job_title)
+    else:
+        logger.info("application_kept_has_other_refs", app_id=app_id, uid=exclude_uid,
+                     other_refs=other_refs)
+
+
+def _get_previous_app_id(session: Session, uid: int, config: AppConfig) -> Optional[int]:
+    """获取该邮件UID之前关联的application_id（用于重新扫描时的清理）。"""
+    existing = (
+        session.query(ProcessedEmail)
+        .filter(
+            ProcessedEmail.uid == uid,
+            ProcessedEmail.email_account == config.email_username,
+            ProcessedEmail.email_folder == config.email_folder,
+        )
+        .first()
+    )
+    return existing.application_id if existing else None
+
+
 def _is_already_processed(session: Session, uid: int, account: str, folder: str) -> bool:
     """Check if this email UID has already been processed."""
     return (
@@ -244,15 +293,21 @@ def _process_single_email(
     summary: ScanSummary,
 ) -> None:
     """Process one parsed email: classify, extract, persist.
-    
+
+    重新扫描时会更新数据库中的所有相关数据：
+    - 如果邮件从"求职相关"变为"非求职相关"，删除孤立的旧Application
+    - 如果邮件仍是求职相关但提取内容变了（公司/职位/状态），更新Application
+    - 如果邮件关联到不同的Application，清理旧的孤立Application
+
     Pipeline order:
-    0. Idempotency check (skip if gmail_message_id already processed)
+    0. 记住之前的app关联（用于清理）
     1. Thread linking (attempt to link via gmail_thread_id BEFORE LLM)
-    2. LLM classification + extraction (if needed)
-    3. Determine if job-related
+    2. LLM classification + extraction
+    3. Determine if job-related (如果非求职，清理旧app并返回)
     4. Extract fields
-    5. Persist application
-    6. Record processed email
+    5. Persist application (更新所有字段)
+    6. 清理孤立的旧Application（如果关联变了）
+    7. Record processed email
     """
     subject = parsed.subject
     sender = parsed.sender
@@ -261,11 +316,8 @@ def _process_single_email(
     gmail_message_id = parsed.message_id
     gmail_thread_id = parsed.gmail_thread_id
 
-    # ── Step 0: Idempotency check DISABLED ────────────────
-    # Note: Idempotency disabled to allow rescanning for testing new linking logic
-    # if gmail_message_id and is_message_already_processed(session, gmail_message_id):
-    #     logger.info("email_skipped_duplicate", uid=uid, gmail_message_id=gmail_message_id[:50] if gmail_message_id else None)
-    #     return  # Already processed, skip entirely
+    # ── Step 0: 记住之前的app关联 ─────────────────────────
+    previous_app_id = _get_previous_app_id(session, uid, config)
 
     # ── Step 1: Thread linking (BEFORE expensive LLM) ─────
     link: LinkResult = resolve_by_thread_id(session, gmail_thread_id)
@@ -292,23 +344,34 @@ def _process_single_email(
             llm_result = None
 
     # ── Step 3: Determine if job-related ──────────────────
-    # If already linked via thread, we know it's job-related
-    if linked_app_id is not None:
-        logger.info("email_job_related_via_thread", uid=uid, application_id=linked_app_id)
-    elif llm_result is not None:
+    # LLM classification takes PRIORITY over thread linking.
+    # This prevents circular re-linking: if a previously misclassified email
+    # was stored with a thread/company link, the LLM can correct it on rescan.
+    if llm_result is not None:
         if not llm_result.is_job_application:
-            logger.info("email_skipped_llm", uid=uid)
+            logger.info("email_skipped_llm", uid=uid,
+                        overrode_thread_link=linked_app_id is not None)
+            # 清理旧Application（LLM判断非求职，覆盖之前的thread/company链接）
+            _cleanup_orphaned_app(session, previous_app_id, exclude_uid=uid, summary=summary)
             _record_processed(
                 session, uid, config, parsed, is_job=False, app_id=None, llm_used=True,
                 llm_result=llm_result,
             )
             return
+        # LLM says IS job-related — thread link still used if available
+        if linked_app_id is not None:
+            logger.info("email_job_related_via_thread", uid=uid, application_id=linked_app_id)
+    elif linked_app_id is not None:
+        # No LLM result but thread link found — trust thread link
+        logger.info("email_job_related_via_thread_no_llm", uid=uid, application_id=linked_app_id)
     else:
         if not is_job_related(subject, sender):
             if llm_used:
                 logger.info("email_skipped_rules_fallback", uid=uid)
             else:
                 logger.info("email_skipped_rules", uid=uid)
+            # 清理旧Application（如果之前是求职相关但现在不是了）
+            _cleanup_orphaned_app(session, previous_app_id, exclude_uid=uid, summary=summary)
             _record_processed(
                 session, uid, config, parsed, is_job=False, app_id=None, llm_used=False,
             )
@@ -342,8 +405,7 @@ def _process_single_email(
         elif company_link.needs_review:
             needs_review = True
 
-    # ── Step 5: Persist application ───────────────────────
-    # If thread linking found an existing application, use it directly
+    # ── Step 5: Persist application (更新所有字段) ─────────
     if linked_app_id is not None:
         app = session.query(Application).get(linked_app_id)
         if app is None:
@@ -363,10 +425,30 @@ def _process_single_email(
                 logger.info("created_new_application", uid=uid, company=company, title=job_title)
         else:
             created = False
-            # Update status if changed
-            updated = _update_status_if_changed(session, app, status, change_source=f"email_uid_{uid}")
-            if updated:
+            # 更新所有可能变化的字段（重新扫描时内容可能不同）
+            changed = False
+            if company and app.company != company:
+                app.company = company
+                app.normalized_company = normalize_company(company)
+                changed = True
+            if job_title and app.job_title != job_title:
+                app.job_title = job_title
+                changed = True
+            if email_date:
+                # Normalize both datetimes to naive UTC for comparison
+                cmp_email_date = email_date.replace(tzinfo=None) if email_date.tzinfo else email_date
+                cmp_app_date = app.email_date.replace(tzinfo=None) if app.email_date and app.email_date.tzinfo else app.email_date
+                if cmp_app_date is None or cmp_email_date > cmp_app_date:
+                    app.email_date = email_date
+                    app.email_subject = subject
+                    app.email_sender = sender
+                    changed = True
+            if _update_status_if_changed(session, app, status, change_source=f"email_uid_{uid}"):
                 summary.applications_updated += 1
+                changed = True
+            if changed:
+                app.updated_at = datetime.utcnow()
+                logger.info("application_updated_rescan", app_id=app.id, company=company, title=job_title)
     else:
         app, created = _get_or_create_application(
             session,
@@ -385,9 +467,14 @@ def _process_single_email(
             if updated:
                 summary.applications_updated += 1
 
+    # ── Step 6: 清理孤立的旧Application ───────────────────
+    # 如果这封邮件之前关联到不同的app，清理旧的（如果没有其他邮件引用）
+    if previous_app_id is not None and previous_app_id != app.id:
+        _cleanup_orphaned_app(session, previous_app_id, exclude_uid=uid, summary=summary)
+
     summary.emails_matched += 1
 
-    # ── Step 6: Record processed email ────────────────────
+    # ── Step 7: Record processed email ────────────────────
     _record_processed(
         session, uid, config, parsed,
         is_job=True, app_id=app.id, llm_used=llm_used, llm_result=llm_result,
@@ -661,9 +748,10 @@ def run_date_range_scan(
                         "status": "error",
                     })
 
-        # Update scan state with the highest UID processed
-        if max_uid > 0:
-            _update_scan_state(session, config.email_username, config.email_folder, max_uid)
+        # NOTE: Date-range scans do NOT update last_uid (the incremental scan cursor).
+        # This is intentional — scanning a historical date range (e.g. Aug 2025) should
+        # not regress the cursor used by "Scan New" for incremental scanning.
+        # Only run_scan() and run_incremental_scan() update the cursor.
 
     session.commit()
 
@@ -710,7 +798,7 @@ def run_incremental_scan(
 
     # Get the last scanned UID
     last_uid = _get_scan_state(session, config.email_username, config.email_folder)
-    logger.info("incremental_scan_starting", last_uid=last_uid)
+    logger.info("incremental_scan_starting", last_uid=last_uid, max_scan_emails=config.max_scan_emails)
 
     # Resolve LLM provider
     llm_provider: Optional[LLMProvider] = None
