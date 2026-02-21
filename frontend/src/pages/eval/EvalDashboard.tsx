@@ -1,7 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { getCacheStats, listEvalRuns, triggerEvalRun, downloadEmails } from "../../api/eval";
+import { getCacheStats, listEvalRuns, streamEvalRun, cancelEvalRun, downloadEmails } from "../../api/eval";
 import type { CacheStats, EvalRun, CacheDownloadResult } from "../../types/eval";
+
+interface EvalLogEntry {
+  message: string;
+  level: "info" | "error" | "success";
+}
 
 export default function EvalDashboard() {
   const [stats, setStats] = useState<CacheStats | null>(null);
@@ -13,12 +18,31 @@ export default function EvalDashboard() {
   const [beforeDate, setBeforeDate] = useState("");
   const [maxCount, setMaxCount] = useState(500);
 
+  // Eval progress state
+  const [evalLogs, setEvalLogs] = useState<EvalLogEntry[]>([]);
+  const [evalProgress, setEvalProgress] = useState(0);
+  const [evalTotal, setEvalTotal] = useState(0);
+  const [cancelRequested, setCancelRequested] = useState(false);
+
+  const esRef = useRef<EventSource | null>(null);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
+
   const refresh = () => {
     getCacheStats().then(setStats);
     listEvalRuns().then(setRuns);
   };
 
   useEffect(() => { refresh(); }, []);
+
+  // Auto-scroll log panel to bottom on new entries
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [evalLogs]);
+
+  // Cleanup SSE on unmount
+  useEffect(() => {
+    return () => { esRef.current?.close(); };
+  }, []);
 
   const handleDownload = async () => {
     setDownloading(true);
@@ -36,17 +60,78 @@ export default function EvalDashboard() {
     }
   };
 
-  const handleRunEval = async () => {
+  const handleRunEval = () => {
+    // Reset state
+    setEvalLogs([]);
+    setEvalProgress(0);
+    setEvalTotal(0);
+    setCancelRequested(false);
     setRunningEval(true);
-    try {
-      await triggerEvalRun();
-      refresh();
-    } finally {
+
+    const es = streamEvalRun();
+    esRef.current = es;
+
+    es.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "log") {
+          setEvalLogs(prev => [...prev, { message: msg.message, level: "info" }]);
+          if (msg.total > 0) {
+            setEvalProgress(msg.current);
+            setEvalTotal(msg.total);
+          }
+        } else if (msg.type === "done") {
+          setEvalLogs(prev => [
+            ...prev,
+            { message: `✓ Run #${msg.run_id} saved successfully.`, level: "success" },
+          ]);
+          setRunningEval(false);
+          es.close();
+          esRef.current = null;
+          refresh();
+        } else if (msg.type === "cancelled") {
+          setEvalLogs(prev => [...prev, { message: "⚠ Evaluation cancelled.", level: "error" }]);
+          setRunningEval(false);
+          es.close();
+          esRef.current = null;
+          refresh();
+        } else if (msg.type === "error") {
+          setEvalLogs(prev => [
+            ...prev,
+            { message: `✗ Error: ${msg.message}`, level: "error" },
+          ]);
+          setRunningEval(false);
+          es.close();
+          esRef.current = null;
+        }
+      } catch {
+        // ignore parse errors on keep-alive comments
+      }
+    };
+
+    es.onerror = () => {
+      setEvalLogs(prev => [
+        ...prev,
+        { message: "Connection lost — evaluation may still be running on the server.", level: "error" },
+      ]);
       setRunningEval(false);
+      es.close();
+      esRef.current = null;
+    };
+  };
+
+  const handleCancelEval = async () => {
+    setCancelRequested(true);
+    setEvalLogs(prev => [...prev, { message: "Cancellation requested — finishing current email…", level: "info" }]);
+    try {
+      await cancelEvalRun();
+    } catch {
+      // best-effort
     }
   };
 
   const latestRun = runs[0];
+  const progressPct = evalTotal > 0 ? Math.round((evalProgress / evalTotal) * 100) : 0;
 
   return (
     <div className="space-y-6">
@@ -130,21 +215,78 @@ export default function EvalDashboard() {
         </div>
         {downloadResult && (
           <div className="mt-3 text-sm text-gray-700 bg-gray-50 p-3 rounded">
-            Fetched {downloadResult.total_fetched} emails: {downloadResult.new_emails} new, {downloadResult.skipped_duplicates} duplicates, {downloadResult.errors} errors
+            Fetched {downloadResult.total_fetched} emails: {downloadResult.new_emails} new,{" "}
+            {downloadResult.skipped_duplicates} duplicates, {downloadResult.errors} errors
           </div>
         )}
       </div>
 
       {/* Run Evaluation */}
       <div className="bg-white rounded-lg shadow p-6">
-        <h2 className="text-lg font-semibold mb-4">Run Evaluation</h2>
-        <p className="text-sm text-gray-600 mb-3">
-          Re-run the pipeline on all {stats?.total_cached || 0} cached emails and score against {stats?.total_labeled || 0} labels.
+        <h2 className="text-lg font-semibold mb-2">Run Evaluation</h2>
+        <p className="text-sm text-gray-600 mb-4">
+          Re-run the pipeline on all {stats?.total_cached || 0} cached emails and score against{" "}
+          {stats?.total_labeled || 0} labels.
         </p>
-        <button onClick={handleRunEval} disabled={runningEval || !stats?.total_cached}
-          className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm font-medium">
-          {runningEval ? "Running..." : "Run Evaluation"}
-        </button>
+
+        {/* Action buttons */}
+        <div className="flex gap-3 items-center">
+          <button
+            onClick={handleRunEval}
+            disabled={runningEval || !stats?.total_cached}
+            className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm font-medium"
+          >
+            {runningEval ? "Running…" : "Run Evaluation"}
+          </button>
+          {runningEval && (
+            <button
+              onClick={handleCancelEval}
+              disabled={cancelRequested}
+              className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-50 text-sm font-medium"
+            >
+              {cancelRequested ? "Cancelling…" : "Cancel"}
+            </button>
+          )}
+        </div>
+
+        {/* Progress bar */}
+        {(runningEval || evalLogs.length > 0) && evalTotal > 0 && (
+          <div className="mt-4">
+            <div className="flex justify-between text-xs text-gray-500 mb-1">
+              <span>Progress</span>
+              <span>{evalProgress} / {evalTotal} ({progressPct}%)</span>
+            </div>
+            <div className="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
+              <div
+                className={`h-2.5 rounded-full transition-all duration-300 ${
+                  cancelRequested ? "bg-red-400" : "bg-green-500"
+                }`}
+                style={{ width: `${progressPct}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Log panel */}
+        {evalLogs.length > 0 && (
+          <div className="mt-4 bg-gray-900 rounded-lg p-3 max-h-64 overflow-y-auto font-mono text-xs">
+            {evalLogs.map((entry, i) => (
+              <div
+                key={i}
+                className={
+                  entry.level === "error"
+                    ? "text-red-400"
+                    : entry.level === "success"
+                    ? "text-green-400"
+                    : "text-gray-300"
+                }
+              >
+                {entry.message}
+              </div>
+            ))}
+            <div ref={logEndRef} />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -167,7 +309,8 @@ function StatCard({ label, value, color = "blue" }: { label: string; value: numb
 
 function MetricCard({ label, value }: { label: string; value: number | null }) {
   const pct = value !== null ? `${(value * 100).toFixed(1)}%` : "—";
-  const color = value === null ? "text-gray-400" : value >= 0.8 ? "text-green-600" : value >= 0.5 ? "text-yellow-600" : "text-red-600";
+  const color =
+    value === null ? "text-gray-400" : value >= 0.8 ? "text-green-600" : value >= 0.5 ? "text-yellow-600" : "text-red-600";
   return (
     <div className="text-center">
       <div className={`text-2xl font-bold ${color}`}>{pct}</div>

@@ -281,6 +281,7 @@ export default function RunDetail() {
                   <th className="px-2 py-2">Company</th>
                   <th className="px-2 py-2">Title</th>
                   <th className="px-2 py-2">Status</th>
+                  <th className="px-2 py-2">Group</th>
                   <th className="px-2 py-2">Action</th>
                 </tr>
               </thead>
@@ -299,6 +300,9 @@ export default function RunDetail() {
                     </td>
                     <td className="px-2 py-1 text-center">
                       <Dot correct={r.status_correct} />
+                    </td>
+                    <td className="px-2 py-1 text-center">
+                      <Dot correct={r.grouping_correct} />
                     </td>
                     <td className="px-2 py-1">
                       <Link to={`/eval/review/${r.cached_email_id}`} className="text-blue-600 hover:underline">Review</Link>

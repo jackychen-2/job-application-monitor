@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import {
   getCachedEmail,
@@ -8,7 +8,9 @@ import {
   listGroups,
   createGroup,
   upsertLabel,
+  replayEmailPipeline,
 } from "../../api/eval";
+import type { ReplayLogEntry } from "../../api/eval";
 import type {
   CachedEmailDetail,
   DropdownOptions,
@@ -35,6 +37,33 @@ export default function ReviewEmail() {
   const [, setTotalCount] = useState(0);
   const [labeledCount, setLabeledCount] = useState(0);
 
+  // Decision log
+  const [replayLogs, setReplayLogs] = useState<ReplayLogEntry[]>([]);
+  const [replayLoading, setReplayLoading] = useState(false);
+  const [replayOpen, setReplayOpen] = useState(false);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
+
+
+  // Reset replay when navigating to a different email
+  useEffect(() => {
+    setReplayLogs([]);
+    setReplayOpen(false);
+  }, [emailId]);
+
+  const handleReplay = async () => {
+    if (replayLoading) return;
+    setReplayOpen(true);
+    setReplayLoading(true);
+    try {
+      const { logs } = await replayEmailPipeline(emailId);
+      setReplayLogs(logs);
+      setTimeout(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+    } catch (e) {
+      setReplayLogs([{ stage: "error", message: String(e), level: "error" }]);
+    } finally {
+      setReplayLoading(false);
+    }
+  };
 
   // Load email data
   useEffect(() => {
@@ -174,6 +203,7 @@ export default function ReviewEmail() {
   if (label.correct_company) { totalFields++; if (differs(email.predicted_company, label.correct_company)) discrepancies++; }
   if (label.correct_job_title) { totalFields++; if (differs(email.predicted_job_title, label.correct_job_title)) discrepancies++; }
   if (label.correct_status) { totalFields++; if (differs(email.predicted_status, label.correct_status)) discrepancies++; }
+  if (label.correct_application_group_id != null) { totalFields++; if (groupDiffers(email.predicted_application_group, label.correct_application_group_id)) discrepancies++; }
 
   return (
     <div className="space-y-4">
@@ -280,7 +310,7 @@ export default function ReviewEmail() {
               <div className="text-sm font-medium">{email.predicted_status || "—"}</div>
             </div>
 
-            <div className="p-2 rounded border-l-4 border-gray-200">
+            <div className={`p-2 rounded ${groupDiffClass(email.predicted_application_group, label.correct_application_group_id)}`}>
               <span className="text-xs text-gray-500">Application Group</span>
               <div className="text-sm font-medium">{email.predicted_application_group_display || email.predicted_application_group || "—"}</div>
             </div>
@@ -291,6 +321,40 @@ export default function ReviewEmail() {
                 <div className="text-sm font-medium">{(email.predicted_confidence * 100).toFixed(0)}%</div>
               </div>
             )}
+
+            {/* Decision Log */}
+            <div className="mt-2 border-t pt-2">
+              <button
+                onClick={handleReplay}
+                disabled={replayLoading}
+                className="text-xs text-indigo-600 hover:text-indigo-800 disabled:opacity-50 font-medium"
+              >
+                {replayLoading ? "Running…" : replayOpen && replayLogs.length > 0 ? "↻ Re-run Decision Log" : "▶ Show Decision Log"}
+              </button>
+
+              {replayOpen && replayLogs.length > 0 && (
+                <div className="mt-2 bg-gray-900 rounded p-2 max-h-72 overflow-y-auto font-mono text-xs space-y-0.5">
+                  {replayLogs.map((entry, i) => (
+                    <div
+                      key={i}
+                      className={
+                        entry.level === "error"
+                          ? "text-red-400"
+                          : entry.level === "success"
+                          ? "text-green-400"
+                          : entry.level === "warn"
+                          ? "text-yellow-400"
+                          : "text-gray-300"
+                      }
+                    >
+                      <span className="text-gray-500 mr-1">[{entry.stage}]</span>
+                      {entry.message}
+                    </div>
+                  ))}
+                  <div ref={logEndRef} />
+                </div>
+              )}
+            </div>
           </div>
         </div>
 

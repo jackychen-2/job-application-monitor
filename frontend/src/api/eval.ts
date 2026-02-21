@@ -158,3 +158,25 @@ export function getEvalRunResults(id: number, errorsOnly?: boolean): Promise<Eva
 export function deleteEvalRun(id: number): Promise<void> {
   return request(`/runs/${id}`, { method: "DELETE" });
 }
+
+export function cancelEvalRun(): Promise<{ cancelled: boolean; running: boolean }> {
+  return request("/runs/cancel", { method: "POST" });
+}
+
+export interface ReplayLogEntry {
+  stage: string;
+  message: string;
+  level: "info" | "success" | "warn" | "error";
+}
+
+export function replayEmailPipeline(emailId: number): Promise<{ logs: ReplayLogEntry[] }> {
+  return request(`/cache/emails/${emailId}/replay`);
+}
+
+/** Open an SSE stream for a new evaluation run.
+ *  Returns the EventSource so the caller can close it on unmount.
+ */
+export function streamEvalRun(name?: string): EventSource {
+  const qs = name ? `?name=${encodeURIComponent(name)}` : "";
+  return new EventSource(`${BASE}/runs/stream${qs}`);
+}
