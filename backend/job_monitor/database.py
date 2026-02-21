@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from job_monitor.config import AppConfig
 from job_monitor.models import Base
+import job_monitor.eval.models as _eval_models  # noqa: F401 — register eval tables
 
 logger = structlog.get_logger(__name__)
 

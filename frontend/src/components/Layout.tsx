@@ -11,6 +11,10 @@ export default function Layout() {
               <span className="text-2xl">📋</span>
               Job Application Monitor
             </a>
+            <nav className="flex items-center gap-4">
+              <a href="/" className="text-sm text-gray-600 hover:text-gray-900">Dashboard</a>
+              <a href="/eval" className="text-sm text-gray-600 hover:text-gray-900">Evaluation</a>
+            </nav>
           </div>
         </div>
       </header>
