@@ -154,14 +154,75 @@ def _cleanup_on_startup() -> None:
                     app.email_sender = most_recent_email.sender
                     email_dates_updated += 1
         
+        # Step 4: Re-evaluate company-linked emails with new linking rules.
+        # Emails linked via 'company' method may have been incorrectly merged
+        # (e.g., re-application to same company after rejection).
+        # Re-run the linking rules; if the result says "don't link", split into new Application.
+        from job_monitor.linking.resolver import resolve_by_company
+        from job_monitor.extraction.rules import extract_status
+        from job_monitor.models import StatusHistory
+        
+        relinked_count = 0
+        company_emails = (
+            session.query(ProcessedEmail)
+            .filter(
+                ProcessedEmail.link_method == "company",
+                ProcessedEmail.application_id.isnot(None),
+                ProcessedEmail.is_job_related == True,  # noqa: E712
+            )
+            .order_by(ProcessedEmail.email_date.asc())
+            .all()
+        )
+        
+        for pe in company_emails:
+            app = session.query(Application).get(pe.application_id)
+            if not app:
+                continue
+            
+            # Extract the status from this email's subject (lightweight, no LLM)
+            email_status = extract_status(pe.subject or "", "")
+            
+            # Re-run company linking with new rules
+            result = resolve_by_company(
+                session,
+                app.company,
+                extracted_status=email_status,
+                job_title=app.job_title,
+                email_date=pe.email_date,
+            )
+            
+            # If the new rules say this email should NOT link to the current app
+            if not result.is_linked or result.application_id != app.id:
+                if result.is_linked and result.application_id is not None:
+                    # Rules found a better existing app to link to — relink
+                    pe.application_id = result.application_id
+                    pe.link_method = "company_relinked"
+                    relinked_count += 1
+                    logger.info(
+                        "startup_relinked_email",
+                        email_uid=pe.uid,
+                        old_app_id=app.id,
+                        new_app_id=result.application_id,
+                        company=app.company,
+                    )
+                else:
+                    # No valid link — log for awareness, next rescan will fix
+                    logger.info(
+                        "startup_relink_needs_rescan",
+                        email_uid=pe.uid,
+                        app_id=app.id,
+                        company=app.company,
+                    )
+        
         session.commit()
         
-        if normalized_count > 0 or duplicates_deleted > 0 or email_dates_updated > 0:
+        if normalized_count > 0 or duplicates_deleted > 0 or email_dates_updated > 0 or relinked_count > 0:
             logger.info(
                 "startup_cleanup_complete",
                 normalized=normalized_count,
                 duplicates_deleted=duplicates_deleted,
                 email_dates_updated=email_dates_updated,
+                relinked=relinked_count,
             )
     except Exception as e:
         session.rollback()

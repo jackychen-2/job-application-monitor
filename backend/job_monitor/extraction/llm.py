@@ -29,12 +29,33 @@ class LLMExtractionResult:
     estimated_cost_usd: float = 0.0
 
 
+@dataclass(frozen=True)
+class LLMLinkConfirmResult:
+    """Result from an LLM link-confirmation call."""
+
+    is_same_application: bool = False
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
+
 class LLMProvider(Protocol):
     """Protocol that any LLM provider must implement."""
 
     def extract_fields(
         self, sender: str, subject: str, body: str
     ) -> LLMExtractionResult: ...
+
+    def confirm_same_application(
+        self,
+        email_subject: str,
+        email_sender: str,
+        email_body: str,
+        app_company: str,
+        app_job_title: str,
+        app_status: str,
+        app_last_email_subject: str,
+    ) -> LLMLinkConfirmResult: ...
 
 
 # ── OpenAI Provider ───────────────────────────────────────
@@ -135,6 +156,78 @@ class OpenAIProvider:
             job_title=str(parsed.get("job_title", "")).strip(),
             status=str(parsed.get("status", "")).strip(),
             confidence=confidence,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            estimated_cost_usd=estimated_cost,
+        )
+
+    _LINK_CONFIRM_PROMPT = (
+        "You are matching job application emails. Determine if a new email "
+        "is about the SAME job application as an existing record, or a DIFFERENT one.\n\n"
+        "SAME means: both refer to the same position at the same company "
+        "(e.g., application confirmation followed by interview invite for the same role).\n"
+        "DIFFERENT means: different position, different application cycle, "
+        "or the email is unrelated to this specific application.\n\n"
+        "Answer ONLY with the word \"same\" or \"different\"."
+    )
+
+    def confirm_same_application(
+        self,
+        email_subject: str,
+        email_sender: str,
+        email_body: str,
+        app_company: str,
+        app_job_title: str,
+        app_status: str,
+        app_last_email_subject: str,
+    ) -> LLMLinkConfirmResult:
+        """Ask LLM whether a new email belongs to an existing application."""
+        cfg = self._config
+        body_snippet = (email_body or "")[:2000]
+
+        user_prompt = (
+            f"Existing Application:\n"
+            f"- Company: {app_company}\n"
+            f"- Job Title: {app_job_title or '(unknown)'}\n"
+            f"- Current Status: {app_status}\n"
+            f"- Last Email Subject: \"{app_last_email_subject or '(none)'}\"\n\n"
+            f"New Email:\n"
+            f"- Subject: \"{email_subject}\"\n"
+            f"- From: {email_sender}\n"
+            f"- Body:\n{body_snippet}\n\n"
+            f"Is this new email about the SAME or a DIFFERENT job application?"
+        )
+
+        resp = self._client.chat.completions.create(
+            model=cfg.llm_model,
+            timeout=cfg.llm_timeout_sec,
+            messages=[
+                {"role": "system", "content": self._LINK_CONFIRM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+
+        content = (resp.choices[0].message.content or "").strip().lower()
+        is_same = "same" in content and "different" not in content
+
+        usage = getattr(resp, "usage", None)
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        estimated_cost = (
+            (prompt_tokens / 1_000_000.0) * cfg.cost_input_per_mtok
+            + (completion_tokens / 1_000_000.0) * cfg.cost_output_per_mtok
+        )
+
+        logger.info(
+            "llm_link_confirm",
+            is_same=is_same,
+            raw_answer=content[:50],
+            company=app_company,
+            prompt_tokens=prompt_tokens,
+        )
+
+        return LLMLinkConfirmResult(
+            is_same_application=is_same,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             estimated_cost_usd=estimated_cost,

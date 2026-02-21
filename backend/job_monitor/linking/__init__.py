@@ -1,13 +1,17 @@
-"""Thread-based email linking for job application lifecycle tracking."""
+"""Email linking for job application lifecycle tracking."""
 
 from job_monitor.linking.resolver import (
-    resolve_by_thread_id,
     is_message_already_processed,
+    resolve_by_company,
+    titles_similar,
+    LinkResult,
     ThreadLinkResult,
 )
 
 __all__ = [
-    "resolve_by_thread_id",
     "is_message_already_processed",
+    "resolve_by_company",
+    "titles_similar",
+    "LinkResult",
     "ThreadLinkResult",
 ]

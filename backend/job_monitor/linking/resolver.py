@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Optional, List
 
 import structlog
@@ -192,25 +193,107 @@ def resolve_by_thread_id(
 
 
 # ---------------------------------------------------------------------------
-# Tier 2: Company name linking
+# Tier 2: Company name linking (status-aware + title-aware)
 # ---------------------------------------------------------------------------
+
+# Statuses that indicate an application has progressed beyond initial submission.
+# If an existing app is in one of these AND the new email is a fresh application
+# confirmation (已申请), treat it as a re-application → skip that candidate.
+_PROGRESSED_STATUSES = {"拒绝", "面试"}
+
+# Title normalization synonyms
+_TITLE_SYNONYMS = {
+    "sr.": "senior", "sr": "senior",
+    "jr.": "junior", "jr": "junior",
+    "mgr": "manager", "eng": "engineer", "dev": "developer",
+    "swe": "software engineer", "sde": "software development engineer",
+    "mts": "member of technical staff",
+    "iii": "3", "ii": "2", "i": "1", "iv": "4", "v": "5",
+}
+
+
+def _normalize_title(title: str) -> str:
+    """Normalize a job title for comparison."""
+    t = title.lower().strip()
+    t = re.sub(r"[,\-–—/|()[\]{}]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    words = t.split()
+    words = [_TITLE_SYNONYMS.get(w, w) for w in words]
+    return " ".join(words)
+
+
+def titles_similar(title_a: str | None, title_b: str | None, threshold: float = 0.9) -> bool:
+    """Check if two job titles are essentially the same after normalization.
+
+    Uses Jaccard word similarity with a strict threshold (default 0.9).
+    Only near-identical titles are considered similar.
+
+    Returns True if:
+    - Either title is empty/None (can't judge, assume similar)
+    - Normalized titles are identical
+    - Jaccard similarity >= threshold
+
+    Examples:
+        titles_similar("Senior Data Engineer", "Sr. Data Engineer") → True (1.0)
+        titles_similar("Data Engineer", "Product Manager") → False (0.0)
+        titles_similar("Senior Data Engineer", "Senior Data Engineer - New Solutions") → False (0.6)
+    """
+    if not title_a or not title_b:
+        return True  # Can't judge without both titles
+
+    a = _normalize_title(title_a)
+    b = _normalize_title(title_b)
+
+    if a == b:
+        return True
+
+    words_a = set(a.split())
+    words_b = set(b.split())
+
+    if not words_a or not words_b:
+        return True
+
+    intersection = words_a & words_b
+    union = words_a | words_b
+    jaccard = len(intersection) / len(union)
+
+    return jaccard >= threshold
+
 
 def resolve_by_company(
     session: Session,
     company: str | None,
+    extracted_status: str | None = None,
+    job_title: str | None = None,
+    email_date: Optional["datetime"] = None,
+    llm_provider: Optional[object] = None,
+    email_subject: str = "",
+    email_sender: str = "",
+    email_body: str = "",
 ) -> LinkResult:
     """Attempt to link a new email to an existing Application by company name.
 
-    This is the fallback when thread ID linking fails.
+    This is the fallback when thread ID linking fails. Uses three filtering
+    rules to avoid incorrect merges:
+
+    Rule A (Title mismatch): If both have job titles and they're clearly
+        different (Jaccard < 0.9), skip that candidate.
+    Rule B (Time gap): If new email is 已申请 and titles match but the time
+        gap exceeds 3 days from the app's last email, skip (different cycle).
+    Rule C (Re-application): If existing app is in a progressed status
+        (拒绝/面试) and the new email is 已申请, skip that candidate.
 
     Args:
         session: Database session.
         company: Company name extracted from the email.
+        extracted_status: Status extracted from the new email (已申请/面试/Offer/拒绝).
+        job_title: Job title extracted from the new email.
+        email_date: Date of the new email (from email header).
 
     Returns:
         LinkResult with:
         - Single match: application_id set, needs_review=False
-        - Multiple matches: application_id=None, needs_review=True, candidate_app_ids set
+        - Multiple matches: application_id=None, needs_review=True
         - No match: application_id=None, needs_review=False
     """
     if not company:
@@ -230,14 +313,14 @@ def resolve_by_company(
         )
 
     # Find all applications with matching normalized company
-    apps = (
+    all_apps = (
         session.query(Application)
         .filter(Application.normalized_company == normalized)
-        .order_by(Application.created_at.desc())  # Most recent first
+        .order_by(Application.created_at.desc())
         .all()
     )
 
-    if not apps:
+    if not all_apps:
         logger.debug(
             "company_link_no_match",
             company=company,
@@ -249,33 +332,146 @@ def resolve_by_company(
             link_method="new",
         )
 
-    if len(apps) == 1:
-        # Single match - auto-link with high confidence
+    # ── Filter candidates ─────────────────────────────────
+    candidates = list(all_apps)
+
+    # Rule A: Title mismatch (strict — only near-identical titles match)
+    if job_title:
+        before = len(candidates)
+        candidates = [
+            app for app in candidates
+            if titles_similar(job_title, app.job_title)
+        ]
+        filtered = before - len(candidates)
+        if filtered > 0:
+            logger.info(
+                "company_link_title_filtered",
+                company=company,
+                new_title=job_title,
+                filtered_count=filtered,
+                remaining=len(candidates),
+            )
+
+    # Rule B: Time gap (only for 已申请 — two application confirmations
+    # to the same company > 3 days apart = different application cycle)
+    _MAX_SAME_CYCLE_DAYS = 3
+    if extracted_status == "已申请" and email_date and candidates:
+        def _within_time_window(app: Application) -> bool:
+            if not app.email_date:
+                return True  # No date to compare, keep candidate
+            # Normalize both to naive for comparison
+            ed = email_date.replace(tzinfo=None) if hasattr(email_date, 'tzinfo') and email_date.tzinfo else email_date
+            ad = app.email_date.replace(tzinfo=None) if hasattr(app.email_date, 'tzinfo') and app.email_date.tzinfo else app.email_date
+            gap = abs((ed - ad).days)
+            return gap <= _MAX_SAME_CYCLE_DAYS
+
+        before = len(candidates)
+        candidates = [app for app in candidates if _within_time_window(app)]
+        filtered = before - len(candidates)
+        if filtered > 0:
+            logger.info(
+                "company_link_time_filtered",
+                company=company,
+                max_days=_MAX_SAME_CYCLE_DAYS,
+                filtered_count=filtered,
+                remaining=len(candidates),
+            )
+
+    # Rule C: Re-application after rejection/interview
+    # If existing app has progressed (拒绝/面试) and new email is a fresh
+    # application confirmation (已申请), treat as re-application.
+    if extracted_status == "已申请" and candidates:
+        before = len(candidates)
+        candidates = [
+            app for app in candidates
+            if app.status not in _PROGRESSED_STATUSES
+        ]
+        filtered = before - len(candidates)
+        if filtered > 0:
+            logger.info(
+                "company_link_reapplication_filtered",
+                company=company,
+                filtered_count=filtered,
+                remaining=len(candidates),
+            )
+
+    # ── Decision: Rules A/B/C all passed → LLM confirms ──
+    if not candidates:
         logger.info(
-            "linked_by_company",
+            "company_link_all_filtered",
             company=company,
-            normalized_company=normalized,
-            application_id=apps[0].id,
+            total_apps=len(all_apps),
+            extracted_status=extracted_status,
+            job_title=job_title,
         )
         return LinkResult(
-            application_id=apps[0].id,
-            confidence=COMPANY_LINK_CONFIDENCE,
-            link_method="company",
+            application_id=None,
+            confidence=0.0,
+            link_method="new",
         )
 
-    # Multiple matches - flag for user review
-    app_ids = tuple(a.id for a in apps)
+    # LLM confirmation: ask whether the email is about the same application
+    # If LLM is unavailable, default to creating a new application (conservative)
+    if llm_provider is not None and hasattr(llm_provider, "confirm_same_application"):
+        for candidate in candidates:
+            try:
+                confirm_result = llm_provider.confirm_same_application(
+                    email_subject=email_subject,
+                    email_sender=email_sender,
+                    email_body=email_body,
+                    app_company=candidate.company,
+                    app_job_title=candidate.job_title or "",
+                    app_status=candidate.status,
+                    app_last_email_subject=candidate.email_subject or "",
+                )
+                if confirm_result.is_same_application:
+                    logger.info(
+                        "linked_by_company_llm_confirmed",
+                        company=company,
+                        application_id=candidate.id,
+                        prompt_tokens=confirm_result.prompt_tokens,
+                    )
+                    return LinkResult(
+                        application_id=candidate.id,
+                        confidence=COMPANY_LINK_CONFIDENCE,
+                        link_method="company",
+                    )
+                else:
+                    logger.info(
+                        "company_link_llm_rejected",
+                        company=company,
+                        application_id=candidate.id,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "company_link_llm_error",
+                    company=company,
+                    application_id=candidate.id,
+                    error=str(exc),
+                )
+                # LLM failed — conservative: don't link
+                continue
+
+        # LLM rejected all candidates (or all errored)
+        logger.info(
+            "company_link_llm_rejected_all",
+            company=company,
+            candidate_count=len(candidates),
+        )
+        return LinkResult(
+            application_id=None,
+            confidence=0.0,
+            link_method="new",
+        )
+
+    # No LLM available — conservative: create new application
     logger.info(
-        "company_link_ambiguous",
+        "company_link_no_llm_conservative",
         company=company,
-        normalized_company=normalized,
-        candidate_count=len(apps),
-        candidate_app_ids=app_ids,
+        candidate_count=len(candidates),
     )
     return LinkResult(
         application_id=None,
         confidence=0.0,
         link_method="new",
-        needs_review=True,
-        candidate_app_ids=app_ids,
     )

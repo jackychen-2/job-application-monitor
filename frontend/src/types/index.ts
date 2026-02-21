@@ -118,6 +118,18 @@ export interface Stats {
   daily_applications: DailyCount[];
 }
 
+export interface StatusTransition {
+  from_status: string;
+  to_status: string;
+  count: number;
+}
+
+export interface FlowData {
+  status_counts: StatusCount[];
+  transitions: StatusTransition[];
+  total: number;
+}
+
 /** Status value constants */
 export const STATUSES = ["已申请", "面试", "Offer", "拒绝", "Unknown"] as const;
 export type Status = (typeof STATUSES)[number];

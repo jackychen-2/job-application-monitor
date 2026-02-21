@@ -37,7 +37,6 @@ from job_monitor.linking.resolver import (
     is_message_already_processed,
     normalize_company,
     resolve_by_company,
-    resolve_by_thread_id,
     LinkResult,
 )
 
@@ -56,7 +55,13 @@ def _validate_job_title(title: str) -> str:
         return ""
     if len(cleaned) < 3:
         return ""
+    # Max length: real job titles are rarely > 80 chars
+    if len(cleaned) > 80:
+        return ""
     if cleaned.lower() in _INVALID_TITLES:
+        return ""
+    # Reject sentence-like patterns (contains periods followed by spaces, or starts with lowercase)
+    if ". " in cleaned or cleaned[0].islower():
         return ""
     return cleaned
 from job_monitor.models import Application, ProcessedEmail, ScanState, StatusHistory
@@ -131,7 +136,9 @@ def _get_or_create_application(
         if job_title and existing.job_title != job_title:
             existing.job_title = job_title
         # Always update to most recent email info
-        if email_date and (existing.email_date is None or email_date > existing.email_date):
+        _ed = email_date.replace(tzinfo=None) if email_date and hasattr(email_date, 'tzinfo') and email_date.tzinfo else email_date
+        _ad = existing.email_date.replace(tzinfo=None) if existing.email_date and hasattr(existing.email_date, 'tzinfo') and existing.email_date.tzinfo else existing.email_date
+        if _ed and (_ad is None or _ed > _ad):
             existing.email_date = email_date
             existing.email_subject = email_subject
             existing.email_sender = email_sender
@@ -169,10 +176,32 @@ def _update_status_if_changed(
     app: Application,
     new_status: str,
     change_source: str = "email_scan",
+    email_date: Optional[datetime] = None,
 ) -> bool:
-    """Update application status and record history. Returns True if changed."""
+    """Update application status and record history. Returns True if changed.
+
+    If email_date is provided, only update if the email is at least as recent
+    as the application's current email_date. This prevents older emails
+    (e.g., moved from spam with higher UID) from overriding a newer status.
+    """
     if not new_status or new_status == app.status:
         return False
+
+    # Protect against backward status from older emails
+    if email_date and app.email_date:
+        cmp_new = email_date.replace(tzinfo=None) if email_date.tzinfo else email_date
+        cmp_cur = app.email_date.replace(tzinfo=None) if app.email_date.tzinfo else app.email_date
+        if cmp_new < cmp_cur:
+            logger.info(
+                "status_update_skipped_older_email",
+                app_id=app.id,
+                old_status=app.status,
+                attempted_status=new_status,
+                email_date=str(email_date),
+                app_email_date=str(app.email_date),
+                source=change_source,
+            )
+            return False
 
     old = app.status
     app.status = new_status
@@ -319,11 +348,11 @@ def _process_single_email(
     # ── Step 0: 记住之前的app关联 ─────────────────────────
     previous_app_id = _get_previous_app_id(session, uid, config)
 
-    # ── Step 1: Thread linking (BEFORE expensive LLM) ─────
-    link: LinkResult = resolve_by_thread_id(session, gmail_thread_id)
-    linked_app_id: Optional[int] = link.application_id
-    link_method: str = link.link_method
-    needs_review: bool = link.needs_review
+    # ── Step 1: (Thread linking removed — unreliable for companies
+    #    like Amazon that reuse threads for different positions) ────
+    linked_app_id: Optional[int] = None
+    link_method: str = "new"
+    needs_review: bool = False
 
     llm_result: Optional[LLMExtractionResult] = None
     llm_used = False
@@ -344,33 +373,21 @@ def _process_single_email(
             llm_result = None
 
     # ── Step 3: Determine if job-related ──────────────────
-    # LLM classification takes PRIORITY over thread linking.
-    # This prevents circular re-linking: if a previously misclassified email
-    # was stored with a thread/company link, the LLM can correct it on rescan.
     if llm_result is not None:
         if not llm_result.is_job_application:
-            logger.info("email_skipped_llm", uid=uid,
-                        overrode_thread_link=linked_app_id is not None)
-            # 清理旧Application（LLM判断非求职，覆盖之前的thread/company链接）
+            logger.info("email_skipped_llm", uid=uid)
             _cleanup_orphaned_app(session, previous_app_id, exclude_uid=uid, summary=summary)
             _record_processed(
                 session, uid, config, parsed, is_job=False, app_id=None, llm_used=True,
                 llm_result=llm_result,
             )
             return
-        # LLM says IS job-related — thread link still used if available
-        if linked_app_id is not None:
-            logger.info("email_job_related_via_thread", uid=uid, application_id=linked_app_id)
-    elif linked_app_id is not None:
-        # No LLM result but thread link found — trust thread link
-        logger.info("email_job_related_via_thread_no_llm", uid=uid, application_id=linked_app_id)
     else:
         if not is_job_related(subject, sender):
             if llm_used:
                 logger.info("email_skipped_rules_fallback", uid=uid)
             else:
                 logger.info("email_skipped_rules", uid=uid)
-            # 清理旧Application（如果之前是求职相关但现在不是了）
             _cleanup_orphaned_app(session, previous_app_id, exclude_uid=uid, summary=summary)
             _record_processed(
                 session, uid, config, parsed, is_job=False, app_id=None, llm_used=False,
@@ -398,7 +415,16 @@ def _process_single_email(
     # ── Step 4.5: Company-based linking (fallback) ────────
     # If thread linking didn't find a match, try company name
     if linked_app_id is None and company != "Unknown":
-        company_link = resolve_by_company(session, company)
+        company_link = resolve_by_company(
+            session, company,
+            extracted_status=status,
+            job_title=job_title,
+            email_date=email_date,
+            llm_provider=llm_provider,
+            email_subject=subject,
+            email_sender=sender,
+            email_body=body,
+        )
         if company_link.is_linked:
             linked_app_id = company_link.application_id
             link_method = company_link.link_method
@@ -443,7 +469,7 @@ def _process_single_email(
                     app.email_subject = subject
                     app.email_sender = sender
                     changed = True
-            if _update_status_if_changed(session, app, status, change_source=f"email_uid_{uid}"):
+            if _update_status_if_changed(session, app, status, change_source=f"email_uid_{uid}", email_date=email_date):
                 summary.applications_updated += 1
                 changed = True
             if changed:
@@ -463,7 +489,7 @@ def _process_single_email(
             summary.applications_created += 1
             logger.info("created_new_application", uid=uid, company=company, title=job_title)
         else:
-            updated = _update_status_if_changed(session, app, status, change_source=f"email_uid_{uid}")
+            updated = _update_status_if_changed(session, app, status, change_source=f"email_uid_{uid}", email_date=email_date)
             if updated:
                 summary.applications_updated += 1
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { listApplications, getStats } from "../api/client";
-import type { Application, ScanResult, Stats } from "../types";
+import { listApplications, getStats, getFlowData } from "../api/client";
+import type { Application, FlowData, ScanResult, Stats } from "../types";
 import StatsCards from "../components/StatsCards";
 import FilterBar from "../components/FilterBar";
 import ApplicationTable from "../components/ApplicationTable";
@@ -19,6 +19,8 @@ export default function Dashboard() {
   const [companySearch, setCompanySearch] = useState("");
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
+  const [flowData, setFlowData] = useState<FlowData | null>(null);
+  const [flowLoading, setFlowLoading] = useState(true);
   const [lastScan, setLastScan] = useState<ScanResult | null>(null);
   const pageSize = 20;
 
@@ -54,23 +56,38 @@ export default function Dashboard() {
     }
   }, []);
 
+  const fetchFlowData = useCallback(async () => {
+    setFlowLoading(true);
+    try {
+      const fd = await getFlowData();
+      setFlowData(fd);
+    } catch (err) {
+      console.error("Failed to fetch flow data:", err);
+    } finally {
+      setFlowLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchApplications();
   }, [fetchApplications]);
 
   useEffect(() => {
     fetchStats();
-  }, [fetchStats]);
+    fetchFlowData();
+  }, [fetchStats, fetchFlowData]);
 
   const handleScanComplete = (result: ScanResult) => {
     setLastScan(result);
     fetchApplications();
     fetchStats();
+    fetchFlowData();
   };
 
   const handleRefresh = () => {
     fetchApplications();
     fetchStats();
+    fetchFlowData();
   };
 
   const totalPages = Math.ceil(total / pageSize);
@@ -126,8 +143,8 @@ export default function Dashboard() {
       {/* Sankey Flow + LLM Cost Chart */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <SankeyFlow
-          data={stats?.status_breakdown ?? []}
-          total={stats?.total_applications ?? 0}
+          flowData={flowData}
+          loading={flowLoading}
         />
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
           <CostChart

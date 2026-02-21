@@ -9,6 +9,7 @@ import type {
   ApplicationDetail,
   ApplicationListResponse,
   ApplicationUpdate,
+  FlowData,
   LinkedEmail,
   PendingReviewEmail,
   ScanResult,
@@ -172,4 +173,8 @@ export async function getScanProgress(): Promise<{
 
 export async function getStats(): Promise<Stats> {
   return request<Stats>("/stats");
+}
+
+export async function getFlowData(): Promise<FlowData> {
+  return request<FlowData>("/stats/flow");
 }

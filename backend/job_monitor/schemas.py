@@ -156,6 +156,20 @@ class DailyCount(BaseModel):
     count: int
 
 
+class StatusTransition(BaseModel):
+    """A single status transition (edge in the Sankey diagram)."""
+    from_status: str
+    to_status: str
+    count: int
+
+
+class FlowData(BaseModel):
+    """Full application flow data for the Sankey diagram."""
+    status_counts: List[StatusCount]
+    transitions: List[StatusTransition]
+    total: int
+
+
 class StatsOut(BaseModel):
     total_applications: int
     status_breakdown: List[StatusCount]

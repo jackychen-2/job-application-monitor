@@ -8,8 +8,8 @@ from sqlalchemy import cast, func, Date
 from sqlalchemy.orm import Session
 
 from job_monitor.database import get_db
-from job_monitor.models import Application, ProcessedEmail
-from job_monitor.schemas import ApplicationOut, StatsOut, StatusCount
+from job_monitor.models import Application, ProcessedEmail, StatusHistory
+from job_monitor.schemas import ApplicationOut, FlowData, StatsOut, StatusCount, StatusTransition
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/stats", tags=["stats"])
@@ -74,4 +74,46 @@ def get_stats(db: Session = Depends(get_db)) -> StatsOut:
         total_llm_cost=round(total_cost, 6),
         daily_llm_costs=daily_costs,
         daily_applications=daily_applications,
+    )
+
+
+@router.get("/flow", response_model=FlowData)
+def get_flow_data(db: Session = Depends(get_db)) -> FlowData:
+    """Return application flow data: status counts + transition edges for Sankey diagram.
+
+    Aggregates StatusHistory transitions (old_status → new_status) and also counts
+    applications that are still in their initial status (no transitions yet).
+    """
+    total = db.query(func.count(Application.id)).scalar() or 0
+
+    # Status breakdown (current snapshot)
+    status_rows = (
+        db.query(Application.status, func.count(Application.id))
+        .group_by(Application.status)
+        .all()
+    )
+    status_counts = [StatusCount(status=s, count=c) for s, c in status_rows]
+
+    # Aggregate transitions from StatusHistory
+    # Only count transitions where old_status is not None (skip initial creation entries)
+    transition_rows = (
+        db.query(
+            StatusHistory.old_status,
+            StatusHistory.new_status,
+            func.count(StatusHistory.id),
+        )
+        .filter(StatusHistory.old_status.isnot(None))
+        .group_by(StatusHistory.old_status, StatusHistory.new_status)
+        .all()
+    )
+    transitions = [
+        StatusTransition(from_status=old, to_status=new, count=cnt)
+        for old, new, cnt in transition_rows
+        if old != new  # skip self-transitions
+    ]
+
+    return FlowData(
+        status_counts=status_counts,
+        transitions=transitions,
+        total=total,
     )
