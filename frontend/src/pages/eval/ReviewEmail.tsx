@@ -533,7 +533,7 @@ export default function ReviewEmail() {
                   {label.correct_application_group_id 
                     ? (() => {
                         const app = groups.find(a => a.id === label.correct_application_group_id);
-                        return app ? `[${app.id}] ${app.company} — ${app.job_title}` : `Application #${label.correct_application_group_id}`;
+                        return app ? `${app.company} — ${app.job_title}` : `Application #${label.correct_application_group_id}`;
                       })()
                     : "— Select Application —"}
                 </span>
@@ -552,6 +552,14 @@ export default function ReviewEmail() {
                     autoFocus
                   />
                   <div className="max-h-48 overflow-y-auto">
+                    {/* Unselect option */}
+                    {label.correct_application_group_id && !appSearch && (
+                      <div
+                        onClick={() => { setLabel(p => ({ ...p, correct_application_group_id: undefined })); setAppDropdownOpen(false); }}
+                        className="px-3 py-2 text-sm cursor-pointer hover:bg-gray-100 text-gray-400 italic border-b">
+                        — None —
+                      </div>
+                    )}
                     {groups
                       .filter(g => {
                         if (!appSearch) return true;
@@ -566,7 +574,7 @@ export default function ReviewEmail() {
                         className={`px-3 py-2 text-sm cursor-pointer hover:bg-gray-100 ${
                           label.correct_application_group_id === g.id ? "bg-blue-100" : ""
                         }`}>
-                        [{g.id}] {g.company || "?"} — {g.job_title || "?"} ({g.email_count} emails)
+                        {g.company || "?"} — {g.job_title || "?"} ({g.email_count} emails)
                       </div>
                     ))}
                     {groups.length === 0 && (
