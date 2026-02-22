@@ -1,27 +1,45 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams, Link } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams, Link } from "react-router-dom";
 import {
   getCachedEmail,
   getDropdownOptions,
   getLabel,
+  getGroupMembers,
   listCachedEmails,
   listGroups,
   createGroup,
   upsertLabel,
   replayEmailPipeline,
 } from "../../api/eval";
+import type { GroupMember } from "../../api/eval";
 import type { ReplayLogEntry } from "../../api/eval";
 import type {
   CachedEmailDetail,
+  CorrectionEntry,
   DropdownOptions,
   EvalApplicationGroup,
+  EvalLabel,
   EvalLabelInput,
+  GroupingAnalysis,
 } from "../../types/eval";
 
 export default function ReviewEmail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const emailId = Number(id);
+
+  // run_id scopes navigation and back-link to a specific eval run
+  const runId = searchParams.get("run_id") ? Number(searchParams.get("run_id")) : undefined;
+
+  // Navigate to another email, preserving run_id context
+  const navTo = (targetId: number) => {
+    const qs = runId ? `?run_id=${runId}` : "";
+    navigate(`/eval/review/${targetId}${qs}`);
+  };
+
+  // Back link to the queue, preserving run_id
+  const queueHref = runId ? `/eval/review?run_id=${runId}` : "/eval/review";
 
   const [email, setEmail] = useState<CachedEmailDetail | null>(null);
   const [label, setLabel] = useState<EvalLabelInput>({});
@@ -36,6 +54,13 @@ export default function ReviewEmail() {
   const [navIds, setNavIds] = useState<number[]>([]);
   const [, setTotalCount] = useState(0);
   const [labeledCount, setLabeledCount] = useState(0);
+  const [savedLabelData, setSavedLabelData] = useState<EvalLabel | null>(null);
+
+
+
+  // Group membership preview
+  const [groupMembers, setGroupMembers] = useState<GroupMember[]>([]);
+  const [loadingGroupMembers, setLoadingGroupMembers] = useState(false);
 
   // Decision log
   const [replayLogs, setReplayLogs] = useState<ReplayLogEntry[]>([]);
@@ -44,11 +69,25 @@ export default function ReviewEmail() {
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
 
-  // Reset replay when navigating to a different email
+  // Reset all per-email state when navigating to a different email
   useEffect(() => {
+    setLabel({});         // clear so pre-populate effect can set prediction defaults
+    setSavedLabelData(null);
     setReplayLogs([]);
     setReplayOpen(false);
+    setGroupMembers([]);
   }, [emailId]);
+
+  // Fetch group members whenever the selected group changes
+  useEffect(() => {
+    const gid = label.correct_application_group_id;
+    if (!gid) { setGroupMembers([]); return; }
+    setLoadingGroupMembers(true);
+    getGroupMembers(gid)
+      .then(setGroupMembers)
+      .catch(() => setGroupMembers([]))
+      .finally(() => setLoadingGroupMembers(false));
+  }, [label.correct_application_group_id]);
 
   const handleReplay = async () => {
     if (replayLoading) return;
@@ -69,7 +108,8 @@ export default function ReviewEmail() {
   useEffect(() => {
     if (!emailId) return;
     getCachedEmail(emailId).then(setEmail);
-    getLabel(emailId).then(l => {
+    getLabel(emailId, runId).then(l => {
+      setSavedLabelData(l);
       if (l) {
         setLabel({
           is_job_related: l.is_job_related,
@@ -88,30 +128,50 @@ export default function ReviewEmail() {
     });
   }, [emailId]);
 
-  // Load dropdown options and groups
-  useEffect(() => {
-    getDropdownOptions().then(setOptions);
-    listGroups().then(setGroups);
-    // Load all email IDs for navigation
-    listCachedEmails({ page: 1, page_size: 9999 }).then(res => {
+  // Refresh navigation list scoped to the current run (or all emails if no run selected)
+  const loadNav = () =>
+    listCachedEmails({ page: 1, page_size: 9999, run_id: runId }).then(res => {
       setNavIds(res.items.map(e => e.id));
       setTotalCount(res.total);
       setLabeledCount(res.items.filter(e => e.review_status === "labeled").length);
     });
-  }, []);
 
-  // Pre-populate labels from predictions if empty
+  // Load dropdown options, groups (scoped to current run), and nav
+  // Re-runs when runId changes so the dropdown only shows current run's groups
   useEffect(() => {
-    if (email && Object.keys(label).length === 0) {
-      setLabel({
-        is_job_related: email.predicted_is_job_related ?? undefined,
-        correct_company: email.predicted_company ?? undefined,
-        correct_job_title: email.predicted_job_title ?? undefined,
-        correct_status: email.predicted_status ?? undefined,
-        correct_application_group_id: email.predicted_application_group ?? undefined,
-      });
+    getDropdownOptions().then(setOptions);
+    listGroups(runId).then(setGroups);
+    loadNav();
+  }, [runId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Pre-populate labels from predictions if empty.
+  // Run whenever email OR groups changes so that group matching works even if
+  // groups loads after the email.
+  useEffect(() => {
+    if (!email || Object.keys(label).length > 0) return;
+
+    // Try to find an EvalApplicationGroup that matches the predicted company+title
+    let guessedGroupId: number | undefined;
+    if (email.predicted_company && groups.length > 0) {
+      const predComp = email.predicted_company.toLowerCase().trim();
+      const predTitle = (email.predicted_job_title || "").toLowerCase().trim();
+      const match = groups.find(
+        g =>
+          (g.company || "").toLowerCase().trim() === predComp &&
+          (g.job_title || "").toLowerCase().trim() === predTitle
+      );
+      if (match) guessedGroupId = match.id;
     }
-  }, [email]);
+
+    setLabel({
+      is_job_related: email.predicted_is_job_related ?? undefined,
+      correct_company: email.predicted_company ?? undefined,
+      correct_job_title: email.predicted_job_title ?? undefined,
+      correct_status: email.predicted_status ?? undefined,
+      correct_application_group_id: guessedGroupId,
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [email, groups]);
 
   const currentIdx = navIds.indexOf(emailId);
   const prevId = currentIdx > 0 ? navIds[currentIdx - 1] : null;
@@ -120,21 +180,30 @@ export default function ReviewEmail() {
   const save = useCallback(async () => {
     setSaving(true);
     try {
-      await upsertLabel(emailId, { ...label, review_status: label.review_status || "labeled" });
+      await upsertLabel(emailId, { ...label, review_status: label.review_status || "labeled", run_id: runId });
+      // Reload label, nav (labeled count), and group members in parallel
+      const gid = label.correct_application_group_id;
+      const [refreshed] = await Promise.all([
+        getLabel(emailId, runId),
+        loadNav(),
+        gid ? getGroupMembers(gid).then(setGroupMembers) : Promise.resolve(),
+      ]);
+      setSavedLabelData(refreshed);
     } finally {
       setSaving(false);
     }
-  }, [emailId, label]);
+  }, [emailId, label]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveAndNext = useCallback(async () => {
     await save();
-    if (nextId) navigate(`/eval/review/${nextId}`);
-  }, [save, nextId, navigate]);
+    if (nextId) navTo(nextId);
+  }, [save, nextId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const skip = useCallback(async () => {
     await upsertLabel(emailId, { review_status: "skipped" });
-    if (nextId) navigate(`/eval/review/${nextId}`);
-  }, [emailId, nextId, navigate]);
+    loadNav(); // eslint-disable-line react-hooks/exhaustive-deps
+    if (nextId) navTo(nextId);
+  }, [emailId, nextId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -148,18 +217,20 @@ export default function ReviewEmail() {
     return () => window.removeEventListener("keydown", handler);
   }, [save, saveAndNext]);
 
-  // Group comparison helper
-  // Compare application groups - if no predicted ID, compare by company+title
+  // Group comparison helper.
+  // pred = EvalPredictedGroup.id, gt = EvalApplicationGroup.id — different tables, IDs never match.
+  // Always compare by company+title content extracted from the prediction vs the selected GT group.
   const groupDiffers = (pred: number | null | undefined, gt: number | null | undefined) => {
     if (gt === null || gt === undefined) return false;
-    if (pred !== null && pred !== undefined) return pred !== gt;
-    // No predicted ID - compare by content
+    if (!email) return false;
     const selectedGroup = groups.find(g => g.id === gt);
-    if (!selectedGroup || !email) return true;
+    if (!selectedGroup) return true; // GT group exists but hasn't loaded yet → treat as mismatch
     const predCompany = (email.predicted_company || "").toLowerCase().trim();
     const predTitle = (email.predicted_job_title || "").toLowerCase().trim();
     const gtCompany = (selectedGroup.company || "").toLowerCase().trim();
     const gtTitle = (selectedGroup.job_title || "").toLowerCase().trim();
+    // If pred is null (no prediction), any labeled group is a mismatch
+    if (pred === null || pred === undefined) return true;
     return predCompany !== gtCompany || predTitle !== gtTitle;
   };
 
@@ -210,7 +281,7 @@ export default function ReviewEmail() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <Link to="/eval/review" className="text-sm text-blue-600 hover:underline">← Queue</Link>
+          <Link to={queueHref} className="text-sm text-blue-600 hover:underline">← Queue</Link>
           <span className="text-sm text-gray-500">
             Email {currentIdx + 1} of {navIds.length} ({labeledCount} labeled)
           </span>
@@ -221,7 +292,7 @@ export default function ReviewEmail() {
           )}
         </div>
         <div className="flex gap-2">
-          <button onClick={() => prevId && navigate(`/eval/review/${prevId}`)} disabled={!prevId}
+          <button onClick={() => prevId && navTo(prevId)} disabled={!prevId}
             className="px-3 py-1.5 border rounded text-sm disabled:opacity-30">← Prev</button>
           <button onClick={skip} className="px-3 py-1.5 border rounded text-sm text-yellow-700 border-yellow-300 hover:bg-yellow-50">
             Skip
@@ -234,7 +305,7 @@ export default function ReviewEmail() {
             className="px-3 py-1.5 bg-green-600 text-white rounded text-sm hover:bg-green-700 disabled:opacity-50">
             Save & Next <span className="text-xs opacity-70">⌘↵</span>
           </button>
-          <button onClick={() => nextId && navigate(`/eval/review/${nextId}`)} disabled={!nextId}
+          <button onClick={() => nextId && navTo(nextId)} disabled={!nextId}
             className="px-3 py-1.5 border rounded text-sm disabled:opacity-30">Next →</button>
         </div>
       </div>
@@ -322,37 +393,52 @@ export default function ReviewEmail() {
               </div>
             )}
 
-            {/* Decision Log */}
+            {/* Decision Log — stored from eval run or replayed on demand */}
             <div className="mt-2 border-t pt-2">
-              <button
-                onClick={handleReplay}
-                disabled={replayLoading}
-                className="text-xs text-indigo-600 hover:text-indigo-800 disabled:opacity-50 font-medium"
-              >
-                {replayLoading ? "Running…" : replayOpen && replayLogs.length > 0 ? "↻ Re-run Decision Log" : "▶ Show Decision Log"}
-              </button>
-
-              {replayOpen && replayLogs.length > 0 && (
-                <div className="mt-2 bg-gray-900 rounded p-2 max-h-72 overflow-y-auto font-mono text-xs space-y-0.5">
-                  {replayLogs.map((entry, i) => (
-                    <div
-                      key={i}
-                      className={
-                        entry.level === "error"
-                          ? "text-red-400"
-                          : entry.level === "success"
-                          ? "text-green-400"
-                          : entry.level === "warn"
-                          ? "text-yellow-400"
-                          : "text-gray-300"
-                      }
-                    >
-                      <span className="text-gray-500 mr-1">[{entry.stage}]</span>
-                      {entry.message}
+              {email.decision_log_json ? (
+                /* Stored log from the actual eval run — most accurate */
+                (() => {
+                  let stored: ReplayLogEntry[] = [];
+                  try { stored = JSON.parse(email.decision_log_json!); } catch { return null; }
+                  const levelColor = (l: string) =>
+                    l === "error" ? "text-red-400" : l === "success" ? "text-green-400"
+                    : l === "warn" ? "text-yellow-400" : "text-gray-300";
+                  return (
+                    <>
+                      <div className="text-xs text-indigo-600 font-medium mb-1">Pipeline Decision Log (from eval run)</div>
+                      <div className="bg-gray-900 rounded p-2 max-h-72 overflow-y-auto font-mono text-xs space-y-0.5">
+                        {stored.map((e, i) => (
+                          <div key={i} className={levelColor(e.level)}>
+                            <span className="text-gray-500 mr-1">[{e.stage}]</span>{e.message}
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  );
+                })()
+              ) : (
+                /* Fallback: fresh rule-based replay (for emails without stored log) */
+                <>
+                  <button
+                    onClick={handleReplay}
+                    disabled={replayLoading}
+                    className="text-xs text-indigo-600 hover:text-indigo-800 disabled:opacity-50 font-medium"
+                  >
+                    {replayLoading ? "Running…" : replayOpen && replayLogs.length > 0 ? "↻ Re-run Decision Log" : "▶ Show Decision Log (rule-based replay)"}
+                  </button>
+                  {replayOpen && replayLogs.length > 0 && (
+                    <div className="mt-2 bg-gray-900 rounded p-2 max-h-72 overflow-y-auto font-mono text-xs space-y-0.5">
+                      {replayLogs.map((entry, i) => (
+                        <div key={i}
+                          className={entry.level === "error" ? "text-red-400" : entry.level === "success" ? "text-green-400"
+                            : entry.level === "warn" ? "text-yellow-400" : "text-gray-300"}>
+                          <span className="text-gray-500 mr-1">[{entry.stage}]</span>{entry.message}
+                        </div>
+                      ))}
+                      <div ref={logEndRef} />
                     </div>
-                  ))}
-                  <div ref={logEndRef} />
-                </div>
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -383,6 +469,7 @@ export default function ReviewEmail() {
                   </button>
                 ))}
               </div>
+
             </div>
 
             {/* Company */}
@@ -398,6 +485,7 @@ export default function ReviewEmail() {
               <datalist id="company-options">
                 {options?.companies.map(c => <option key={c} value={c} />)}
               </datalist>
+
             </div>
 
             {/* Job Title */}
@@ -413,6 +501,7 @@ export default function ReviewEmail() {
               <datalist id="title-options">
                 {options?.job_titles.map(t => <option key={t} value={t} />)}
               </datalist>
+
             </div>
 
             {/* Status */}
@@ -425,6 +514,7 @@ export default function ReviewEmail() {
                 <option value="">— Select —</option>
                 {options?.statuses.map(s => <option key={s} value={s}>{s}</option>)}
               </select>
+
             </div>
 
             {/* Application Group */}
@@ -504,7 +594,7 @@ export default function ReviewEmail() {
                           placeholder="Job Title" />
                         <button 
                           onClick={async () => {
-                            const g = await createGroup({ company: newGroupCompany, job_title: newGroupTitle });
+                            const g = await createGroup({ company: newGroupCompany, job_title: newGroupTitle, eval_run_id: runId });
                             setGroups(prev => [g, ...prev]);
                             setLabel(p => ({ ...p, correct_application_group_id: g.id }));
                             setShowNewGroup(false);
@@ -520,7 +610,58 @@ export default function ReviewEmail() {
                   </div>
                 </div>
               )}
+
+
+              {/* Group Member Preview */}
+              {label.correct_application_group_id && (
+                <div className="mt-2">
+                  <div className="text-xs text-gray-500 font-medium mb-1 flex items-center gap-2">
+                    Emails in this group
+                    {loadingGroupMembers && <span className="text-gray-400">loading…</span>}
+                    {!loadingGroupMembers && <span className="text-gray-400">({groupMembers.length})</span>}
+                  </div>
+                  {!loadingGroupMembers && groupMembers.length === 0 && (
+                    <div className="text-xs text-gray-400 italic">No other labeled emails in this group yet.</div>
+                  )}
+                  {groupMembers.length > 0 && (
+                    <div className="space-y-1 max-h-40 overflow-y-auto">
+                      {groupMembers.map(m => (
+                        <div
+                          key={m.cached_email_id}
+                          className={`flex items-start gap-1.5 text-xs p-1.5 rounded border ${
+                            m.cached_email_id === emailId
+                              ? "bg-blue-50 border-blue-200"
+                              : "bg-gray-50 border-gray-100"
+                          }`}
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="font-medium text-gray-700 truncate">{m.subject}</div>
+                            <div className="text-gray-400 truncate">{m.sender}</div>
+                          </div>
+                          {m.cached_email_id !== emailId && (
+                            <div className="shrink-0">
+                              <Link to={`/eval/review/${m.cached_email_id}`}
+                                className="text-[10px] text-blue-500 hover:underline">
+                                review →
+                              </Link>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
+
+            {/* Correction & Decision Log — inline in GT column */}
+            {savedLabelData && (
+              <CorrectionLog
+                emailId={emailId}
+                correctionsJson={savedLabelData.corrections_json}
+                groupingAnalysisJson={savedLabelData.grouping_analysis_json}
+              />
+            )}
 
             {/* Notes */}
             <div>
@@ -534,6 +675,130 @@ export default function ReviewEmail() {
           </div>
         </div>
       </div>
+
+
     </div>
   );
 }
+
+// ── CorrectionLog ─────────────────────────────────────────
+// Human-correction log displayed in the same [stage] message format as the
+// Decision Log panel, below the three-column review area.
+
+interface LogLine { stage: string; message: string; level: "info" | "success" | "warn" | "error" }
+
+function CorrectionLog({
+  correctionsJson,
+  groupingAnalysisJson,
+}: {
+  emailId: number;
+  correctionsJson: string | null;
+  groupingAnalysisJson: string | null;
+}) {
+  const lines: LogLine[] = [];
+
+  // ── Corrections (all entries — label is already run-scoped) ───
+  const corrections: (CorrectionEntry & Record<string, unknown>)[] =
+    correctionsJson ? (() => { try { return JSON.parse(correctionsJson); } catch { return []; } })() : [];
+
+  for (const c of corrections) {
+    const ts = new Date(c.at).toLocaleString();
+    const runBadge = (c as Record<string, unknown>).run_id ? ` [Run #${(c as Record<string, unknown>).run_id}]` : "";
+    if (c.field === "group_assignment") {
+      const from = (c.from_group_name as string | null) ?? "(none)";
+      const to = (c.to_group_name as string | null) ?? "(none)";
+      lines.push({ stage: "group", message: `${ts}${runBadge}  ${from} → ${to}`, level: "info" });
+    } else {
+      const pred = String(c.predicted ?? "—");
+      const corr = String(c.corrected ?? "—");
+      lines.push({
+        stage: c.field,
+        message: `${ts}${runBadge}  "${pred}" → "${corr}"`,
+        level: "warn",
+      });
+    }
+  }
+
+  // ── Grouping analysis ─────────────────────────────────
+  let ga: GroupingAnalysis | null = null;
+  try { ga = groupingAnalysisJson ? JSON.parse(groupingAnalysisJson) : null; } catch { ga = null; }
+
+  if (ga) {
+    const ts = new Date(ga.at).toLocaleString();
+    lines.push({ stage: "grouping", message: `══ Grouping Analysis (computed ${ts}) ══`, level: "info" });
+
+    // Raw predicted values
+    const predCompany = ga.predicted_company || "(none — pipeline extracted nothing)";
+    const predTitle   = ga.predicted_title   || "(none — pipeline extracted nothing)";
+    lines.push({ stage: "grouping", message: `  Pipeline predicted  →  company: "${predCompany}"`, level: ga.predicted_company ? "info" : "warn" });
+    lines.push({ stage: "grouping", message: `                          title:   "${predTitle}"`, level: ga.predicted_title ? "info" : "warn" });
+
+    // Raw correct values
+    const corrCompany = ga.correct_company || "(not set)";
+    const corrTitle   = ga.correct_title   || "(not set)";
+    lines.push({ stage: "grouping", message: `  Human labeled       →  company: "${corrCompany}"`, level: ga.correct_company ? "info" : "warn" });
+    lines.push({ stage: "grouping", message: `                          title:   "${corrTitle}"`, level: ga.correct_title ? "info" : "warn" });
+
+    // Normalized dedup keys
+    lines.push({ stage: "grouping", message: `  Dedup key (normalized):`, level: "info" });
+    const predKey = `("${ga.predicted_company_norm || ""}", "${ga.predicted_title_norm || ""}")`;
+    const corrKey = `("${ga.correct_company_norm || ""}", "${ga.correct_title_norm || ""}")`;
+    lines.push({ stage: "grouping", message: `    predicted = ${predKey}`, level: ga.company_key_matches && ga.title_key_matches ? "success" : "error" });
+    lines.push({ stage: "grouping", message: `    correct   = ${corrKey}`, level: "info" });
+
+    // Per-field match
+    lines.push({
+      stage: "grouping",
+      message: `  company norm match: ${ga.company_key_matches ? "✓ same" : `✗ DIFFERENT  ("${ga.predicted_company_norm || ""}" ≠ "${ga.correct_company_norm || ""}")`}`,
+      level: ga.company_key_matches ? "success" : "error",
+    });
+    lines.push({
+      stage: "grouping",
+      message: `  title norm match:   ${ga.title_key_matches ? "✓ same" : `✗ DIFFERENT  ("${ga.predicted_title_norm || ""}" ≠ "${ga.correct_title_norm || ""}")`}`,
+      level: ga.title_key_matches ? "success" : "error",
+    });
+
+    // Conclusion
+    if (ga.dedup_key_failure) {
+      lines.push({ stage: "grouping", message: `  → GROUPING FAILED: ${ga.dedup_key_failure} key mismatch caused wrong group assignment`, level: "error" });
+    } else {
+      lines.push({ stage: "grouping", message: "  → Dedup key matches correctly — grouping logic was right ✓", level: "success" });
+    }
+
+    // Co-members
+    if (ga.co_member_count > 0) {
+      const ids = ga.co_member_email_ids.slice(0, 8).map(id => `#${id}`).join(", ");
+      lines.push({ stage: "grouping", message: `  Cluster co-members in correct group (${ga.co_member_count}): ${ids}${ga.co_member_count > 8 ? " …" : ""}`, level: "info" });
+    } else {
+      lines.push({ stage: "grouping", message: "  No other labeled emails in this group yet (cluster size = 1)", level: "warn" });
+    }
+  }
+
+  const levelColor = (l: LogLine["level"]) =>
+    l === "error" ? "text-red-400"
+    : l === "success" ? "text-green-400"
+    : l === "warn" ? "text-yellow-400"
+    : "text-gray-300";
+
+  return (
+    <div className="bg-white rounded-lg shadow p-4">
+      <h3 className="text-sm font-semibold text-gray-700 mb-2">Correction &amp; Decision Log</h3>
+      {lines.length === 0 ? (
+        <p className="text-xs text-gray-400 italic">
+          No corrections recorded yet — save this label (assign a group or change any field) to start the log.
+        </p>
+      ) : (
+        <div className="bg-gray-900 rounded p-3 max-h-72 overflow-y-auto font-mono text-xs space-y-0.5">
+          {lines.map((ln, i) => (
+            <div key={i} className={levelColor(ln.level)}>
+              <span className="text-gray-500 mr-1">[{ln.stage}]</span>
+              {ln.message}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+

@@ -61,6 +61,7 @@ class CachedEmailDetailOut(CachedEmailOut):
     predicted_application_group: Optional[int] = None
     predicted_application_group_display: Optional[str] = None  # "Company — Job Title (date)"
     predicted_confidence: Optional[float] = None
+    decision_log_json: Optional[str] = None  # step-by-step log from the actual eval run
 
 
 class CachedEmailListOut(BaseModel):
@@ -73,6 +74,59 @@ class CachedEmailListOut(BaseModel):
 # ── Labels ────────────────────────────────────────────────
 
 
+# ── Correction taxonomy ──────────────────────────────────
+# Each string is a machine-readable key; the UI maps these to human labels.
+
+CORRECTION_ERROR_TYPES: dict[str, list[dict]] = {
+    "company": [
+        {"key": "sender_domain_fallback",  "label": "Sender-domain fallback",      "desc": "Pipeline used the email domain instead of the real company name"},
+        {"key": "linkedin_inmail",          "label": "LinkedIn InMail",              "desc": "Sender is linkedin.com; actual hiring company is in subject/body"},
+        {"key": "ats_platform_sender",      "label": "ATS platform sender",          "desc": "Greenhouse / Lever / Workday sent the email, not the company"},
+        {"key": "recruiter_outreach",       "label": "Third-party recruiter",        "desc": "Recruiting agency sent the email; hiring company is their client"},
+        {"key": "wrong_regex_match",        "label": "Wrong regex match",            "desc": "Subject regex latched onto the wrong token"},
+        {"key": "company_alias",            "label": "Company alias / parent name",  "desc": "Pipeline used a different legal/brand name (e.g. Alphabet vs Google)"},
+        {"key": "no_company_signal",        "label": "No company signal",            "desc": "Email has no extractable company name"},
+    ],
+    "job_title": [
+        {"key": "title_too_generic",        "label": "Title too generic",            "desc": "Extracted title is too vague (e.g. just 'Engineer')"},
+        {"key": "title_includes_junk",      "label": "Title includes extra tokens",  "desc": "Regex captured surrounding words along with the title"},
+        {"key": "no_title_signal",          "label": "No explicit title",            "desc": "Email never states the job title explicitly"},
+        {"key": "wrong_pattern_phase",      "label": "Wrong extraction phase",       "desc": "Title came from a phase/pattern that was not the best match"},
+    ],
+    "status": [
+        {"key": "soft_rejection_missed",    "label": "Soft rejection not detected",  "desc": "Polite 'keep your resume on file' language was not caught"},
+        {"key": "on_hold_not_rejection",    "label": "'On hold' = effective rejection","desc": "Position put on hold, pipeline did not treat it as a rejection"},
+        {"key": "wrong_keyword_matched",    "label": "Wrong keyword fired",          "desc": "A keyword matched a status that does not apply"},
+        {"key": "status_ambiguous",         "label": "Status genuinely ambiguous",   "desc": "Email could reasonably be interpreted as multiple statuses"},
+    ],
+    "classification": [
+        {"key": "false_pos_newsletter",     "label": "Newsletter / job alert",       "desc": "Email is a digest or newsletter, not an application confirmation"},
+        {"key": "false_pos_verification",   "label": "Security / verification email","desc": "OTP, password reset, or identity verification"},
+        {"key": "false_pos_recruiter",      "label": "Recruiter cold outreach",      "desc": "Recruiter inquiry — no application was submitted"},
+        {"key": "false_neg_no_keywords",    "label": "Job email missing keywords",   "desc": "Genuine job email but lacked any signal keywords"},
+    ],
+    "application_group": [
+        {"key": "same_app_split",           "label": "Same application split",       "desc": "Emails from one application were split into multiple predicted groups"},
+        {"key": "different_apps_merged",    "label": "Different applications merged","desc": "Emails from distinct applications were merged into one predicted group"},
+        {"key": "thread_mismatch",          "label": "Wrong thread merged",          "desc": "Reply to a different job was merged with this application"},
+        {"key": "company_name_variant",     "label": "Company name variant",         "desc": "Predicted group used a different company name spelling/alias"},
+    ],
+    "other": [
+        {"key": "other",                    "label": "Other (see reason field)",     "desc": "None of the above — fill in the reason text"},
+    ],
+}
+
+
+class CorrectionEntryIn(BaseModel):
+    """One human-annotated correction for a single predicted field."""
+    field: str                          # "company" | "job_title" | "status" | "classification" | "application_group"
+    predicted: Optional[str] = None     # raw predicted value (string representation)
+    corrected: Optional[str] = None     # human-corrected value
+    error_type: Optional[str] = None    # key from CORRECTION_ERROR_TYPES taxonomy
+    evidence: Optional[str] = None      # text from subject/body that supports the correction
+    reason: Optional[str] = None        # free-text explanation of why the prediction failed
+
+
 class EvalLabelIn(BaseModel):
     is_job_related: Optional[bool] = None
     correct_company: Optional[str] = None
@@ -83,6 +137,10 @@ class EvalLabelIn(BaseModel):
     correct_application_group_id: Optional[int] = None
     notes: Optional[str] = None
     review_status: str = "labeled"
+    # Human-provided structured corrections (optional; if absent, backend auto-detects)
+    corrections: Optional[List[CorrectionEntryIn]] = None
+    # Which eval run this save is associated with (for correction log scoping)
+    run_id: Optional[int] = None
 
 
 class EvalLabelOut(BaseModel):
@@ -99,6 +157,8 @@ class EvalLabelOut(BaseModel):
     labeled_at: Optional[datetime] = None
     notes: Optional[str] = None
     review_status: str
+    corrections_json: Optional[str] = None          # JSON list of {"field","predicted","corrected","at"}
+    grouping_analysis_json: Optional[str] = None    # JSON grouping decision learning record
 
     model_config = {"from_attributes": True}
 
@@ -117,10 +177,12 @@ class EvalGroupIn(BaseModel):
     company: Optional[str] = None
     job_title: Optional[str] = None
     notes: Optional[str] = None
+    eval_run_id: Optional[int] = None  # scope this group to a specific eval run
 
 
 class EvalGroupOut(BaseModel):
     id: int
+    eval_run_id: Optional[int] = None
     name: str
     company: Optional[str] = None
     job_title: Optional[str] = None
@@ -208,6 +270,14 @@ class EvalRunResultOut(BaseModel):
     # Joined fields for display
     email_subject: Optional[str] = None
     email_sender: Optional[str] = None
+
+    # Human ground-truth label (joined from EvalLabel if exists)
+    label_is_job_related: Optional[bool] = None
+    label_company: Optional[str] = None
+    label_job_title: Optional[str] = None
+    label_status: Optional[str] = None
+    label_review_status: Optional[str] = None  # unlabeled | labeled | skipped | uncertain
+    decision_log_json: Optional[str] = None    # step-by-step log from the actual eval run
 
     model_config = {"from_attributes": True}
 

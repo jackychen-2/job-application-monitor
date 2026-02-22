@@ -68,11 +68,18 @@ class CachedEmail(Base):
 # ---------------------------------------------------------------------------
 
 class EvalApplicationGroup(Base):
-    """A named group representing a single real-world job application (ground truth)."""
+    """A named group representing a single real-world job application (ground truth).
+
+    Groups are scoped to an eval run via eval_run_id — each run has its own isolated
+    set of application groups. Legacy groups (before run-scoping) have eval_run_id=NULL.
+    """
 
     __tablename__ = "eval_application_groups"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    eval_run_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("eval_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     name: Mapped[str] = mapped_column(String(300), nullable=False)
     company: Mapped[str | None] = mapped_column(String(200), nullable=True)
     job_title: Mapped[str | None] = mapped_column(String(300), nullable=True)
@@ -121,16 +128,22 @@ class EvalPredictedGroup(Base):
 # ---------------------------------------------------------------------------
 
 class EvalLabel(Base):
-    """Human-annotated ground truth for a cached email."""
+    """Human-annotated ground truth for a cached email.
+
+    Run-scoped: one row per (cached_email_id, eval_run_id). Legacy rows have eval_run_id=NULL.
+    """
 
     __tablename__ = "eval_labels"
     __table_args__ = (
-        UniqueConstraint("cached_email_id", name="uq_eval_label_email"),
+        UniqueConstraint("cached_email_id", "eval_run_id", name="uq_eval_label_email_run"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     cached_email_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("cached_emails.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    eval_run_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("eval_runs.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
     # Classification
@@ -155,6 +168,15 @@ class EvalLabel(Base):
     review_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="unlabeled"
     )  # unlabeled, labeled, skipped, uncertain
+
+    # Correction audit log — JSON list of {"field", "predicted", "corrected", "at"}
+    # Appended to on every save where a field differs from the pipeline prediction.
+    corrections_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Grouping decision learning data — computed when correct_application_group_id is set.
+    # Captures the predicted dedup key, correct dedup key, which key part differed,
+    # and cluster co-membership so a future model can learn grouping decisions.
+    grouping_analysis_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships
     cached_email: Mapped[CachedEmail] = relationship(back_populates="label")
@@ -247,6 +269,10 @@ class EvalRunResult(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     estimated_cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    # Step-by-step decision log recorded during the actual eval run
+    # JSON list of {"stage": str, "message": str, "level": str}
+    decision_log_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships
     eval_run: Mapped[EvalRun] = relationship(back_populates="results")

@@ -50,6 +50,7 @@ def run_evaluation(
     run_name: Optional[str] = None,
     progress_cb: Optional[Callable[[str, int, int], None]] = None,
     cancel_token: Optional[threading.Event] = None,
+    max_emails: Optional[int] = None,
 ) -> EvalRun:
     """Run the full pipeline on all cached emails and compute metrics against labels.
 
@@ -83,9 +84,11 @@ def run_evaluation(
     session.add(eval_run)
     session.flush()
 
-    # Load all cached emails
+    # Load all cached emails (optionally limited)
     _log("Loading cached emails from database…")
     cached_emails = session.query(CachedEmail).order_by(CachedEmail.email_date).all()
+    if max_emails and max_emails > 0:
+        cached_emails = cached_emails[:max_emails]
     eval_run.total_emails = len(cached_emails)
 
     # Load labels indexed by cached_email_id
@@ -125,7 +128,6 @@ def run_evaluation(
         _log(f"[{idx + 1}/{total}] {subject_preview}", idx + 1, total)
         parsed = reparse_cached_email(cached)
         if parsed is None:
-            # Use cached metadata as fallback
             subject = cached.subject or ""
             sender = cached.sender or ""
             body = cached.body_text or ""
@@ -134,6 +136,16 @@ def run_evaluation(
             sender = parsed.sender
             body = parsed.body_text
 
+        # ── Per-email decision log ────────────────────────────
+        dlog: list[dict] = []
+
+        def dstep(stage: str, msg: str, level: str = "info") -> None:
+            dlog.append({"stage": stage, "message": msg, "level": level})
+
+        dstep("input", f"Subject : {subject[:120]!r}")
+        dstep("input", f"Sender  : {sender[:120]!r}")
+        dstep("input", f"Body    : {body[:200]!r}{'…' if len(body) > 200 else ''}")
+
         # Run pipeline stages
         llm_result: Optional[LLMExtractionResult] = None
         llm_used = False
@@ -141,6 +153,7 @@ def run_evaluation(
         # Stage 1: LLM extraction (if available)
         if llm_provider is not None:
             llm_used = True
+            dstep("llm", f"LLM enabled: {config.llm_provider} / {config.llm_model}")
             try:
                 llm_result = extract_with_timeout(
                     llm_provider, sender, subject, body, timeout_sec=config.llm_timeout_sec
@@ -148,37 +161,66 @@ def run_evaluation(
                 eval_run.total_prompt_tokens += llm_result.prompt_tokens
                 eval_run.total_completion_tokens += llm_result.completion_tokens
                 eval_run.total_estimated_cost += llm_result.estimated_cost_usd
-            except Exception:
+                dstep("llm", f"is_job={llm_result.is_job_application}  company={llm_result.company!r}  "
+                      f"title={llm_result.job_title!r}  status={llm_result.status!r}  "
+                      f"confidence={llm_result.confidence}  tokens={llm_result.prompt_tokens}+{llm_result.completion_tokens}")
+            except Exception as llm_exc:
+                dstep("llm", f"LLM failed: {llm_exc} — falling back to rules", "error")
                 llm_result = None
+        else:
+            dstep("llm", "LLM disabled — rule-based pipeline only", "info")
 
         # Stage 2: Classification
+        dstep("classification", "═══ Stage 2: Classification ═══")
         if llm_result is not None:
             pred_is_job = llm_result.is_job_application
+            dstep("classification", f"LLM result: is_job_application={pred_is_job}",
+                  "success" if pred_is_job else "warn")
         else:
             pred_is_job = is_job_related(subject, sender)
+            dstep("classification",
+                  f"Rule-based: is_job_related={pred_is_job} (subject: {subject[:80]!r})",
+                  "success" if pred_is_job else "warn")
+
+        if not pred_is_job:
+            dstep("classification", "→ Not job-related — skipping field extraction", "warn")
 
         # Stage 3: Field extraction
+        dstep("company", "═══ Stage 3: Company ═══")
+        dstep("title",   "═══ Stage 3: Title ═══")
+        dstep("status",  "═══ Stage 3: Status ═══")
         if llm_result is not None and llm_result.is_job_application:
             pred_company = llm_result.company or extract_company(subject, sender)
             pred_title = _validate_job_title(llm_result.job_title) or _validate_job_title(extract_job_title(subject, body))
             llm_status = llm_result.status
             if llm_status and llm_status.lower() != "unknown":
                 pred_status = llm_status
+                dstep("status", f"LLM: {pred_status!r}", "success")
             else:
                 pred_status = extract_status(subject, body)
+                dstep("status", f"LLM returned unknown → rule fallback: {pred_status!r}", "warn")
             pred_confidence = llm_result.confidence
+            dstep("company", f"LLM: {pred_company!r} (raw={llm_result.company!r})",
+                  "success" if pred_company else "warn")
+            dstep("title",   f"LLM: {pred_title!r} (raw={llm_result.job_title!r})",
+                  "success" if pred_title else "warn")
         else:
             pred_company = extract_company(subject, sender)
             pred_title = _validate_job_title(extract_job_title(subject, body))
             pred_status = extract_status(subject, body)
             pred_confidence = None
+            dstep("company", f"Rules: {pred_company!r}", "success" if pred_company and pred_company != "Unknown" else "warn")
+            dstep("title",   f"Rules: {pred_title!r}", "success" if pred_title else "warn")
+            dstep("status",  f"Rules: {pred_status!r}", "success")
 
-        # Stage 4: Grouping (create EvalPredictedGroup by company+title dedup)
+        # Stage 4: Grouping
+        dstep("grouping", "═══ Stage 4: Grouping ═══")
         pred_group_id = None
         if pred_is_job and pred_company:
             company_norm = pred_company.strip().lower()
             title_norm = (pred_title or "").strip().lower()
             key = (company_norm, title_norm)
+            dstep("grouping", f"Dedup key: ({company_norm!r}, {title_norm!r})")
             if key not in app_group_map:
                 pred_group = EvalPredictedGroup(
                     eval_run_id=eval_run.id,
@@ -190,7 +232,12 @@ def run_evaluation(
                 session.add(pred_group)
                 session.flush()  # Get ID
                 app_group_map[key] = pred_group.id
+                dstep("grouping", f"New predicted group #{pred_group.id}", "info")
+            else:
+                dstep("grouping", f"Matched existing predicted group #{app_group_map[key]}", "success")
             pred_group_id = app_group_map[key]
+        else:
+            dstep("grouping", "Skipped (not job-related or no company extracted)", "warn")
 
         result = EvalRunResult(
             eval_run_id=eval_run.id,
@@ -202,6 +249,7 @@ def run_evaluation(
             predicted_application_group_id=pred_group_id,
             predicted_confidence=pred_confidence,
             llm_used=llm_used,
+            decision_log_json=json.dumps(dlog, ensure_ascii=False),
             prompt_tokens=llm_result.prompt_tokens if llm_result else 0,
             completion_tokens=llm_result.completion_tokens if llm_result else 0,
             estimated_cost_usd=llm_result.estimated_cost_usd if llm_result else 0.0,

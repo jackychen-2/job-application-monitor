@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { getCacheStats, listEvalRuns, streamEvalRun, cancelEvalRun, downloadEmails } from "../../api/eval";
+import { getCacheStats, listEvalRuns, streamEvalRun, cancelEvalRun, downloadEmails, getEvalSettings, setLlmEnabled } from "../../api/eval";
+import type { EvalSettings } from "../../api/eval";
 import type { CacheStats, EvalRun, CacheDownloadResult } from "../../types/eval";
 
 interface EvalLogEntry {
@@ -18,11 +19,19 @@ export default function EvalDashboard() {
   const [beforeDate, setBeforeDate] = useState("");
   const [maxCount, setMaxCount] = useState(500);
 
+  // Eval run options
+  const [maxEmails, setMaxEmails] = useState<number>(0); // 0 = all
+
   // Eval progress state
   const [evalLogs, setEvalLogs] = useState<EvalLogEntry[]>([]);
   const [evalProgress, setEvalProgress] = useState(0);
   const [evalTotal, setEvalTotal] = useState(0);
   const [cancelRequested, setCancelRequested] = useState(false);
+
+
+
+  // LLM settings
+  const [settings, setSettings] = useState<EvalSettings | null>(null);
 
   const esRef = useRef<EventSource | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
@@ -32,7 +41,10 @@ export default function EvalDashboard() {
     listEvalRuns().then(setRuns);
   };
 
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    refresh();
+    getEvalSettings().then(setSettings).catch(() => {});
+  }, []);
 
   // Auto-scroll log panel to bottom on new entries
   useEffect(() => {
@@ -68,7 +80,7 @@ export default function EvalDashboard() {
     setCancelRequested(false);
     setRunningEval(true);
 
-    const es = streamEvalRun();
+    const es = streamEvalRun(undefined, maxEmails > 0 ? maxEmails : undefined);
     esRef.current = es;
 
     es.onmessage = (event) => {
@@ -130,6 +142,8 @@ export default function EvalDashboard() {
     }
   };
 
+
+
   const latestRun = runs[0];
   const progressPct = evalTotal > 0 ? Math.round((evalProgress / evalTotal) * 100) : 0;
 
@@ -138,8 +152,11 @@ export default function EvalDashboard() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-gray-900">Evaluation Dashboard</h1>
         <div className="flex gap-2">
-          <Link to="/eval/review" className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium">
-            Review Emails
+          <Link
+            to={latestRun ? `/eval/review?run_id=${latestRun.id}` : "/eval/review"}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
+          >
+            Review Emails{latestRun ? ` (Run #${latestRun.id})` : ""}
           </Link>
           <Link to="/eval/runs" className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 text-sm font-medium">
             All Runs
@@ -229,24 +246,63 @@ export default function EvalDashboard() {
           {stats?.total_labeled || 0} labels.
         </p>
 
-        {/* Action buttons */}
-        <div className="flex gap-3 items-center">
-          <button
-            onClick={handleRunEval}
-            disabled={runningEval || !stats?.total_cached}
-            className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm font-medium"
-          >
-            {runningEval ? "Running…" : "Run Evaluation"}
-          </button>
-          {runningEval && (
+        {/* LLM toggle */}
+        {settings && (
+          <div className="flex items-center gap-3 mb-4 p-3 bg-gray-50 rounded-lg">
+            <span className="text-sm text-gray-600">LLM</span>
             <button
-              onClick={handleCancelEval}
-              disabled={cancelRequested}
-              className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-50 text-sm font-medium"
+              onClick={async () => {
+                const updated = await setLlmEnabled(!settings.llm_enabled);
+                setSettings(updated);
+              }}
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                settings.llm_enabled ? "bg-green-500" : "bg-gray-300"
+              }`}
             >
-              {cancelRequested ? "Cancelling…" : "Cancel"}
+              <span
+                className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                  settings.llm_enabled ? "translate-x-4" : "translate-x-0"
+                }`}
+              />
             </button>
-          )}
+            <span className={`text-sm font-medium ${settings.llm_enabled ? "text-green-700" : "text-gray-500"}`}>
+              {settings.llm_enabled ? `Enabled (${settings.llm_provider} / ${settings.llm_model})` : "Disabled — rule-based only"}
+            </span>
+          </div>
+        )}
+
+        {/* Action buttons */}
+        <div className="flex gap-3 items-center flex-wrap">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Emails to evaluate</label>
+            <input
+              type="number"
+              value={maxEmails || ""}
+              onChange={e => setMaxEmails(Number(e.target.value))}
+              placeholder={`All (${stats?.total_cached || 0})`}
+              min={1}
+              max={stats?.total_cached || undefined}
+              className="border rounded px-3 py-2 text-sm w-32"
+            />
+          </div>
+          <div className="flex gap-2 items-end pt-4">
+            <button
+              onClick={handleRunEval}
+              disabled={runningEval || !stats?.total_cached}
+              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm font-medium"
+            >
+              {runningEval ? "Running…" : "Run Evaluation"}
+            </button>
+            {runningEval && (
+              <button
+                onClick={handleCancelEval}
+                disabled={cancelRequested}
+                className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-50 text-sm font-medium"
+              >
+                {cancelRequested ? "Cancelling…" : "Cancel"}
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Progress bar */}
@@ -288,6 +344,7 @@ export default function EvalDashboard() {
           </div>
         )}
       </div>
+
     </div>
   );
 }

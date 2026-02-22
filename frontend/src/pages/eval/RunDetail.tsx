@@ -263,55 +263,99 @@ export default function RunDetail() {
         </div>
       )}
 
-      {/* All Errors */}
+      {/* Predicted vs Ground Truth */}
       <div className="bg-white rounded-lg shadow p-6">
-        <h2 className="text-lg font-semibold mb-4">Error Details</h2>
-        {!showErrors ? (
-          <button onClick={loadErrors} className="px-4 py-2 bg-gray-100 rounded text-sm hover:bg-gray-200">
-            Load all error results
-          </button>
-        ) : (
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold">
+            Predicted vs Ground Truth
+            <span className="ml-2 text-sm font-normal text-gray-500">({run.total_emails} emails evaluated)</span>
+          </h2>
+          <div className="flex gap-2">
+            {!showErrors && (
+              <>
+                <button
+                  onClick={() => { if (!id) return; getEvalRunResults(Number(id), false).then(r => { setErrors(r); setShowErrors(true); }); }}
+                  className="px-3 py-1.5 bg-gray-100 rounded text-sm hover:bg-gray-200">
+                  Load all
+                </button>
+                <button onClick={loadErrors}
+                  className="px-3 py-1.5 bg-red-50 text-red-700 rounded text-sm hover:bg-red-100">
+                  Errors only
+                </button>
+              </>
+            )}
+            {showErrors && (
+              <span className="text-sm text-gray-500">{errors.length} result{errors.length !== 1 ? "s" : ""}</span>
+            )}
+          </div>
+        </div>
+
+        {showErrors && errors.length > 0 && (
           <div className="overflow-x-auto">
-            <p className="text-sm text-gray-500 mb-2">{errors.length} results with errors</p>
-            <table className="min-w-full text-xs divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-2 py-2 text-left">Email</th>
-                  <th className="px-2 py-2">Class</th>
-                  <th className="px-2 py-2">Company</th>
-                  <th className="px-2 py-2">Title</th>
-                  <th className="px-2 py-2">Status</th>
-                  <th className="px-2 py-2">Group</th>
-                  <th className="px-2 py-2">Action</th>
+            <table className="min-w-full text-xs border-collapse">
+              <thead>
+                <tr className="bg-gray-50 border-b-2 border-gray-200">
+                  <th className="px-2 py-2 text-left font-medium text-gray-500" rowSpan={2}>#</th>
+                  <th className="px-2 py-2 text-left font-medium text-gray-500" rowSpan={2}>Email</th>
+                  <th className="px-2 py-2 text-center font-medium text-gray-500 border-l" colSpan={2}>Is Job?</th>
+                  <th className="px-2 py-2 text-center font-medium text-gray-500 border-l" colSpan={2}>Company</th>
+                  <th className="px-2 py-2 text-center font-medium text-gray-500 border-l" colSpan={2}>Title</th>
+                  <th className="px-2 py-2 text-center font-medium text-gray-500 border-l" colSpan={2}>Status</th>
+                  <th className="px-2 py-2 font-medium text-gray-500 border-l" rowSpan={2}></th>
+                </tr>
+                <tr className="bg-gray-50 border-b border-gray-200">
+                  <th className="px-2 py-1 text-center text-gray-400 border-l">pred</th>
+                  <th className="px-2 py-1 text-center text-gray-400">truth</th>
+                  <th className="px-2 py-1 text-center text-gray-400 border-l">pred</th>
+                  <th className="px-2 py-1 text-center text-gray-400">truth</th>
+                  <th className="px-2 py-1 text-center text-gray-400 border-l">pred</th>
+                  <th className="px-2 py-1 text-center text-gray-400">truth</th>
+                  <th className="px-2 py-1 text-center text-gray-400 border-l">pred</th>
+                  <th className="px-2 py-1 text-center text-gray-400">truth</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {errors.slice(0, 100).map(r => (
-                  <tr key={r.id}>
-                    <td className="px-2 py-1 max-w-xs truncate">{r.email_subject}</td>
-                    <td className="px-2 py-1 text-center">
-                      <Dot correct={r.classification_correct} />
-                    </td>
-                    <td className="px-2 py-1 text-center">
-                      <Dot correct={r.company_correct} />
-                    </td>
-                    <td className="px-2 py-1 text-center">
-                      <Dot correct={r.job_title_correct} />
-                    </td>
-                    <td className="px-2 py-1 text-center">
-                      <Dot correct={r.status_correct} />
-                    </td>
-                    <td className="px-2 py-1 text-center">
-                      <Dot correct={r.grouping_correct} />
-                    </td>
-                    <td className="px-2 py-1">
-                      <Link to={`/eval/review/${r.cached_email_id}`} className="text-blue-600 hover:underline">Review</Link>
-                    </td>
-                  </tr>
-                ))}
+                {errors.slice(0, 200).map((r, i) => {
+                  const rowBg = (r.classification_correct === false || r.company_correct === false || r.job_title_correct === false || r.status_correct === false)
+                    ? "bg-red-50/30" : "";
+                  const cell = (pred: string | boolean | null, truth: string | boolean | null, correct: boolean | null) => {
+                    const match = correct === true ? "text-green-700" : correct === false ? "text-red-600 font-medium" : "text-gray-500";
+                    return (
+                      <>
+                        <td className={`px-2 py-1 max-w-[80px] truncate border-l ${match}`}>{String(pred ?? "—")}</td>
+                        <td className={`px-2 py-1 max-w-[80px] truncate text-gray-600`}>{String(truth ?? "—")}</td>
+                      </>
+                    );
+                  };
+                  return (
+                    <tr key={r.id} className={`hover:bg-gray-50 ${rowBg}`}>
+                      <td className="px-2 py-1.5 text-gray-400 shrink-0">{i + 1}</td>
+                      <td className="px-2 py-1.5 max-w-[160px]">
+                        <div className="truncate font-medium text-gray-800">{r.email_subject || "(no subject)"}</div>
+                        <div className="truncate text-gray-400">{r.email_sender}</div>
+                        {r.label_review_status && r.label_review_status !== "unlabeled" && (
+                          <span className={`text-[10px] px-1 rounded ${r.label_review_status === "labeled" ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"}`}>
+                            {r.label_review_status}
+                          </span>
+                        )}
+                      </td>
+                      {cell(r.predicted_is_job_related ? "Yes" : "No", r.label_is_job_related !== null ? (r.label_is_job_related ? "Yes" : "No") : null, r.classification_correct)}
+                      {cell(r.predicted_company, r.label_company, r.company_correct)}
+                      {cell(r.predicted_job_title, r.label_job_title, r.job_title_correct)}
+                      {cell(r.predicted_status, r.label_status, r.status_correct)}
+                      <td className="px-2 py-1 border-l">
+                        <Link to={`/eval/review/${r.cached_email_id}`} className="text-blue-600 hover:underline whitespace-nowrap">Review →</Link>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
+        )}
+
+        {!showErrors && (
+          <p className="text-xs text-gray-400">Click "Load all" or "Errors only" to see the per-email comparison.</p>
         )}
       </div>
     </div>

@@ -23,6 +23,7 @@ export interface CachedEmailDetail extends CachedEmail {
   predicted_application_group: number | null;
   predicted_application_group_display: string | null;
   predicted_confidence: number | null;
+  decision_log_json: string | null; // step-by-step log from the actual eval run
 }
 
 export interface CachedEmailListResponse {
@@ -54,6 +55,102 @@ export interface CacheDownloadResult {
   total_fetched: number;
 }
 
+// ── Correction taxonomy ──────────────────────────────────
+
+export interface ErrorTypeOption {
+  key: string;
+  label: string;
+  desc: string;
+}
+
+export const CORRECTION_ERROR_TYPES: Record<string, ErrorTypeOption[]> = {
+  company: [
+    { key: "sender_domain_fallback",  label: "Sender-domain fallback",       desc: "Pipeline used the email domain instead of the real company name" },
+    { key: "linkedin_inmail",          label: "LinkedIn InMail",               desc: "Sender is linkedin.com; actual hiring company is in subject/body" },
+    { key: "ats_platform_sender",      label: "ATS platform sender",           desc: "Greenhouse / Lever / Workday sent the email, not the company" },
+    { key: "recruiter_outreach",       label: "Third-party recruiter",         desc: "Recruiting agency email; hiring company is their client" },
+    { key: "wrong_regex_match",        label: "Wrong regex match",             desc: "Subject regex latched onto the wrong token" },
+    { key: "company_alias",            label: "Company alias / parent name",   desc: "Different legal/brand name (e.g. Alphabet vs Google)" },
+    { key: "no_company_signal",        label: "No company signal in email",    desc: "Email has no extractable company name" },
+  ],
+  job_title: [
+    { key: "title_too_generic",        label: "Title too generic",             desc: "Extracted title is too vague (e.g. just 'Engineer')" },
+    { key: "title_includes_junk",      label: "Title includes extra tokens",   desc: "Regex captured surrounding words along with the title" },
+    { key: "no_title_signal",          label: "No explicit title in email",    desc: "Email never states the job title explicitly" },
+    { key: "wrong_pattern_phase",      label: "Wrong extraction phase",        desc: "Title came from a pattern/phase that was not the best match" },
+  ],
+  status: [
+    { key: "soft_rejection_missed",    label: "Soft rejection not detected",   desc: "Polite 'keep your resume on file' was not caught" },
+    { key: "on_hold_not_rejection",    label: "'On hold' = effective rejection", desc: "Position on hold; pipeline did not treat it as rejection" },
+    { key: "wrong_keyword_matched",    label: "Wrong keyword fired",           desc: "A keyword matched a status that does not apply" },
+    { key: "status_ambiguous",         label: "Status genuinely ambiguous",    desc: "Email could reasonably be interpreted multiple ways" },
+  ],
+  classification: [
+    { key: "false_pos_newsletter",     label: "Newsletter / job alert",        desc: "Email is a digest or newsletter, not an application confirmation" },
+    { key: "false_pos_verification",   label: "Security / verification email", desc: "OTP, password reset, or identity verification" },
+    { key: "false_pos_recruiter",      label: "Recruiter cold outreach",       desc: "Recruiter inquiry — no application was submitted" },
+    { key: "false_neg_no_keywords",    label: "Job email missing keywords",    desc: "Genuine job email but lacked signal keywords" },
+  ],
+  application_group: [
+    { key: "same_app_split",           label: "Same application split",        desc: "Emails from one application split into multiple predicted groups" },
+    { key: "different_apps_merged",    label: "Different applications merged", desc: "Emails from distinct applications merged into one predicted group" },
+    { key: "thread_mismatch",          label: "Wrong thread merged",           desc: "Reply to a different job was merged with this application" },
+    { key: "company_name_variant",     label: "Company name variant",          desc: "Predicted group used a different company name spelling/alias" },
+  ],
+  other: [
+    { key: "other",                    label: "Other (see reason field)",      desc: "None of the above — fill in the reason text" },
+  ],
+};
+
+// All field categories that can bear a correction
+export type CorrectionField = "company" | "job_title" | "status" | "classification" | "application_group";
+
+export interface CorrectionEntry {
+  field: string;
+  predicted: string | boolean | null;
+  corrected: string | boolean | null;
+  error_type: string | null;
+  evidence: string | null;   // text from subject/body that supports the correction
+  reason: string | null;     // free-text explanation of why the prediction failed
+  at: string;                // ISO timestamp
+}
+
+export interface CorrectionEntryInput {
+  field: string;
+  predicted?: string | null;
+  corrected?: string | null;
+  error_type?: string | null;
+  evidence?: string | null;
+  reason?: string | null;
+}
+
+export interface GroupingAnalysis {
+  // Pipeline's predicted dedup key
+  predicted_company: string | null;
+  predicted_title: string | null;
+  predicted_company_norm: string;
+  predicted_title_norm: string;
+  predicted_dedup_key: [string, string];
+
+  // Correct dedup key (derived from human-provided company/title)
+  correct_company: string;
+  correct_title: string;
+  correct_company_norm: string;
+  correct_title_norm: string;
+  correct_dedup_key: [string, string];
+
+  // Which part of the key was wrong
+  dedup_key_failure: "company" | "title" | "both" | null;
+  company_key_matches: boolean;
+  title_key_matches: boolean;
+
+  // Cluster co-membership: other emails that should be in the same group
+  co_member_email_ids: number[];
+  co_member_count: number;
+
+  at: string; // ISO timestamp of when this was computed
+}
+
 export interface EvalLabel {
   id: number;
   cached_email_id: number;
@@ -68,6 +165,8 @@ export interface EvalLabel {
   labeled_at: string | null;
   notes: string | null;
   review_status: string;
+  corrections_json: string | null;         // JSON-encoded CorrectionEntry[]
+  grouping_analysis_json: string | null;   // JSON-encoded GroupingAnalysis
 }
 
 export interface EvalLabelInput {
@@ -78,12 +177,14 @@ export interface EvalLabelInput {
   correct_recruiter_name?: string | null;
   correct_date_applied?: string | null;
   correct_application_group_id?: number | null;
+  run_id?: number | null; // scopes correction log entries to a specific eval run
   notes?: string | null;
   review_status?: string;
 }
 
 export interface EvalApplicationGroup {
   id: number;
+  eval_run_id: number | null;
   name: string;
   company: string | null;
   job_title: string | null;
@@ -105,6 +206,7 @@ export interface EvalGroupInput {
   company?: string;
   job_title?: string;
   notes?: string;
+  eval_run_id?: number;
 }
 
 export interface DropdownOptions {
@@ -160,6 +262,12 @@ export interface EvalRunResult {
   estimated_cost_usd: number;
   email_subject: string | null;
   email_sender: string | null;
+  // Human ground-truth labels
+  label_is_job_related: boolean | null;
+  label_company: string | null;
+  label_job_title: string | null;
+  label_status: string | null;
+  label_review_status: string | null;
 }
 
 // Report JSON structure (parsed from report_json)

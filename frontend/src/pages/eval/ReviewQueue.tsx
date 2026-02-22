@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { listCachedEmails, bulkUpdateLabels } from "../../api/eval";
-import type { CachedEmailListResponse } from "../../types/eval";
+import { listCachedEmails, bulkUpdateLabels, listEvalRuns } from "../../api/eval";
+import type { CachedEmailListResponse, EvalRun } from "../../types/eval";
 
 const STATUS_BADGE: Record<string, string> = {
   unlabeled: "bg-gray-100 text-gray-600",
@@ -15,9 +15,11 @@ export default function ReviewQueue() {
   const [data, setData] = useState<CachedEmailListResponse | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState(searchParams.get("search") || "");
+  const [runs, setRuns] = useState<EvalRun[]>([]);
 
   const page = Number(searchParams.get("page") || 1);
   const filter = searchParams.get("status") || "";
+  const runId = searchParams.get("run_id") ? Number(searchParams.get("run_id")) : undefined;
 
   const load = () => {
     listCachedEmails({
@@ -25,10 +27,19 @@ export default function ReviewQueue() {
       page_size: 50,
       review_status: filter || undefined,
       search: search || undefined,
+      run_id: runId,
     }).then(setData);
   };
 
-  useEffect(() => { load(); }, [page, filter, search]);
+  useEffect(() => { load(); }, [page, filter, search, runId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { listEvalRuns().then(setRuns); }, []);
+
+  const setRunFilter = (id: number | undefined) => {
+    const sp = new URLSearchParams(searchParams);
+    if (id) sp.set("run_id", String(id)); else sp.delete("run_id");
+    sp.set("page", "1");
+    setSearchParams(sp);
+  };
 
   const setPage = (p: number) => {
     const sp = new URLSearchParams(searchParams);
@@ -73,6 +84,23 @@ export default function ReviewQueue() {
 
       {/* Filters */}
       <div className="flex flex-wrap gap-3 items-center">
+        {/* Run filter */}
+        <div>
+          <select
+            value={runId ?? ""}
+            onChange={e => setRunFilter(e.target.value ? Number(e.target.value) : undefined)}
+            className="border rounded px-3 py-1.5 text-sm bg-white"
+          >
+            <option value="">All emails</option>
+            {runs.map(r => (
+              <option key={r.id} value={r.id}>
+                Run #{r.id} — {r.run_name || new Date(r.started_at).toLocaleDateString()} ({r.total_emails} emails)
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Status filter */}
         <div className="flex gap-1">
           {["", "unlabeled", "labeled", "skipped"].map(s => (
             <button key={s} onClick={() => setFilter(s)}
@@ -132,7 +160,7 @@ export default function ReviewQueue() {
                   </span>
                 </td>
                 <td className="px-4 py-3">
-                  <Link to={`/eval/review/${email.id}`} className="text-blue-600 text-sm hover:underline">Review</Link>
+                  <Link to={`/eval/review/${email.id}${runId ? `?run_id=${runId}` : ""}`} className="text-blue-600 text-sm hover:underline">Review</Link>
                 </td>
               </tr>
             ))}

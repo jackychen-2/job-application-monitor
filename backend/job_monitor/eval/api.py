@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import distinct, func
 from sqlalchemy.orm import Session
 
-from job_monitor.config import AppConfig, get_config
+from job_monitor.config import AppConfig, get_config, set_llm_enabled
 from job_monitor.database import get_db, get_session_factory
 from job_monitor.eval.cache import download_and_cache_emails
 from job_monitor.eval.models import (
@@ -50,6 +50,34 @@ from job_monitor.models import Application
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/eval", tags=["evaluation"])
+
+# ── Runtime settings ──────────────────────────────────────
+
+
+@router.get("/settings")
+def get_settings(config: AppConfig = Depends(get_config)):
+    """Return current runtime eval settings."""
+    return {
+        "llm_enabled": config.llm_enabled,
+        "llm_provider": config.llm_provider,
+        "llm_model": config.llm_model,
+    }
+
+
+@router.post("/settings")
+def update_settings(
+    llm_enabled: Optional[bool] = None,
+    config: AppConfig = Depends(get_config),
+):
+    """Toggle LLM enabled at runtime (no server restart required)."""
+    if llm_enabled is not None:
+        set_llm_enabled(llm_enabled)
+    return {
+        "llm_enabled": llm_enabled if llm_enabled is not None else config.llm_enabled,
+        "llm_provider": config.llm_provider,
+        "llm_model": config.llm_model,
+    }
+
 
 # ── Eval run state (module-level, single-process) ────────
 _eval_cancel_event: threading.Event = threading.Event()
@@ -109,10 +137,33 @@ def cache_list_emails(
     page_size: int = Query(50, ge=1, le=10000),
     review_status: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    run_id: Optional[int] = Query(None, description="Filter to only emails evaluated in this run"),
     session: Session = Depends(get_db),
 ):
     """List cached emails with pagination and filters."""
-    q = session.query(CachedEmail).outerjoin(EvalLabel)
+    # Join to the run-scoped label when run_id is given so review_status is correct
+    if run_id:
+        q = (
+            session.query(CachedEmail)
+            .outerjoin(
+                EvalLabel,
+                (EvalLabel.cached_email_id == CachedEmail.id) &
+                (EvalLabel.eval_run_id == run_id),
+            )
+        )
+        # Restrict to emails that have an EvalRunResult for this run
+        subq = (
+            session.query(EvalRunResult.cached_email_id)
+            .filter(EvalRunResult.eval_run_id == run_id)
+            .subquery()
+        )
+        q = q.filter(CachedEmail.id.in_(subq))
+    else:
+        q = session.query(CachedEmail).outerjoin(
+            EvalLabel,
+            (EvalLabel.cached_email_id == CachedEmail.id) &
+            (EvalLabel.eval_run_id == None),  # noqa: E711 — legacy labels
+        )
 
     if review_status:
         if review_status == "unlabeled":
@@ -206,6 +257,7 @@ def cache_get_email(email_id: int, session: Session = Depends(get_db)):
         predicted_application_group=pred_group_id,
         predicted_application_group_display=app_display,
         predicted_confidence=latest_result.predicted_confidence if latest_result else None,
+        decision_log_json=latest_result.decision_log_json if latest_result else None,
     )
 
 
@@ -549,13 +601,19 @@ def replay_email_pipeline(
 
 
 @router.get("/labels/{cached_email_id}", response_model=Optional[EvalLabelOut])
-def get_label(cached_email_id: int, session: Session = Depends(get_db)):
-    """Get the label for a specific cached email."""
-    label = (
-        session.query(EvalLabel)
-        .filter(EvalLabel.cached_email_id == cached_email_id)
-        .first()
-    )
+def get_label(
+    cached_email_id: int,
+    run_id: Optional[int] = Query(None),
+    session: Session = Depends(get_db),
+):
+    """Get the label for a cached email, scoped to a specific eval run when run_id is provided."""
+    q = session.query(EvalLabel).filter(EvalLabel.cached_email_id == cached_email_id)
+    if run_id is not None:
+        q = q.filter(EvalLabel.eval_run_id == run_id)
+    else:
+        # No run_id: return the most recent run's label
+        q = q.order_by(EvalLabel.eval_run_id.desc().nullslast())
+    label = q.first()
     if not label:
         return None
     return label
@@ -567,7 +625,11 @@ def upsert_label(
     data: EvalLabelIn,
     session: Session = Depends(get_db),
 ):
-    """Create or update a label for a cached email."""
+    """Create or update a label for a cached email.
+
+    Automatically appends a correction entry to ``corrections_json`` for every
+    field whose submitted value differs from the latest pipeline prediction.
+    """
     logger.info("upsert_label", cached_email_id=cached_email_id, data=data.model_dump())
     ce = session.query(CachedEmail).get(cached_email_id)
     if not ce:
@@ -583,23 +645,198 @@ def upsert_label(
             raise HTTPException(400, f"Application group {group_id} does not exist")
 
     # Build data dict with corrected group_id
-    data_dict = data.model_dump(exclude_unset=True)
+    # Strip non-DB fields (run_id, corrections) before passing to SQLAlchemy
+    _NON_DB = {"run_id", "corrections"}
+    data_dict = {k: v for k, v in data.model_dump(exclude_unset=True).items() if k not in _NON_DB}
     if "correct_application_group_id" in data_dict and data_dict["correct_application_group_id"] == 0:
         data_dict["correct_application_group_id"] = None
 
-    label = (
-        session.query(EvalLabel)
-        .filter(EvalLabel.cached_email_id == cached_email_id)
+    # ── Correction audit log ──────────────────────────────
+    # Load the latest pipeline prediction to diff against
+    latest_pred = (
+        session.query(EvalRunResult)
+        .filter(EvalRunResult.cached_email_id == cached_email_id)
+        .order_by(EvalRunResult.eval_run_id.desc())
         .first()
     )
+
+    now_str = datetime.now(timezone.utc).isoformat()
+    new_corrections: list[dict] = []
+
+    # Run ID to tag corrections with (frontend passes ?run_id or we fall back to latest run)
+    save_run_id: Optional[int] = data.run_id or (latest_pred.eval_run_id if latest_pred else None)
+
+    # Load existing label early — scoped to (cached_email_id, eval_run_id)
+    _run_id_for_label = save_run_id  # use the run_id from the request
+    _prev_label = (
+        session.query(EvalLabel)
+        .filter(
+            EvalLabel.cached_email_id == cached_email_id,
+            EvalLabel.eval_run_id == _run_id_for_label,
+        )
+        .first()
+    )
+
+    if data.corrections:
+        # ── Human provided structured corrections (rich annotations) ──
+        for c in data.corrections:
+            new_corrections.append({
+                "run_id": save_run_id,
+                "field": c.field,
+                "predicted": c.predicted,
+                "corrected": c.corrected,
+                "error_type": c.error_type,
+                "evidence": c.evidence,
+                "reason": c.reason,
+                "at": now_str,
+            })
+    else:
+        # ── Auto-detect field changes.
+        # On FIRST save (no existing label): compare new values against pipeline prediction.
+        # On SUBSEQUENT saves: compare new values against PREVIOUSLY STORED label values.
+        # This prevents the same "correction" from being recorded repeatedly on every save.
+        def _diff(field: str, old_val, new_val) -> None:
+            o = str(old_val).strip().lower() if old_val is not None else ""
+            n = str(new_val).strip().lower() if new_val is not None else ""
+            if o != n:
+                new_corrections.append({
+                    "run_id": save_run_id,
+                    "field": field,
+                    "predicted": str(old_val) if old_val is not None else None,
+                    "corrected": str(new_val) if new_val is not None else None,
+                    "error_type": None, "evidence": None, "reason": None,
+                    "at": now_str,
+                })
+
+        if _prev_label:
+            # Subsequent save — only record actual changes from stored values
+            if "is_job_related" in data_dict:
+                _diff("classification", _prev_label.is_job_related, data_dict["is_job_related"])
+            if "correct_company" in data_dict:
+                _diff("company", _prev_label.correct_company, data_dict["correct_company"])
+            if "correct_job_title" in data_dict:
+                _diff("job_title", _prev_label.correct_job_title, data_dict["correct_job_title"])
+            if "correct_status" in data_dict:
+                _diff("status", _prev_label.correct_status, data_dict["correct_status"])
+        elif latest_pred:
+            # First save — record corrections from the pipeline prediction
+            if "is_job_related" in data_dict:
+                _diff("classification", latest_pred.predicted_is_job_related, data_dict["is_job_related"])
+            if "correct_company" in data_dict:
+                _diff("company", latest_pred.predicted_company, data_dict["correct_company"])
+            if "correct_job_title" in data_dict:
+                _diff("job_title", latest_pred.predicted_job_title, data_dict["correct_job_title"])
+            if "correct_status" in data_dict:
+                _diff("status", latest_pred.predicted_status, data_dict["correct_status"])
+
+    # ── Grouping decision learning analysis ──────────────
+    grouping_analysis: Optional[dict] = None
+    correct_group_id = data_dict.get("correct_application_group_id")
+
+    if correct_group_id and latest_pred:
+        # Get predicted dedup key from EvalPredictedGroup
+        from job_monitor.eval.models import EvalPredictedGroup
+        pred_group = (
+            session.query(EvalPredictedGroup)
+            .filter(EvalPredictedGroup.id == latest_pred.predicted_application_group_id)
+            .first()
+        ) if latest_pred.predicted_application_group_id else None
+
+        pred_company_norm = pred_group.company_norm if pred_group else (latest_pred.predicted_company or "").strip().lower()
+        pred_title_norm = pred_group.job_title_norm if pred_group else (latest_pred.predicted_job_title or "").strip().lower()
+
+        # Compute correct dedup key from label values
+        correct_company = data_dict.get("correct_company") or (latest_pred.predicted_company or "")
+        correct_title = data_dict.get("correct_job_title") or (latest_pred.predicted_job_title or "")
+        correct_company_norm = correct_company.strip().lower()
+        correct_title_norm = correct_title.strip().lower()
+
+        company_matches = pred_company_norm == correct_company_norm
+        title_matches = pred_title_norm == correct_title_norm
+
+        if not company_matches and not title_matches:
+            dedup_failure = "both"
+        elif not company_matches:
+            dedup_failure = "company"
+        elif not title_matches:
+            dedup_failure = "title"
+        else:
+            dedup_failure = None  # dedup key matches — grouping error is elsewhere
+
+        # Co-members: other emails in the same correct application group
+        co_member_ids = [
+            lbl.cached_email_id
+            for lbl in session.query(EvalLabel)
+            .filter(
+                EvalLabel.correct_application_group_id == correct_group_id,
+                EvalLabel.cached_email_id != cached_email_id,
+            )
+            .all()
+        ]
+
+        grouping_analysis = {
+            "predicted_company": latest_pred.predicted_company,
+            "predicted_title": latest_pred.predicted_job_title,
+            "predicted_company_norm": pred_company_norm,
+            "predicted_title_norm": pred_title_norm,
+            "predicted_dedup_key": [pred_company_norm, pred_title_norm],
+            "correct_company": correct_company,
+            "correct_title": correct_title,
+            "correct_company_norm": correct_company_norm,
+            "correct_title_norm": correct_title_norm,
+            "correct_dedup_key": [correct_company_norm, correct_title_norm],
+            "dedup_key_failure": dedup_failure,
+            "company_key_matches": company_matches,
+            "title_key_matches": title_matches,
+            "co_member_email_ids": co_member_ids,
+            "co_member_count": len(co_member_ids),
+            "at": now_str,
+        }
+
+    # ── Always record group assignment changes (old → new, regardless of prediction) ──
+    # Uses field="group_assignment" to distinguish from prediction-comparison entries.
+    # Reuse _prev_label loaded above — no second query needed.
+    if "correct_application_group_id" in data_dict:
+        old_grp_id = _prev_label.correct_application_group_id if _prev_label else None
+        new_grp_id = data_dict.get("correct_application_group_id")
+        if old_grp_id != new_grp_id:
+            from_name: Optional[str] = None
+            to_name: Optional[str] = None
+            if old_grp_id:
+                fgrp = session.query(EvalApplicationGroup).get(old_grp_id)
+                from_name = fgrp.name if fgrp else f"Group #{old_grp_id}"
+            if new_grp_id:
+                tgrp = session.query(EvalApplicationGroup).get(new_grp_id)
+                to_name = tgrp.name if tgrp else f"Group #{new_grp_id}"
+            new_corrections.append({
+                "run_id": save_run_id,
+                "field": "group_assignment",
+                "from_group_id": old_grp_id,
+                "from_group_name": from_name,
+                "to_group_id": new_grp_id,
+                "to_group_name": to_name,
+                "at": now_str,
+            })
+
+    label = _prev_label
     if label:
         for key, val in data_dict.items():
             setattr(label, key, val)
         label.labeled_at = datetime.now(timezone.utc)
+        # Append new corrections to existing log
+        if new_corrections:
+            existing_log = json.loads(label.corrections_json or "[]")
+            label.corrections_json = json.dumps(existing_log + new_corrections, ensure_ascii=False)
+        # Always overwrite grouping analysis with latest (re-computed on each save)
+        if grouping_analysis is not None:
+            label.grouping_analysis_json = json.dumps(grouping_analysis, ensure_ascii=False)
     else:
         label = EvalLabel(
             cached_email_id=cached_email_id,
+            eval_run_id=_run_id_for_label,  # run-scoped
             labeled_at=datetime.now(timezone.utc),
+            corrections_json=json.dumps(new_corrections, ensure_ascii=False) if new_corrections else None,
+            grouping_analysis_json=json.dumps(grouping_analysis, ensure_ascii=False) if grouping_analysis else None,
             **data_dict,
         )
         session.add(label)
@@ -675,9 +912,27 @@ def list_applications_for_eval(session: Session = Depends(get_db)):
 
 
 @router.get("/groups", response_model=list[EvalGroupOut])
-def list_groups(session: Session = Depends(get_db)):
-    """List all application groups with email counts."""
-    groups = session.query(EvalApplicationGroup).order_by(EvalApplicationGroup.created_at.desc()).all()
+def list_groups(
+    run_id: Optional[int] = Query(None, description="Filter to groups created/matched in this eval run"),
+    session: Session = Depends(get_db),
+):
+    """List application groups, optionally filtered to a specific eval run.
+
+    When ``run_id`` is provided, only groups whose (company_norm, title_norm) appear
+    in ``EvalPredictedGroup`` for that run are returned.
+    """
+    from job_monitor.eval.models import EvalPredictedGroup as _EPN
+
+    if run_id:
+        # Return only groups scoped to this specific run
+        groups = (
+            session.query(EvalApplicationGroup)
+            .filter(EvalApplicationGroup.eval_run_id == run_id)
+            .order_by(EvalApplicationGroup.created_at.desc())
+            .all()
+        )
+    else:
+        groups = session.query(EvalApplicationGroup).order_by(EvalApplicationGroup.created_at.desc()).all()
     result = []
     for g in groups:
         count = (
@@ -687,6 +942,7 @@ def list_groups(session: Session = Depends(get_db)):
         )
         result.append(EvalGroupOut(
             id=g.id,
+            eval_run_id=g.eval_run_id,
             name=g.name,
             company=g.company,
             job_title=g.job_title,
@@ -702,6 +958,7 @@ def create_group(data: EvalGroupIn, session: Session = Depends(get_db)):
     """Create a new application group."""
     name = data.name or f"{data.company or 'Unknown'} — {data.job_title or 'Unknown'}"
     group = EvalApplicationGroup(
+        eval_run_id=data.eval_run_id,
         name=name,
         company=data.company,
         job_title=data.job_title,
@@ -711,7 +968,7 @@ def create_group(data: EvalGroupIn, session: Session = Depends(get_db)):
     session.commit()
     session.refresh(group)
     return EvalGroupOut(
-        id=group.id, name=group.name, company=group.company,
+        id=group.id, eval_run_id=group.eval_run_id, name=group.name, company=group.company,
         job_title=group.job_title, notes=group.notes,
         created_at=group.created_at, email_count=0,
     )
@@ -740,6 +997,31 @@ def update_group(group_id: int, data: EvalGroupIn, session: Session = Depends(ge
     )
 
 
+@router.get("/groups/{group_id}/members")
+def get_group_members(group_id: int, session: Session = Depends(get_db)):
+    """Return all emails assigned to this application group (via EvalLabel.correct_application_group_id).
+
+    Returns a list of ``{"cached_email_id", "subject", "sender", "email_date", "review_status"}``.
+    """
+    labels = (
+        session.query(EvalLabel)
+        .filter(EvalLabel.correct_application_group_id == group_id)
+        .all()
+    )
+    result = []
+    for label in labels:
+        ce = session.query(CachedEmail).get(label.cached_email_id)
+        if ce:
+            result.append({
+                "cached_email_id": ce.id,
+                "subject": ce.subject or "(no subject)",
+                "sender": ce.sender or "(unknown sender)",
+                "email_date": ce.email_date.isoformat() if ce.email_date else None,
+                "review_status": label.review_status,
+            })
+    return result
+
+
 @router.delete("/groups/{group_id}")
 def delete_group(group_id: int, session: Session = Depends(get_db)):
     """Delete a group and unlink its labels."""
@@ -753,6 +1035,121 @@ def delete_group(group_id: int, session: Session = Depends(get_db)):
     session.delete(group)
     session.commit()
     return {"deleted": True}
+
+
+# ── Bootstrap groups from predictions ────────────────────
+
+
+@router.post("/bootstrap-groups")
+def bootstrap_groups_from_predictions(session: Session = Depends(get_db)):
+    """Create EvalApplicationGroup records from the latest eval run's predicted groups,
+    and link the emails predicted to be in each group to their corresponding
+    EvalApplicationGroup via EvalLabel.correct_application_group_id.
+
+    Rules:
+    - If a matching EvalApplicationGroup already exists → use it (matched)
+    - Otherwise → create a new EvalApplicationGroup (created)
+    - For each EvalRunResult in the predicted group → create/update the EvalLabel
+      setting correct_application_group_id ONLY if it is not already manually set.
+
+    Returns ``{"created": int, "matched": int, "labels_linked": int, "run_id": int | None}``
+    """
+    from job_monitor.eval.models import EvalPredictedGroup
+
+    latest_run = (
+        session.query(EvalRun)
+        .order_by(EvalRun.started_at.desc())
+        .first()
+    )
+    if not latest_run:
+        return {"created": 0, "matched": 0, "labels_linked": 0, "run_id": None}
+
+    predicted_groups = (
+        session.query(EvalPredictedGroup)
+        .filter(EvalPredictedGroup.eval_run_id == latest_run.id)
+        .all()
+    )
+
+    # Pre-load all existing EvalApplicationGroup records once
+    all_existing: list[EvalApplicationGroup] = session.query(EvalApplicationGroup).all()
+
+    created = 0
+    matched = 0
+    labels_linked = 0
+    now = datetime.now(timezone.utc)
+
+    for pg in predicted_groups:
+        if not pg.company:
+            continue
+        company_norm = (pg.company or "").strip().lower()
+        title_norm = (pg.job_title or "").strip().lower()
+
+        # Find or create the EvalApplicationGroup
+        app_group = next(
+            (
+                g for g in all_existing
+                if (g.company or "").strip().lower() == company_norm
+                and (g.job_title or "").strip().lower() == title_norm
+            ),
+            None,
+        )
+
+        if app_group:
+            matched += 1
+        else:
+            name = f"{pg.company} — {pg.job_title or 'Unknown'}"
+            app_group = EvalApplicationGroup(
+                name=name,
+                company=pg.company,
+                job_title=pg.job_title,
+                notes=f"Auto-created from eval run #{latest_run.id} predictions",
+            )
+            session.add(app_group)
+            session.flush()  # get the new ID
+            all_existing.append(app_group)
+            created += 1
+
+        # Link all emails predicted to be in this group → EvalLabel
+        run_results = (
+            session.query(EvalRunResult)
+            .filter(EvalRunResult.predicted_application_group_id == pg.id)
+            .all()
+        )
+        for result in run_results:
+            label = (
+                session.query(EvalLabel)
+                .filter(EvalLabel.cached_email_id == result.cached_email_id)
+                .first()
+            )
+            if label is None:
+                # First bootstrap — create a minimal label from new run's predictions
+                label = EvalLabel(
+                    cached_email_id=result.cached_email_id,
+                    labeled_at=now,
+                    correct_application_group_id=app_group.id,
+                    correct_company=result.predicted_company,
+                    correct_job_title=result.predicted_job_title,
+                    correct_status=result.predicted_status,
+                    is_job_related=result.predicted_is_job_related,
+                    review_status="unlabeled",
+                )
+                session.add(label)
+                labels_linked += 1
+            else:
+                # Re-bootstrap for a new run: reset all prediction-derived fields to new
+                # run's predictions. This clears the "defaults" for the new run so the
+                # reviewer sees the new predictions in the form. The corrections_json
+                # history is preserved — it retains all previous runs' corrections.
+                label.correct_company = result.predicted_company
+                label.correct_job_title = result.predicted_job_title
+                label.correct_status = result.predicted_status
+                label.is_job_related = result.predicted_is_job_related
+                label.correct_application_group_id = app_group.id
+                label.review_status = "unlabeled"  # reset to unlabeled for new review
+                labels_linked += 1
+
+    session.commit()
+    return {"created": created, "matched": matched, "labels_linked": labels_linked, "run_id": latest_run.id}
 
 
 # ── Dropdown Data ─────────────────────────────────────────
@@ -811,6 +1208,7 @@ def trigger_eval_run(
 @router.get("/runs/stream")
 async def stream_eval_run(
     name: Optional[str] = Query(None),
+    max_emails: Optional[int] = Query(None, ge=1, description="Limit evaluation to the first N emails"),
     config: AppConfig = Depends(get_config),
 ):
     """Trigger a new evaluation run and stream SSE progress events.
@@ -849,11 +1247,106 @@ async def stream_eval_run(
                 run_name=name,
                 progress_cb=_progress_cb,
                 cancel_token=_eval_cancel_event,
+                max_emails=max_emails,
             )
             db.commit()
             if _eval_cancel_event.is_set():
                 msg_q.put({"type": "cancelled"})
             else:
+                # Auto-bootstrap: reset EvalLabel fields to new run's predictions
+                # so Review Queue shows "unlabeled" with fresh defaults.
+                # Corrections history (corrections_json) is preserved.
+                _progress_cb(f"Auto-bootstrapping labels from run #{result.id}…", 0, 0)
+                try:
+                    from job_monitor.eval.models import EvalPredictedGroup as _EPG
+                    _all_groups: list[EvalApplicationGroup] = db.query(EvalApplicationGroup).all()
+                    _now = datetime.now(timezone.utc)
+
+                    for _pg in db.query(_EPG).filter(_EPG.eval_run_id == result.id).all():
+                        if not _pg.company:
+                            continue
+                        _cn = (_pg.company or "").strip().lower()
+                        _tn = (_pg.job_title or "").strip().lower()
+                        # Runs are isolated — match only within this run's groups
+                        _app_group = next(
+                            (g for g in _all_groups
+                             if g.eval_run_id == result.id
+                             and (g.company or "").strip().lower() == _cn
+                             and (g.job_title or "").strip().lower() == _tn),
+                            None,
+                        )
+                        if _app_group is None:
+                            _app_group = EvalApplicationGroup(
+                                eval_run_id=result.id,  # run-scoped
+                                name=f"{_pg.company} — {_pg.job_title or 'Unknown'}",
+                                company=_pg.company, job_title=_pg.job_title,
+                                notes=f"Auto-created from eval run #{result.id}",
+                            )
+                            db.add(_app_group)
+                            db.flush()
+                            _all_groups.append(_app_group)
+
+                        for _r in db.query(EvalRunResult).filter(
+                            EvalRunResult.predicted_application_group_id == _pg.id
+                        ).all():
+                            # Run-scoped: look up by (email, run_id)
+                            _lbl = db.query(EvalLabel).filter(
+                                EvalLabel.cached_email_id == _r.cached_email_id,
+                                EvalLabel.eval_run_id == result.id,
+                            ).first()
+                            if _lbl is None:
+                                _lbl = EvalLabel(
+                                    cached_email_id=_r.cached_email_id,
+                                    eval_run_id=result.id,  # run-scoped
+                                    labeled_at=_now,
+                                    correct_application_group_id=_app_group.id,
+                                    correct_company=_r.predicted_company,
+                                    correct_job_title=_r.predicted_job_title,
+                                    correct_status=_r.predicted_status,
+                                    is_job_related=_r.predicted_is_job_related,
+                                    review_status="unlabeled",
+                                )
+                                db.add(_lbl)
+                            else:
+                                # Reset to new predictions for this run
+                                _lbl.correct_company = _r.predicted_company
+                                _lbl.correct_job_title = _r.predicted_job_title
+                                _lbl.correct_status = _r.predicted_status
+                                _lbl.is_job_related = _r.predicted_is_job_related
+                                _lbl.correct_application_group_id = _app_group.id
+                                _lbl.review_status = "unlabeled"
+
+                    # Second pass: create/reset run-scoped labels for non-job-related emails
+                    for _r in db.query(EvalRunResult).filter(
+                        EvalRunResult.eval_run_id == result.id,
+                        EvalRunResult.predicted_is_job_related == False,  # noqa: E712
+                    ).all():
+                        _lbl = db.query(EvalLabel).filter(
+                            EvalLabel.cached_email_id == _r.cached_email_id,
+                            EvalLabel.eval_run_id == result.id,
+                        ).first()
+                        if _lbl is None:
+                            _lbl = EvalLabel(
+                                cached_email_id=_r.cached_email_id,
+                                eval_run_id=result.id,  # run-scoped
+                                labeled_at=_now,
+                                is_job_related=False,
+                                review_status="unlabeled",
+                            )
+                            db.add(_lbl)
+                        else:
+                            _lbl.is_job_related = False
+                            _lbl.correct_company = None
+                            _lbl.correct_job_title = None
+                            _lbl.correct_status = None
+                            _lbl.correct_application_group_id = None
+                            _lbl.review_status = "unlabeled"
+
+                    db.commit()
+                    _progress_cb(f"✓ Labels reset to Run #{result.id} predictions.", 0, 0)
+                except Exception as _be:
+                    logger.warning("auto_bootstrap_failed", error=str(_be))
+
                 msg_q.put({"type": "done", "run_id": result.id})
         except Exception as exc:
             logger.exception("eval_stream_error", error=str(exc))
@@ -954,6 +1447,11 @@ def get_run_results(
     for r in results:
         ce = session.query(CachedEmail).get(r.cached_email_id)
         pg = r.predicted_group  # Lazy-loaded relationship
+        lbl = (
+            session.query(EvalLabel)
+            .filter(EvalLabel.cached_email_id == r.cached_email_id)
+            .first()
+        )
         out.append(EvalRunResultOut(
             id=r.id,
             cached_email_id=r.cached_email_id,
@@ -976,6 +1474,14 @@ def get_run_results(
             estimated_cost_usd=r.estimated_cost_usd,
             email_subject=ce.subject if ce else None,
             email_sender=ce.sender if ce else None,
+            # Human ground-truth labels
+            label_is_job_related=lbl.is_job_related if lbl else None,
+            label_company=lbl.correct_company if lbl else None,
+            label_job_title=lbl.correct_job_title if lbl else None,
+            label_status=lbl.correct_status if lbl else None,
+            label_review_status=lbl.review_status if lbl else "unlabeled",
+            # Eval run decision log
+            decision_log_json=r.decision_log_json,
         ))
     return out
 

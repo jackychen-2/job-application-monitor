@@ -84,6 +84,25 @@ class AppConfig(BaseSettings):
         return None
 
 
+# Runtime override for LLM enabled — set via API without restarting the server.
+# None means "use the value from .env / environment variables".
+_llm_enabled_override: Optional[bool] = None
+
+
 def get_config() -> AppConfig:
-    """Load and return validated application config."""
-    return AppConfig()  # type: ignore[call-arg]
+    """Load and return validated application config.
+
+    If ``_llm_enabled_override`` has been set (via the eval settings API),
+    that value takes precedence over the environment variable.
+    """
+    cfg = AppConfig()  # type: ignore[call-arg]
+    if _llm_enabled_override is not None:
+        # Pydantic models are normally immutable; use object.__setattr__ to bypass
+        object.__setattr__(cfg, "llm_enabled", _llm_enabled_override)
+    return cfg
+
+
+def set_llm_enabled(value: bool) -> None:
+    """Override the llm_enabled setting at runtime (persists until server restart)."""
+    global _llm_enabled_override
+    _llm_enabled_override = value

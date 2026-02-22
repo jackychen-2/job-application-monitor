@@ -8,6 +8,7 @@ import type {
   CacheDownloadRequest,
   CacheDownloadResult,
   CacheStats,
+  CorrectionEntryInput,
   DropdownOptions,
   EvalApplicationGroup,
   EvalGroupInput,
@@ -51,12 +52,14 @@ export function listCachedEmails(params: {
   page_size?: number;
   review_status?: string;
   search?: string;
+  run_id?: number;
 }): Promise<CachedEmailListResponse> {
   const qs = new URLSearchParams();
   if (params.page) qs.set("page", String(params.page));
   if (params.page_size) qs.set("page_size", String(params.page_size));
   if (params.review_status) qs.set("review_status", params.review_status);
   if (params.search) qs.set("search", params.search);
+  if (params.run_id) qs.set("run_id", String(params.run_id));
   return request(`/cache/emails?${qs}`);
 }
 
@@ -66,11 +69,15 @@ export function getCachedEmail(id: number): Promise<CachedEmailDetail> {
 
 // ── Labels ───────────────────────────────────────────────
 
-export function getLabel(cachedEmailId: number): Promise<EvalLabel | null> {
-  return request(`/labels/${cachedEmailId}`);
+export function getLabel(cachedEmailId: number, runId?: number): Promise<EvalLabel | null> {
+  const qs = runId ? `?run_id=${runId}` : "";
+  return request(`/labels/${cachedEmailId}${qs}`);
 }
 
-export function upsertLabel(cachedEmailId: number, data: EvalLabelInput): Promise<EvalLabel> {
+export function upsertLabel(
+  cachedEmailId: number,
+  data: EvalLabelInput & { corrections?: CorrectionEntryInput[] },
+): Promise<EvalLabel> {
   return request(`/labels/${cachedEmailId}`, {
     method: "PUT",
     body: JSON.stringify(data),
@@ -105,8 +112,9 @@ export function listApplicationsForEval(): Promise<ApplicationForEval[]> {
   return request("/applications");
 }
 
-export function listGroups(): Promise<EvalApplicationGroup[]> {
-  return request("/groups");
+export function listGroups(runId?: number): Promise<EvalApplicationGroup[]> {
+  const qs = runId ? `?run_id=${runId}` : "";
+  return request(`/groups${qs}`);
 }
 
 export function createGroup(data: EvalGroupInput): Promise<EvalApplicationGroup> {
@@ -125,6 +133,18 @@ export function updateGroup(id: number, data: EvalGroupInput): Promise<EvalAppli
 
 export function deleteGroup(id: number): Promise<void> {
   return request(`/groups/${id}`, { method: "DELETE" });
+}
+
+export interface GroupMember {
+  cached_email_id: number;
+  subject: string;
+  sender: string;
+  email_date: string | null;
+  review_status: string;
+}
+
+export function getGroupMembers(groupId: number): Promise<GroupMember[]> {
+  return request(`/groups/${groupId}/members`);
 }
 
 // ── Dropdowns ────────────────────────────────────────────
@@ -173,10 +193,31 @@ export function replayEmailPipeline(emailId: number): Promise<{ logs: ReplayLogE
   return request(`/cache/emails/${emailId}/replay`);
 }
 
+export function bootstrapGroups(): Promise<{ created: number; matched: number; labels_linked: number; run_id: number | null }> {
+  return request("/bootstrap-groups", { method: "POST" });
+}
+
+export interface EvalSettings {
+  llm_enabled: boolean;
+  llm_provider: string;
+  llm_model: string;
+}
+
+export function getEvalSettings(): Promise<EvalSettings> {
+  return request("/settings");
+}
+
+export function setLlmEnabled(enabled: boolean): Promise<EvalSettings> {
+  return request(`/settings?llm_enabled=${enabled}`, { method: "POST" });
+}
+
 /** Open an SSE stream for a new evaluation run.
  *  Returns the EventSource so the caller can close it on unmount.
  */
-export function streamEvalRun(name?: string): EventSource {
-  const qs = name ? `?name=${encodeURIComponent(name)}` : "";
+export function streamEvalRun(name?: string, maxEmails?: number): EventSource {
+  const params = new URLSearchParams();
+  if (name) params.set("name", name);
+  if (maxEmails && maxEmails > 0) params.set("max_emails", String(maxEmails));
+  const qs = params.toString() ? `?${params}` : "";
   return new EventSource(`${BASE}/runs/stream${qs}`);
 }
