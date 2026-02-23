@@ -972,6 +972,42 @@ def upsert_label(
         for key, val in data_dict.items():
             setattr(label, key, val)
         label.labeled_at = datetime.now(timezone.utc)
+
+        # ── Sync EvalApplicationGroup canonical name with human corrections ──
+        # When the reviewer corrects "Zoom Communications" → "Zoom":
+        #   1. Update the EvalApplicationGroup record (future auto-fill)
+        #   2. Cascade to all other EvalLabel records in the same group
+        #      so opening any co-member email shows the corrected name.
+        _grp_id_to_sync = data_dict.get("correct_application_group_id") or label.correct_application_group_id
+        if _grp_id_to_sync:
+            _grp = session.query(EvalApplicationGroup).get(_grp_id_to_sync)
+            if _grp:
+                _grp_changed = False
+                if "correct_company" in data_dict and data_dict["correct_company"]:
+                    _grp.company = data_dict["correct_company"]
+                    _grp_changed = True
+                if "correct_job_title" in data_dict and data_dict["correct_job_title"]:
+                    _grp.job_title = data_dict["correct_job_title"]
+                    _grp_changed = True
+                if _grp_changed:
+                    _grp.name = f"{_grp.company or '?'} — {_grp.job_title or 'Unknown'}"
+                    # Cascade: update correct_company/title on every label in the group
+                    # EXCEPT the one we just saved. Filter by label.id (not cached_email_id)
+                    # so that same-email labels from other runs are also updated.
+                    _co_labels = (
+                        session.query(EvalLabel)
+                        .filter(
+                            EvalLabel.correct_application_group_id == _grp_id_to_sync,
+                            EvalLabel.id != label.id,
+                        )
+                        .all()
+                    )
+                    for _co in _co_labels:
+                        if "correct_company" in data_dict and data_dict["correct_company"]:
+                            _co.correct_company = data_dict["correct_company"]
+                        if "correct_job_title" in data_dict and data_dict["correct_job_title"]:
+                            _co.correct_job_title = data_dict["correct_job_title"]
+
         # Replace corrections_json with the current save's diff (not cumulative history).
         # This ensures the log always reflects the gap between the CURRENT ground truth and
         # the original prediction, discarding stale entries from earlier edits.
@@ -992,6 +1028,19 @@ def upsert_label(
             **data_dict,
         )
         session.add(label)
+
+        # Sync group for new labels too
+        _new_grp_id = data_dict.get("correct_application_group_id")
+        if _new_grp_id:
+            _new_grp = session.query(EvalApplicationGroup).get(_new_grp_id)
+            if _new_grp:
+                _nc = False
+                if data_dict.get("correct_company"):
+                    _new_grp.company = data_dict["correct_company"]; _nc = True
+                if data_dict.get("correct_job_title"):
+                    _new_grp.job_title = data_dict["correct_job_title"]; _nc = True
+                if _nc:
+                    _new_grp.name = f"{_new_grp.company or '?'} — {_new_grp.job_title or 'Unknown'}"
 
     session.commit()
     session.refresh(label)
