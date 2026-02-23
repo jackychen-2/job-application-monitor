@@ -24,6 +24,7 @@ const BASE = "/api/eval";
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json", ...init?.headers },
+    cache: "no-store",   // never serve stale GET responses from browser cache
     ...init,
   });
   if (!res.ok) {
@@ -213,11 +214,17 @@ export function setLlmEnabled(enabled: boolean): Promise<EvalSettings> {
 
 /** Open an SSE stream for a new evaluation run.
  *  Returns the EventSource so the caller can close it on unmount.
+ *  When `emailIds` is provided (non-empty), only those cached emails are evaluated
+ *  and `maxEmails` is ignored.
  */
-export function streamEvalRun(name?: string, maxEmails?: number): EventSource {
+export function streamEvalRun(name?: string, maxEmails?: number, emailIds?: number[]): EventSource {
   const params = new URLSearchParams();
   if (name) params.set("name", name);
-  if (maxEmails && maxEmails > 0) params.set("max_emails", String(maxEmails));
+  if (emailIds && emailIds.length > 0) {
+    params.set("email_ids", emailIds.join(","));
+  } else if (maxEmails && maxEmails > 0) {
+    params.set("max_emails", String(maxEmails));
+  }
   const qs = params.toString() ? `?${params}` : "";
   return new EventSource(`${BASE}/runs/stream${qs}`);
 }

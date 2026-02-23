@@ -51,6 +51,7 @@ def run_evaluation(
     progress_cb: Optional[Callable[[str, int, int], None]] = None,
     cancel_token: Optional[threading.Event] = None,
     max_emails: Optional[int] = None,
+    email_ids: Optional[list[int]] = None,
 ) -> EvalRun:
     """Run the full pipeline on all cached emails and compute metrics against labels.
 
@@ -60,6 +61,9 @@ def run_evaluation(
         run_name: Optional name for this evaluation run.
         progress_cb: Optional callback called as ``(message, current, total)`` for each email processed.
         cancel_token: Optional threading.Event — when set, the run is aborted after the current email.
+        max_emails: Optional limit — evaluate only the first N emails (ignored when email_ids is set).
+        email_ids: Optional explicit list of CachedEmail IDs to evaluate. When set, only those
+            emails are run through the pipeline (max_emails is ignored).
     """
 
     def _log(msg: str, current: int = 0, total: int = 0) -> None:
@@ -84,10 +88,14 @@ def run_evaluation(
     session.add(eval_run)
     session.flush()
 
-    # Load all cached emails (optionally limited)
+    # Load cached emails — filtered by explicit IDs, limited by max_emails, or all
     _log("Loading cached emails from database…")
-    cached_emails = session.query(CachedEmail).order_by(CachedEmail.email_date).all()
-    if max_emails and max_emails > 0:
+    q = session.query(CachedEmail).order_by(CachedEmail.email_date)
+    if email_ids:
+        q = q.filter(CachedEmail.id.in_(email_ids))
+        _log(f"Filtering to {len(email_ids)} selected email IDs…")
+    cached_emails = q.all()
+    if not email_ids and max_emails and max_emails > 0:
         cached_emails = cached_emails[:max_emails]
     eval_run.total_emails = len(cached_emails)
 
@@ -114,8 +122,19 @@ def run_evaluation(
 
     # Process each email
     results: list[EvalRunResult] = []
-    # Track application grouping: map (normalized_company, job_title) -> group_id
-    app_group_map: dict[tuple[str, str], int] = {}
+
+    # ── Grouping state — mirrors production Application table ─────────────
+    # app_group_info: group_id → {company_norm, job_title, status, latest_email_date}
+    # Replaces the old (company_stripped, title_norm) dedup dict so Stage 4
+    # uses the exact same Rules A/B/C as resolve_by_company() in production.
+    from job_monitor.linking.resolver import (
+        normalize_company as _prod_normalize_company,
+        titles_similar as _prod_titles_similar,
+        _PROGRESSED_STATUSES as _PROD_PROGRESSED,
+    )
+    _MAX_SAME_CYCLE_DAYS = 3
+
+    app_group_info: dict[int, dict] = {}  # group_id → metadata
     total = len(cached_emails)
 
     for idx, cached in enumerate(cached_emails):
@@ -183,59 +202,126 @@ def run_evaluation(
                   "success" if pred_is_job else "warn")
 
         if not pred_is_job:
-            dstep("classification", "→ Not job-related — skipping field extraction", "warn")
-
-        # Stage 3: Field extraction
-        dstep("company", "═══ Stage 3: Company ═══")
-        dstep("title",   "═══ Stage 3: Title ═══")
-        dstep("status",  "═══ Stage 3: Status ═══")
-        if llm_result is not None and llm_result.is_job_application:
-            pred_company = llm_result.company or extract_company(subject, sender)
-            pred_title = _validate_job_title(llm_result.job_title) or _validate_job_title(extract_job_title(subject, body))
-            llm_status = llm_result.status
-            if llm_status and llm_status.lower() != "unknown":
-                pred_status = llm_status
-                dstep("status", f"LLM: {pred_status!r}", "success")
-            else:
-                pred_status = extract_status(subject, body)
-                dstep("status", f"LLM returned unknown → rule fallback: {pred_status!r}", "warn")
-            pred_confidence = llm_result.confidence
-            dstep("company", f"LLM: {pred_company!r} (raw={llm_result.company!r})",
-                  "success" if pred_company else "warn")
-            dstep("title",   f"LLM: {pred_title!r} (raw={llm_result.job_title!r})",
-                  "success" if pred_title else "warn")
-        else:
-            pred_company = extract_company(subject, sender)
-            pred_title = _validate_job_title(extract_job_title(subject, body))
-            pred_status = extract_status(subject, body)
+            dstep("classification", "→ Not job-related — field extraction skipped", "warn")
+            pred_company = None
+            pred_title = None
+            pred_status = None
             pred_confidence = None
-            dstep("company", f"Rules: {pred_company!r}", "success" if pred_company and pred_company != "Unknown" else "warn")
-            dstep("title",   f"Rules: {pred_title!r}", "success" if pred_title else "warn")
-            dstep("status",  f"Rules: {pred_status!r}", "success")
+        else:
+            # Stage 3: Field extraction (only for job-related emails)
+            dstep("company", "═══ Stage 3: Company ═══")
+            dstep("title",   "═══ Stage 3: Title ═══")
+            dstep("status",  "═══ Stage 3: Status ═══")
+            if llm_result is not None and llm_result.is_job_application:
+                pred_company = llm_result.company or extract_company(subject, sender)
+                pred_title = _validate_job_title(llm_result.job_title) or _validate_job_title(extract_job_title(subject, body))
+                llm_status = llm_result.status
+                if llm_status and llm_status.lower() != "unknown":
+                    pred_status = llm_status
+                    dstep("status", f"LLM: {pred_status!r}", "success")
+                else:
+                    pred_status = extract_status(subject, body)
+                    dstep("status", f"LLM returned unknown → rule fallback: {pred_status!r}", "warn")
+                pred_confidence = llm_result.confidence
+                dstep("company", f"LLM: {pred_company!r} (raw={llm_result.company!r})",
+                      "success" if pred_company else "warn")
+                dstep("title",   f"LLM: {pred_title!r} (raw={llm_result.job_title!r})",
+                      "success" if pred_title else "warn")
+            else:
+                pred_company = extract_company(subject, sender)
+                pred_title = _validate_job_title(extract_job_title(subject, body))
+                pred_status = extract_status(subject, body)
+                pred_confidence = None
+                dstep("company", f"Rules: {pred_company!r}", "success" if pred_company and pred_company != "Unknown" else "warn")
+                dstep("title",   f"Rules: {pred_title!r}", "success" if pred_title else "warn")
+                dstep("status",  f"Rules: {pred_status!r}", "success")
 
         # Stage 4: Grouping
+        # Logic:
+        #  • "Applied" emails → create/join group by (company_norm_stripped, title_norm)
+        #  • Follow-up emails (interview/offer/rejection) → first try to find an
+        #    existing upstream group; only create a new one if nothing matches.
+        #  • Company normalization strips legal/descriptive suffixes so that
+        #    "Zoom", "Zoom Communications", "Your Zoom" all map to the same key.
         dstep("grouping", "═══ Stage 4: Grouping ═══")
         pred_group_id = None
         if pred_is_job and pred_company:
-            company_norm = pred_company.strip().lower()
-            title_norm = (pred_title or "").strip().lower()
-            key = (company_norm, title_norm)
-            dstep("grouping", f"Dedup key: ({company_norm!r}, {title_norm!r})")
-            if key not in app_group_map:
-                pred_group = EvalPredictedGroup(
-                    eval_run_id=eval_run.id,
-                    company=pred_company,
-                    job_title=pred_title,
-                    company_norm=company_norm,
-                    job_title_norm=title_norm,
-                )
-                session.add(pred_group)
-                session.flush()  # Get ID
-                app_group_map[key] = pred_group.id
-                dstep("grouping", f"New predicted group #{pred_group.id}", "info")
+            company_norm_prod = _prod_normalize_company(pred_company)
+            dstep("grouping", f"Normalized company: {company_norm_prod!r}  (raw: {pred_company!r})")
+
+            if company_norm_prod:
+                # ── Candidate search (same as production resolve_by_company) ──
+                candidates: list[int] = [
+                    gid for gid, info in app_group_info.items()
+                    if info["company_norm"] == company_norm_prod
+                ]
+                dstep("grouping", f"{len(candidates)} candidate group(s) with same company norm")
+
+                # Rule A: Title similarity (Jaccard ≥ 0.9, production threshold)
+                if pred_title and candidates:
+                    before = len(candidates)
+                    candidates = [
+                        gid for gid in candidates
+                        if _prod_titles_similar(pred_title, app_group_info[gid]["job_title"])
+                    ]
+                    if before != len(candidates):
+                        dstep("grouping", f"Rule A (title filter): {before - len(candidates)} removed, {len(candidates)} remain", "info")
+
+                # Rule B: Time gap — two "已申请" emails > 3 days apart = new cycle
+                email_dt = cached.email_date
+                if pred_status == "已申请" and email_dt and candidates:
+                    before = len(candidates)
+                    def _within_window(gid: int) -> bool:
+                        prev = app_group_info[gid].get("latest_email_date")
+                        if not prev:
+                            return True
+                        ed = email_dt.replace(tzinfo=None) if email_dt.tzinfo else email_dt
+                        pd_ = prev.replace(tzinfo=None) if prev.tzinfo else prev
+                        return abs((ed - pd_).days) <= _MAX_SAME_CYCLE_DAYS
+                    candidates = [gid for gid in candidates if _within_window(gid)]
+                    if before != len(candidates):
+                        dstep("grouping", f"Rule B (time gap): {before - len(candidates)} removed, {len(candidates)} remain", "info")
+
+                # Rule C: Re-application after rejection/interview
+                if pred_status == "已申请" and candidates:
+                    before = len(candidates)
+                    candidates = [
+                        gid for gid in candidates
+                        if app_group_info[gid].get("status") not in _PROD_PROGRESSED
+                    ]
+                    if before != len(candidates):
+                        dstep("grouping", f"Rule C (re-application): {before - len(candidates)} removed, {len(candidates)} remain", "info")
+
+                if candidates:
+                    pred_group_id = candidates[0]
+                    dstep("grouping", f"Linked to existing group #{pred_group_id}", "success")
+                    # Update group state so subsequent emails see the latest status/date
+                    if pred_status:
+                        app_group_info[pred_group_id]["status"] = pred_status
+                    if cached.email_date:
+                        app_group_info[pred_group_id]["latest_email_date"] = cached.email_date
+                else:
+                    # No surviving candidate — create new group
+                    title_norm_for_key = (pred_title or "").strip().lower()
+                    pred_group = EvalPredictedGroup(
+                        eval_run_id=eval_run.id,
+                        company=pred_company,
+                        job_title=pred_title,
+                        company_norm=company_norm_prod,
+                        job_title_norm=title_norm_for_key,
+                    )
+                    session.add(pred_group)
+                    session.flush()
+                    pred_group_id = pred_group.id
+                    app_group_info[pred_group_id] = {
+                        "company_norm": company_norm_prod,
+                        "job_title": pred_title,
+                        "status": pred_status,
+                        "latest_email_date": cached.email_date,
+                    }
+                    dstep("grouping", f"New predicted group #{pred_group_id}", "info")
             else:
-                dstep("grouping", f"Matched existing predicted group #{app_group_map[key]}", "success")
-            pred_group_id = app_group_map[key]
+                dstep("grouping", "Skipped (company normalization returned empty)", "warn")
         else:
             dstep("grouping", "Skipped (not job-related or no company extracted)", "warn")
 

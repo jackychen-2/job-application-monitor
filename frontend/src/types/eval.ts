@@ -124,31 +124,58 @@ export interface CorrectionEntryInput {
   reason?: string | null;
 }
 
+export type GroupDecisionType =
+  | "CONFIRMED"
+  | "MERGED_INTO_EXISTING"
+  | "SPLIT_FROM_EXISTING"
+  | "NEW_GROUP_CREATED"
+  | "MARKED_NOT_JOB";
+
+export type GroupingFailureCategory =
+  | "KEY_MISMATCH"
+  | "OVER_SPLIT"
+  | "UNDER_SPLIT"
+  | "EXTRACTION_ERROR"
+  | "NORMALIZATION_WEAKNESS"
+  | "POLICY_MISTAKE";
+
 export interface GroupingAnalysis {
-  // Pipeline's predicted dedup key
+  // ── Section 1: Dedup key analysis ───────────────────────────────────────
   predicted_company: string | null;
   predicted_title: string | null;
   predicted_company_norm: string;
   predicted_title_norm: string;
   predicted_dedup_key: [string, string];
 
-  // Correct dedup key (derived from human-provided company/title)
-  correct_company: string;
-  correct_title: string;
+  correct_company: string | null;
+  correct_title: string | null;
   correct_company_norm: string;
   correct_title_norm: string;
   correct_dedup_key: [string, string];
 
-  // Which part of the key was wrong
   dedup_key_failure: "company" | "title" | "both" | null;
   company_key_matches: boolean;
   title_key_matches: boolean;
 
-  // Cluster co-membership: other emails that should be in the same group
-  co_member_email_ids: number[];
-  co_member_count: number;
+  // ── Section 2: Group-ID level ────────────────────────────────────────────
+  predicted_group_id: number | null;        // EvalPredictedGroup.id
+  correct_group_id: number | null;          // EvalApplicationGroup.id
+  group_id_match: boolean;                  // true when cluster membership is consistent
+  predicted_group_size: number;             // # emails pipeline put in that predicted group
+  correct_group_size: number;               // # labeled emails in correct group
 
-  at: string; // ISO timestamp of when this was computed
+  // ── Section 3: Cluster co-membership ────────────────────────────────────
+  co_member_email_ids: number[];
+  co_member_subjects: (string | null)[];            // subject line for each co-member email
+  co_member_count: number;
+  co_member_predicted_group_ids: (number | null)[]; // predicted groups for each co-member
+  co_member_predicted_group_names: (string | null)[]; // "#ID Company — Title" for each
+
+  // ── Section 4: Decision classification ──────────────────────────────────
+  group_decision_type: GroupDecisionType | null;
+  grouping_failure_category: GroupingFailureCategory | null;
+
+  at: string; // ISO timestamp
 }
 
 export interface EvalLabel {

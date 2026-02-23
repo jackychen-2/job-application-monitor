@@ -1,8 +1,17 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
-import { getCacheStats, listEvalRuns, streamEvalRun, cancelEvalRun, downloadEmails, getEvalSettings, setLlmEnabled } from "../../api/eval";
+import {
+  getCacheStats,
+  listEvalRuns,
+  streamEvalRun,
+  cancelEvalRun,
+  downloadEmails,
+  getEvalSettings,
+  setLlmEnabled,
+  listCachedEmails,
+} from "../../api/eval";
 import type { EvalSettings } from "../../api/eval";
-import type { CacheStats, EvalRun, CacheDownloadResult } from "../../types/eval";
+import type { CacheStats, EvalRun, CacheDownloadResult, CachedEmail } from "../../types/eval";
 
 interface EvalLogEntry {
   message: string;
@@ -28,10 +37,17 @@ export default function EvalDashboard() {
   const [evalTotal, setEvalTotal] = useState(0);
   const [cancelRequested, setCancelRequested] = useState(false);
 
-
-
   // LLM settings
   const [settings, setSettings] = useState<EvalSettings | null>(null);
+
+  // ── Email selector state ──────────────────────────────
+  const [showSelector, setShowSelector] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [selectorSearch, setSelectorSearch] = useState("");
+  const [selectorStatus, setSelectorStatus] = useState("");
+  const [selectorEmails, setSelectorEmails] = useState<CachedEmail[]>([]);
+  const [selectorTotal, setSelectorTotal] = useState(0);
+  const [selectorLoading, setSelectorLoading] = useState(false);
 
   const esRef = useRef<EventSource | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
@@ -56,6 +72,27 @@ export default function EvalDashboard() {
     return () => { esRef.current?.close(); };
   }, []);
 
+  // ── Fetch emails for selector ─────────────────────────
+  const fetchSelectorEmails = useCallback(async () => {
+    setSelectorLoading(true);
+    try {
+      const resp = await listCachedEmails({
+        page: 1,
+        page_size: 10000,
+        search: selectorSearch || undefined,
+        review_status: selectorStatus || undefined,
+      });
+      setSelectorEmails(resp.items);
+      setSelectorTotal(resp.total);
+    } finally {
+      setSelectorLoading(false);
+    }
+  }, [selectorSearch, selectorStatus]);
+
+  useEffect(() => {
+    if (showSelector) fetchSelectorEmails();
+  }, [showSelector, fetchSelectorEmails]);
+
   const handleDownload = async () => {
     setDownloading(true);
     setDownloadResult(null);
@@ -73,14 +110,14 @@ export default function EvalDashboard() {
   };
 
   const handleRunEval = () => {
-    // Reset state
     setEvalLogs([]);
     setEvalProgress(0);
     setEvalTotal(0);
     setCancelRequested(false);
     setRunningEval(true);
 
-    const es = streamEvalRun(undefined, maxEmails > 0 ? maxEmails : undefined);
+    const ids = selectedIds.size > 0 ? Array.from(selectedIds) : undefined;
+    const es = streamEvalRun(undefined, maxEmails > 0 ? maxEmails : undefined, ids);
     esRef.current = es;
 
     es.onmessage = (event) => {
@@ -142,10 +179,41 @@ export default function EvalDashboard() {
     }
   };
 
+  // ── Selector helpers ──────────────────────────────────
+  const toggleEmail = (id: number) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const selectPageAll = () => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      selectorEmails.forEach(e => next.add(e.id));
+      return next;
+    });
+  };
+
+  const clearPageAll = () => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      selectorEmails.forEach(e => next.delete(e.id));
+      return next;
+    });
+  };
+
+  const clearAll = () => setSelectedIds(new Set());
+
 
 
   const latestRun = runs[0];
   const progressPct = evalTotal > 0 ? Math.round((evalProgress / evalTotal) * 100) : 0;
+
+  const evalTarget = selectedIds.size > 0
+    ? `${selectedIds.size} selected email${selectedIds.size !== 1 ? "s" : ""}`
+    : `All (${stats?.total_cached || 0})`;
 
   return (
     <div className="space-y-6">
@@ -242,7 +310,7 @@ export default function EvalDashboard() {
       <div className="bg-white rounded-lg shadow p-6">
         <h2 className="text-lg font-semibold mb-2">Run Evaluation</h2>
         <p className="text-sm text-gray-600 mb-4">
-          Re-run the pipeline on all {stats?.total_cached || 0} cached emails and score against{" "}
+          Re-run the pipeline on cached emails and score against{" "}
           {stats?.total_labeled || 0} labels.
         </p>
 
@@ -271,27 +339,163 @@ export default function EvalDashboard() {
           </div>
         )}
 
-        {/* Action buttons */}
-        <div className="flex gap-3 items-center flex-wrap">
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Emails to evaluate</label>
-            <input
-              type="number"
-              value={maxEmails || ""}
-              onChange={e => setMaxEmails(Number(e.target.value))}
-              placeholder={`All (${stats?.total_cached || 0})`}
-              min={1}
-              max={stats?.total_cached || undefined}
-              className="border rounded px-3 py-2 text-sm w-32"
-            />
+        {/* Email target selector toggle */}
+        <div className="mb-4">
+          <div className="flex items-center gap-3 mb-2">
+            <button
+              onClick={() => {
+                setShowSelector(s => !s);
+                if (showSelector) clearAll();
+              }}
+              className={`px-3 py-1.5 text-sm rounded-lg border font-medium transition-colors ${
+                showSelector
+                  ? "bg-violet-100 border-violet-400 text-violet-800"
+                  : "border-gray-300 text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              {showSelector ? "▲ Hide Email Selector" : "▼ Select Specific Emails"}
+            </button>
+            {selectedIds.size > 0 && (
+              <span className="text-sm font-semibold text-violet-700 bg-violet-50 border border-violet-200 px-2 py-0.5 rounded-full">
+                {selectedIds.size} selected
+              </span>
+            )}
+            {selectedIds.size > 0 && (
+              <button onClick={clearAll} className="text-xs text-gray-400 hover:text-red-500 underline">
+                Clear all
+              </button>
+            )}
           </div>
+
+          {/* Email selector panel */}
+          {showSelector && (
+            <div className="border border-violet-200 rounded-lg bg-violet-50/30 overflow-hidden">
+              {/* Filters row */}
+              <div className="flex flex-wrap gap-2 p-3 border-b border-violet-200 bg-white">
+                <input
+                  type="text"
+                  placeholder="Search subject / sender…"
+                  value={selectorSearch}
+                  onChange={e => setSelectorSearch(e.target.value)}
+                  className="border rounded px-3 py-1.5 text-sm flex-1 min-w-48"
+                />
+                <select
+                  value={selectorStatus}
+                  onChange={e => setSelectorStatus(e.target.value)}
+                  className="border rounded px-3 py-1.5 text-sm"
+                >
+                  <option value="">All statuses</option>
+                  <option value="labeled">Labeled</option>
+                  <option value="unlabeled">Unlabeled</option>
+                  <option value="skipped">Skipped</option>
+                </select>
+                <button
+                  onClick={selectPageAll}
+                  className="px-3 py-1.5 text-xs font-medium bg-violet-600 text-white rounded hover:bg-violet-700"
+                >
+                  Select page
+                </button>
+                <button
+                  onClick={clearPageAll}
+                  className="px-3 py-1.5 text-xs font-medium border border-gray-300 text-gray-600 rounded hover:bg-gray-50"
+                >
+                  Deselect page
+                </button>
+              </div>
+
+              {/* Email list */}
+              <div className="max-h-72 overflow-y-auto">
+                {selectorLoading ? (
+                  <div className="py-8 text-center text-sm text-gray-400">Loading…</div>
+                ) : selectorEmails.length === 0 ? (
+                  <div className="py-8 text-center text-sm text-gray-400">No emails found</div>
+                ) : (
+                  <table className="min-w-full text-sm">
+                    <tbody className="divide-y divide-gray-100">
+                      {selectorEmails.map(email => {
+                        const checked = selectedIds.has(email.id);
+                        return (
+                          <tr
+                            key={email.id}
+                            onClick={() => toggleEmail(email.id)}
+                            className={`cursor-pointer transition-colors ${
+                              checked ? "bg-violet-50" : "hover:bg-gray-50"
+                            }`}
+                          >
+                            <td className="pl-3 pr-2 py-2 w-8">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleEmail(email.id)}
+                                onClick={e => e.stopPropagation()}
+                                className="accent-violet-600"
+                              />
+                            </td>
+                            <td className="px-2 py-2 max-w-xs truncate font-medium text-gray-800">
+                              {email.subject || "(no subject)"}
+                            </td>
+                            <td className="px-2 py-2 text-gray-500 truncate max-w-[180px]">
+                              {email.sender || "—"}
+                            </td>
+                            <td className="px-2 py-2 text-gray-400 whitespace-nowrap text-xs">
+                              {email.email_date ? new Date(email.email_date).toLocaleDateString() : "—"}
+                            </td>
+                            <td className="px-3 py-2 w-24">
+                              <StatusPill status={email.review_status || "unlabeled"} />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              {/* Total count footer */}
+              {selectorTotal > 0 && (
+                <div className="px-3 py-2 border-t border-violet-200 bg-white text-xs text-gray-500">
+                  {selectorTotal} email{selectorTotal !== 1 ? "s" : ""} total
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Action buttons row */}
+        <div className="flex gap-3 items-center flex-wrap">
+          {/* Max emails input — hidden when using selector */}
+          {!showSelector || selectedIds.size === 0 ? (
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Emails to evaluate</label>
+              <input
+                type="number"
+                value={maxEmails || ""}
+                onChange={e => setMaxEmails(Number(e.target.value))}
+                placeholder={`All (${stats?.total_cached || 0})`}
+                min={1}
+                max={stats?.total_cached || undefined}
+                disabled={selectedIds.size > 0}
+                className="border rounded px-3 py-2 text-sm w-36 disabled:opacity-50 disabled:bg-gray-50"
+              />
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 bg-violet-50 border border-violet-200 rounded px-3 py-2">
+              <span className="text-sm font-semibold text-violet-800">{selectedIds.size} emails selected</span>
+            </div>
+          )}
+
           <div className="flex gap-2 items-end pt-4">
             <button
               onClick={handleRunEval}
               disabled={runningEval || !stats?.total_cached}
+              title={`Run evaluation on ${evalTarget}`}
               className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm font-medium"
             >
-              {runningEval ? "Running…" : "Run Evaluation"}
+              {runningEval
+                ? "Running…"
+                : selectedIds.size > 0
+                ? `▶ Run on ${selectedIds.size} Email${selectedIds.size !== 1 ? "s" : ""}`
+                : "▶ Run Evaluation"}
             </button>
             {runningEval && (
               <button
@@ -344,10 +548,11 @@ export default function EvalDashboard() {
           </div>
         )}
       </div>
-
     </div>
   );
 }
+
+// ── Sub-components ────────────────────────────────────────
 
 function StatCard({ label, value, color = "blue" }: { label: string; value: number; color?: string }) {
   const colors: Record<string, string> = {
@@ -373,5 +578,18 @@ function MetricCard({ label, value }: { label: string; value: number | null }) {
       <div className={`text-2xl font-bold ${color}`}>{pct}</div>
       <div className="text-xs text-gray-500 mt-1">{label}</div>
     </div>
+  );
+}
+
+function StatusPill({ status }: { status: string }) {
+  const map: Record<string, string> = {
+    labeled:   "bg-green-100 text-green-700",
+    skipped:   "bg-gray-100 text-gray-500",
+    unlabeled: "bg-yellow-100 text-yellow-700",
+  };
+  return (
+    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${map[status] ?? "bg-gray-100 text-gray-500"}`}>
+      {status}
+    </span>
   );
 }

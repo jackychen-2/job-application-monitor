@@ -369,7 +369,7 @@ def load_config() -> Config:
         max_scan_emails=int(os.getenv("MAX_SCAN_EMAILS", "20")),
         imap_timeout_sec=int(os.getenv("IMAP_TIMEOUT_SEC", "30")),
         llm_enabled=llm_enabled,
-        llm_model=os.getenv("LLM_MODEL", "gpt-5-mini"),
+        llm_model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
         llm_timeout_sec=int(os.getenv("LLM_TIMEOUT_SEC", "45")),
         openai_api_key=openai_api_key,
         cost_input_per_mtok=float(os.getenv("COST_INPUT_PER_MTOK", "0.25")),

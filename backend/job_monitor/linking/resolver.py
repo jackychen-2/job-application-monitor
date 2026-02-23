@@ -56,19 +56,26 @@ ThreadLinkResult = LinkResult
 def normalize_company(name: str | None) -> str | None:
     """Normalize company name for matching.
 
+    Strips legal entity suffixes AND common descriptive company-type words
+    so that "Zoom", "Zoom Communications", "Calico Labs" all normalise to
+    the same root name.
+
     Examples:
-        "Tesla, Inc." -> "tesla"
-        "Meta Platforms" -> "meta platforms"
-        "WPROMOTE" -> "wpromote"
-        "Snap Inc" -> "snap"
+        "Tesla, Inc."            -> "tesla"
+        "Zoom Communications"    -> "zoom"
+        "Calico Labs"            -> "calico"
+        "Expedia Group"          -> "expedia"
+        "Meta Platforms"         -> "meta platforms"  (no strip — 'platforms' is brand)
+        "WPROMOTE"               -> "wpromote"
+        "Snap Inc"               -> "snap"
     """
     if not name:
         return None
 
     name = name.lower().strip()
 
-    # Remove legal suffixes
-    suffixes = [
+    # ── Step 1: Strip legal entity suffixes (end of string) ──────────────
+    legal_suffixes = [
         ", inc.", " inc.", ", inc", " inc",
         ", llc", " llc",
         ", corp.", " corp.", ", corp", " corp",
@@ -78,9 +85,42 @@ def normalize_company(name: str | None) -> str | None:
         " co.", ", co.",
         " company", ", company",
     ]
-    for suffix in suffixes:
+    for suffix in legal_suffixes:
         if name.endswith(suffix):
             name = name[: -len(suffix)].strip()
+            break
+
+    # ── Step 2: Strip generic company-type words (suffix only) ───────────
+    # These words are commonly appended to brand names in email subjects/senders
+    # and cause the same company to appear under multiple slightly different names.
+    # Guard: only strip if the remaining prefix is ≥ 3 chars so we don't reduce
+    # short names to empty strings, and skip multi-word branded suffixes like
+    # "web services" where the preceding word is also descriptive.
+    type_suffixes = [
+        " communications", " communication",
+        " technologies", " technology",
+        " solutions", " solution",
+        " systems", " system",
+        " group",
+        " labs", " lab",
+        " global",
+        " international",
+        " enterprises", " enterprise",
+        " holdings", " holding",
+        # NOTE: " services" and " service" intentionally omitted — they appear
+        # in branded product names ("Amazon Web Services") where stripping would
+        # create a wrong token.  Legal-entity " services" is rare in job emails.
+    ]
+    for suffix in type_suffixes:
+        if name.endswith(suffix) and len(name) > len(suffix) + 2:
+            name = name[: -len(suffix)].strip()
+            break  # strip at most one type suffix
+
+    # ── Step 3: Strip email-artifact prefixes (e.g. "your zoom" → "zoom") ─
+    artifact_prefixes = ["your "]
+    for prefix in artifact_prefixes:
+        if name.startswith(prefix):
+            name = name[len(prefix):].strip()
             break
 
     # Remove extra whitespace

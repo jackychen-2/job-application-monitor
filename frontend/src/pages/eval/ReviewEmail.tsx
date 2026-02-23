@@ -8,6 +8,7 @@ import {
   listCachedEmails,
   listGroups,
   createGroup,
+  deleteGroup,
   upsertLabel,
   replayEmailPipeline,
 } from "../../api/eval";
@@ -47,6 +48,7 @@ export default function ReviewEmail() {
   const [groups, setGroups] = useState<EvalApplicationGroup[]>([]);
   const [appSearch, setAppSearch] = useState("");
   const [appDropdownOpen, setAppDropdownOpen] = useState(false);
+  const [showEmptyGroups, setShowEmptyGroups] = useState(false);
   const [newGroupCompany, setNewGroupCompany] = useState("");
   const [newGroupTitle, setNewGroupTitle] = useState("");
   const [showNewGroup, setShowNewGroup] = useState(false);
@@ -180,7 +182,7 @@ export default function ReviewEmail() {
   const save = useCallback(async () => {
     setSaving(true);
     try {
-      await upsertLabel(emailId, { ...label, review_status: label.review_status || "labeled", run_id: runId });
+      await upsertLabel(emailId, { ...label, review_status: "labeled", run_id: runId });
       // Reload label, nav (labeled count), and group members in parallel
       const gid = label.correct_application_group_id;
       const [refreshed] = await Promise.all([
@@ -235,6 +237,10 @@ export default function ReviewEmail() {
   };
 
   const groupDiffClass = (pred: number | null | undefined, gt: number | null | undefined) => {
+    // When GT says "not job-related", any non-null predicted group is wrong → red
+    if (label.is_job_related === false) {
+      return pred != null ? "border-l-4 border-red-400 bg-red-50" : "border-l-4 border-gray-200";
+    }
     if (gt === null || gt === undefined) return "border-l-4 border-gray-200";
     return groupDiffers(pred, gt) ? "border-l-4 border-red-400 bg-red-50" : "border-l-4 border-green-400 bg-green-50";
   };
@@ -250,6 +256,10 @@ export default function ReviewEmail() {
   };
 
   const diffClass = (pred: string | null | undefined, gt: string | null | undefined) => {
+    // When GT says "not job-related", any non-null prediction is wrong → red
+    if (label.is_job_related === false) {
+      return pred ? "border-l-4 border-red-400 bg-red-50" : "border-l-4 border-gray-200";
+    }
     if (gt === null || gt === undefined) return "border-l-4 border-gray-200"; // unlabeled
     return differs(pred, gt) ? "border-l-4 border-red-400 bg-red-50" : "border-l-4 border-green-400 bg-green-50";
   };
@@ -455,11 +465,27 @@ export default function ReviewEmail() {
               <label className="block text-xs text-gray-500 mb-1">Is Job Related</label>
               <div className="flex gap-2">
                 {[
-                  { val: true, label: "Yes", color: "green" },
-                  { val: false, label: "No", color: "red" },
+                  { val: true, label: "Yes ✓", color: "green" },
+                  { val: false, label: "No ✗", color: "red" },
                   { val: undefined, label: "Unlabeled", color: "gray" },
                 ].map(opt => (
-                  <button key={String(opt.val)} onClick={() => setLabel(p => ({ ...p, is_job_related: opt.val as boolean | undefined }))}
+                  <button
+                    key={String(opt.val)}
+                    onClick={() => {
+                      if (opt.val === false) {
+                        // Selecting "not job related" — clear all field-level labels
+                        setLabel(p => ({
+                          ...p,
+                          is_job_related: false,
+                          correct_company: undefined,
+                          correct_job_title: undefined,
+                          correct_status: undefined,
+                          correct_application_group_id: undefined,
+                        }));
+                      } else {
+                        setLabel(p => ({ ...p, is_job_related: opt.val as boolean | undefined }));
+                      }
+                    }}
                     className={`px-3 py-1.5 rounded text-sm border ${label.is_job_related === opt.val
                       ? opt.color === "green" ? "bg-green-100 border-green-500 text-green-700"
                         : opt.color === "red" ? "bg-red-100 border-red-500 text-red-700"
@@ -469,9 +495,14 @@ export default function ReviewEmail() {
                   </button>
                 ))}
               </div>
-
+              {label.is_job_related === false && (
+                <p className="text-xs text-red-500 mt-1">Not job-related — company / title / status fields are not required.</p>
+              )}
             </div>
 
+            {/* Company, Title, Status, Group — hidden when not job-related */}
+            {label.is_job_related !== false && (
+              <>
             {/* Company */}
             <div>
               <label className="block text-xs text-gray-500 mb-1">Correct Company</label>
@@ -485,7 +516,6 @@ export default function ReviewEmail() {
               <datalist id="company-options">
                 {options?.companies.map(c => <option key={c} value={c} />)}
               </datalist>
-
             </div>
 
             {/* Job Title */}
@@ -501,7 +531,6 @@ export default function ReviewEmail() {
               <datalist id="title-options">
                 {options?.job_titles.map(t => <option key={t} value={t} />)}
               </datalist>
-
             </div>
 
             {/* Status */}
@@ -514,7 +543,6 @@ export default function ReviewEmail() {
                 <option value="">— Select —</option>
                 {options?.statuses.map(s => <option key={s} value={s}>{s}</option>)}
               </select>
-
             </div>
 
             {/* Application Group */}
@@ -527,7 +555,7 @@ export default function ReviewEmail() {
               </label>
               {/* Selected value display */}
               <div 
-                onClick={() => setAppDropdownOpen(!appDropdownOpen)}
+                onClick={() => { setAppDropdownOpen(!appDropdownOpen); if (appDropdownOpen) setShowEmptyGroups(false); }}
                 className="w-full border rounded px-3 py-2 text-sm cursor-pointer bg-white hover:bg-gray-50 flex justify-between items-center">
                 <span>
                   {label.correct_application_group_id 
@@ -560,21 +588,54 @@ export default function ReviewEmail() {
                         — None —
                       </div>
                     )}
-                    {groups
+                    {(() => {
+                      const emptyCount = groups.filter(g => g.email_count === 0 && !appSearch).length;
+                      return emptyCount > 0 && !showEmptyGroups && !appSearch ? (
+                        <div
+                          className="px-3 py-1.5 text-xs text-gray-400 cursor-pointer hover:text-gray-600 border-b"
+                          onClick={() => setShowEmptyGroups(true)}
+                        >
+                          + show {emptyCount} empty group{emptyCount !== 1 ? "s" : ""} (abandoned predictions)
+                        </div>
+                      ) : null;
+                    })()}
+                    {[...groups]
+                      .sort((a, b) => b.email_count - a.email_count)
                       .filter(g => {
-                        if (!appSearch) return true;
-                        const search = appSearch.toLowerCase();
-                        return (g.company || "").toLowerCase().includes(search) || 
-                               (g.job_title || "").toLowerCase().includes(search);
+                        if (appSearch) {
+                          const search = appSearch.toLowerCase();
+                          return (g.company || "").toLowerCase().includes(search) ||
+                                 (g.job_title || "").toLowerCase().includes(search);
+                        }
+                        // Hide 0-email groups unless explicitly shown
+                        if (g.email_count === 0 && !showEmptyGroups) return false;
+                        return true;
                       })
                       .map(g => (
                       <div
                         key={g.id}
                         onClick={() => { setLabel(p => ({ ...p, correct_application_group_id: g.id })); setAppDropdownOpen(false); setAppSearch(""); }}
-                        className={`px-3 py-2 text-sm cursor-pointer hover:bg-gray-100 ${
+                        className={`px-3 py-2 text-sm cursor-pointer hover:bg-gray-100 flex items-center justify-between gap-2 ${
                           label.correct_application_group_id === g.id ? "bg-blue-100" : ""
-                        }`}>
-                        {g.company || "?"} — {g.job_title || "?"} ({g.email_count} emails)
+                        } ${g.email_count === 0 ? "opacity-50" : ""}`}>
+                        <span>
+                          {g.company || "?"} — {g.job_title || "?"}
+                          <span className={`ml-1.5 text-xs ${g.email_count > 0 ? "text-green-600 font-medium" : "text-gray-400"}`}>
+                            ({g.email_count} email{g.email_count !== 1 ? "s" : ""})
+                          </span>
+                        </span>
+                        {g.email_count === 0 && (
+                          <button
+                            onClick={async e => {
+                              e.stopPropagation();
+                              if (!confirm(`Delete empty group "${g.company} — ${g.job_title}"?`)) return;
+                              await deleteGroup(g.id);
+                              setGroups(prev => prev.filter(x => x.id !== g.id));
+                            }}
+                            className="shrink-0 text-red-400 hover:text-red-600 text-xs px-1"
+                            title="Delete empty group"
+                          >×</button>
+                        )}
                       </div>
                     ))}
                     {groups.length === 0 && (
@@ -661,6 +722,8 @@ export default function ReviewEmail() {
                 </div>
               )}
             </div>
+            </> /* end label.is_job_related !== false */
+            )}
 
             {/* Correction & Decision Log — inline in GT column */}
             {savedLabelData && (
@@ -727,56 +790,88 @@ function CorrectionLog({
     }
   }
 
-  // ── Grouping analysis ─────────────────────────────────
+  // ── Grouping analysis v2 ─────────────────────────────
   let ga: GroupingAnalysis | null = null;
   try { ga = groupingAnalysisJson ? JSON.parse(groupingAnalysisJson) : null; } catch { ga = null; }
 
   if (ga) {
     const ts = new Date(ga.at).toLocaleString();
-    lines.push({ stage: "grouping", message: `══ Grouping Analysis (computed ${ts}) ══`, level: "info" });
+    lines.push({ stage: "grouping", message: `══ Grouping Analysis v2 (${ts}) ══`, level: "info" });
 
-    // Raw predicted values
-    const predCompany = ga.predicted_company || "(none — pipeline extracted nothing)";
-    const predTitle   = ga.predicted_title   || "(none — pipeline extracted nothing)";
-    lines.push({ stage: "grouping", message: `  Pipeline predicted  →  company: "${predCompany}"`, level: ga.predicted_company ? "info" : "warn" });
-    lines.push({ stage: "grouping", message: `                          title:   "${predTitle}"`, level: ga.predicted_title ? "info" : "warn" });
-
-    // Raw correct values
-    const corrCompany = ga.correct_company || "(not set)";
-    const corrTitle   = ga.correct_title   || "(not set)";
-    lines.push({ stage: "grouping", message: `  Human labeled       →  company: "${corrCompany}"`, level: ga.correct_company ? "info" : "warn" });
-    lines.push({ stage: "grouping", message: `                          title:   "${corrTitle}"`, level: ga.correct_title ? "info" : "warn" });
-
-    // Normalized dedup keys
-    lines.push({ stage: "grouping", message: `  Dedup key (normalized):`, level: "info" });
-    const predKey = `("${ga.predicted_company_norm || ""}", "${ga.predicted_title_norm || ""}")`;
-    const corrKey = `("${ga.correct_company_norm || ""}", "${ga.correct_title_norm || ""}")`;
-    lines.push({ stage: "grouping", message: `    predicted = ${predKey}`, level: ga.company_key_matches && ga.title_key_matches ? "success" : "error" });
-    lines.push({ stage: "grouping", message: `    correct   = ${corrKey}`, level: "info" });
-
-    // Per-field match
+    // ── Decision summary (new) ──────────────────────────
+    const dtColor = (dt: string | null): LogLine["level"] => {
+      if (!dt) return "info";
+      if (dt === "CONFIRMED") return "success";
+      if (dt === "NEW_GROUP_CREATED") return "info";
+      if (dt === "MARKED_NOT_JOB") return "warn";
+      return "error";
+    };
     lines.push({
       stage: "grouping",
-      message: `  company norm match: ${ga.company_key_matches ? "✓ same" : `✗ DIFFERENT  ("${ga.predicted_company_norm || ""}" ≠ "${ga.correct_company_norm || ""}")`}`,
+      message: `  Decision:  ${ga.group_decision_type ?? "(unknown)"}${ga.grouping_failure_category ? `  →  ${ga.grouping_failure_category}` : ""}`,
+      level: dtColor(ga.group_decision_type ?? null),
+    });
+
+    // ── Group-ID level (new) ────────────────────────────
+    const _predName = ga.predicted_company
+      ? `${ga.predicted_company} — ${ga.predicted_title ?? "Unknown"}`
+      : "—";
+    const _corrName = ga.correct_company
+      ? `${ga.correct_company} — ${ga.correct_title ?? "Unknown"}`
+      : "—";
+    lines.push({ stage: "grouping", message: `  Predicted: #${ga.predicted_group_id ?? "—"} "${_predName}"  (size ${ga.predicted_group_size})`, level: "info" });
+    lines.push({ stage: "grouping", message: `  Correct:   #${ga.correct_group_id ?? "—"} "${_corrName}"  (size ${ga.correct_group_size})`, level: "info" });
+    lines.push({
+      stage: "grouping",
+      message: `  Cluster match: ${ga.group_id_match ? "✓ same cluster" : "✗ cluster mismatch"}`,
+      level: ga.group_id_match ? "success" : "error",
+    });
+
+    // ── Dedup key analysis ──────────────────────────────
+    lines.push({ stage: "grouping", message: `  ── Dedup Key ──`, level: "info" });
+    lines.push({ stage: "grouping", message: `  Predicted  →  company: "${ga.predicted_company ?? "(none)"}"  title: "${ga.predicted_title ?? "(none)"}"`, level: ga.predicted_company ? "info" : "warn" });
+    lines.push({ stage: "grouping", message: `  Correct    →  company: "${ga.correct_company ?? "(none)"}"  title: "${ga.correct_title ?? "(none)"}"`, level: ga.correct_company ? "info" : "warn" });
+    lines.push({
+      stage: "grouping",
+      message: `  company key: ${ga.company_key_matches ? "✓ same" : `✗ "${ga.predicted_company_norm}" ≠ "${ga.correct_company_norm}"`}`,
       level: ga.company_key_matches ? "success" : "error",
     });
     lines.push({
       stage: "grouping",
-      message: `  title norm match:   ${ga.title_key_matches ? "✓ same" : `✗ DIFFERENT  ("${ga.predicted_title_norm || ""}" ≠ "${ga.correct_title_norm || ""}")`}`,
+      message: `  title key:   ${ga.title_key_matches ? "✓ same" : `✗ "${ga.predicted_title_norm}" ≠ "${ga.correct_title_norm}"`}`,
       level: ga.title_key_matches ? "success" : "error",
     });
 
-    // Conclusion
-    if (ga.dedup_key_failure) {
-      lines.push({ stage: "grouping", message: `  → GROUPING FAILED: ${ga.dedup_key_failure} key mismatch caused wrong group assignment`, level: "error" });
-    } else {
-      lines.push({ stage: "grouping", message: "  → Dedup key matches correctly — grouping logic was right ✓", level: "success" });
-    }
-
-    // Co-members
+    // ── Co-membership (extended) ────────────────────────
     if (ga.co_member_count > 0) {
-      const ids = ga.co_member_email_ids.slice(0, 8).map(id => `#${id}`).join(", ");
-      lines.push({ stage: "grouping", message: `  Cluster co-members in correct group (${ga.co_member_count}): ${ids}${ga.co_member_count > 8 ? " …" : ""}`, level: "info" });
+      lines.push({ stage: "grouping", message: `  Co-members in correct group (${ga.co_member_count})  [format: email#id "subject" → pipeline's predicted group]`, level: "info" });
+      // Per co-member: #id "subject" → predicted group name
+      ga.co_member_email_ids.slice(0, 8).forEach((eid, i) => {
+        const subj = ga.co_member_subjects?.[i] ?? "(no subject)";
+        const predGrpName = ga.co_member_predicted_group_names?.[i];
+        const issamePred = ga.co_member_predicted_group_ids?.[i] === ga.predicted_group_id;
+        const grpLabel = predGrpName
+          ? `→ predicted: ${predGrpName}${issamePred ? " ✓ same" : " ✗ different"}`
+          : "→ predicted: (none)";
+        lines.push({
+          stage: "grouping",
+          message: `    email #${eid} "${subj}"  ${grpLabel}`,
+          level: issamePred ? "success" : "error",
+        });
+      });
+      if (ga.co_member_count > 8) {
+        lines.push({ stage: "grouping", message: `    … and ${ga.co_member_count - 8} more`, level: "info" });
+      }
+      // Summary: are all co-members in the same predicted group?
+      const uniquePredGroups = [...new Set((ga.co_member_predicted_group_ids ?? []).filter(Boolean))];
+      if (uniquePredGroups.length > 0) {
+        const allSame = uniquePredGroups.every(g => g === ga!.predicted_group_id);
+        lines.push({
+          stage: "grouping",
+          message: `  ${allSame ? "✓ All co-members in same predicted group" : "✗ Co-members split across multiple predicted groups"}`,
+          level: allSame ? "success" : "error",
+        });
+      }
     } else {
       lines.push({ stage: "grouping", message: "  No other labeled emails in this group yet (cluster size = 1)", level: "warn" });
     }

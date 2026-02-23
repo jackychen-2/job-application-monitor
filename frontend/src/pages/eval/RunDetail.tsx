@@ -382,9 +382,3 @@ function MiniStat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function Dot({ correct }: { correct: boolean | null }) {
-  if (correct === null) return <span className="text-gray-300">—</span>;
-  return correct
-    ? <span className="text-green-500">✓</span>
-    : <span className="text-red-500">✗</span>;
-}

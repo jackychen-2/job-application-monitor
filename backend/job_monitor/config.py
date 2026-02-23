@@ -40,8 +40,8 @@ class AppConfig(BaseSettings):
     llm_api_key: SecretStr = SecretStr("")
     openai_api_key: SecretStr = SecretStr("")  # backward compat
     llm_timeout_sec: int = 45
-    cost_input_per_mtok: float = 0.15
-    cost_output_per_mtok: float = 0.60
+    cost_input_per_mtok: float = 0.15   # gpt-4o-mini: $0.15/MTok input
+    cost_output_per_mtok: float = 0.60  # gpt-4o-mini: $0.60/MTok output
 
     # ── Server ────────────────────────────────────────────
     host: str = "0.0.0.0"

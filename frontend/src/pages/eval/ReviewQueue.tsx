@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { listCachedEmails, bulkUpdateLabels, listEvalRuns } from "../../api/eval";
 import type { CachedEmailListResponse, EvalRun } from "../../types/eval";
 
@@ -17,6 +17,7 @@ export default function ReviewQueue() {
   const [search, setSearch] = useState(searchParams.get("search") || "");
   const [runs, setRuns] = useState<EvalRun[]>([]);
 
+  const location = useLocation();
   const page = Number(searchParams.get("page") || 1);
   const filter = searchParams.get("status") || "";
   const runId = searchParams.get("run_id") ? Number(searchParams.get("run_id")) : undefined;
@@ -31,7 +32,9 @@ export default function ReviewQueue() {
     }).then(setData);
   };
 
-  useEffect(() => { load(); }, [page, filter, search, runId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // location.key changes on every navigation (even back/forward to the same URL),
+  // ensuring data is always fresh when the user returns to the queue.
+  useEffect(() => { load(); }, [page, filter, search, runId, location.key]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { listEvalRuns().then(setRuns); }, []);
 
   const setRunFilter = (id: number | undefined) => {

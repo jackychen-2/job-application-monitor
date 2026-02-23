@@ -159,10 +159,26 @@ def cache_list_emails(
         )
         q = q.filter(CachedEmail.id.in_(subq))
     else:
-        q = session.query(CachedEmail).outerjoin(
-            EvalLabel,
-            (EvalLabel.cached_email_id == CachedEmail.id) &
-            (EvalLabel.eval_run_id == None),  # noqa: E711 — legacy labels
+        # No run_id: join each email to its MOST RECENT label (highest id).
+        # Using eval_run_id=NULL (legacy filter) missed all run-scoped labels.
+        latest_label_id_subq = (
+            session.query(
+                EvalLabel.cached_email_id,
+                func.max(EvalLabel.id).label("max_id"),
+            )
+            .group_by(EvalLabel.cached_email_id)
+            .subquery()
+        )
+        q = (
+            session.query(CachedEmail)
+            .outerjoin(
+                latest_label_id_subq,
+                CachedEmail.id == latest_label_id_subq.c.cached_email_id,
+            )
+            .outerjoin(
+                EvalLabel,
+                EvalLabel.id == latest_label_id_subq.c.max_id,
+            )
         )
 
     if review_status:
@@ -178,8 +194,12 @@ def cache_list_emails(
         )
 
     total = q.count()
-    items = (
-        q.order_by(CachedEmail.email_date.desc())
+    # add_entity(EvalLabel) returns (CachedEmail, EvalLabel | None) rows so we
+    # can use the *join-scoped* label directly without triggering an unfiltered
+    # lazy-load via ce.label (which would ignore the eval_run_id constraint).
+    rows = (
+        q.add_entity(EvalLabel)
+        .order_by(CachedEmail.email_date.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
@@ -199,9 +219,9 @@ def cache_list_emails(
                 email_date=ce.email_date,
                 body_text=None,  # Omit body in list view
                 fetched_at=ce.fetched_at,
-                review_status=ce.label.review_status if ce.label else "unlabeled",
+                review_status=lbl.review_status if lbl else "unlabeled",
             )
-            for ce in items
+            for ce, lbl in rows
         ],
         total=total,
         page=page,
@@ -691,105 +711,229 @@ def upsert_label(
                 "at": now_str,
             })
     else:
-        # ── Auto-detect field changes.
-        # On FIRST save (no existing label): compare new values against pipeline prediction.
-        # On SUBSEQUENT saves: compare new values against PREVIOUSLY STORED label values.
-        # This prevents the same "correction" from being recorded repeatedly on every save.
-        def _diff(field: str, old_val, new_val) -> None:
-            o = str(old_val).strip().lower() if old_val is not None else ""
-            n = str(new_val).strip().lower() if new_val is not None else ""
-            if o != n:
+        # ── Auto-detect corrections — always diff current GT against the ORIGINAL PREDICTION.
+        # corrections_json is replaced on every save so it reflects the current state of
+        # disagreement, not a cumulative history.
+        def _diff(field: str, pred_val, gt_val) -> None:
+            p = str(pred_val).strip().lower() if pred_val is not None else ""
+            g = str(gt_val).strip().lower() if gt_val is not None else ""
+            if p != g:
                 new_corrections.append({
                     "run_id": save_run_id,
                     "field": field,
-                    "predicted": str(old_val) if old_val is not None else None,
-                    "corrected": str(new_val) if new_val is not None else None,
+                    "predicted": str(pred_val) if pred_val is not None else None,
+                    "corrected": str(gt_val) if gt_val is not None else None,
                     "error_type": None, "evidence": None, "reason": None,
                     "at": now_str,
                 })
 
-        if _prev_label:
-            # Subsequent save — only record actual changes from stored values
-            if "is_job_related" in data_dict:
-                _diff("classification", _prev_label.is_job_related, data_dict["is_job_related"])
-            if "correct_company" in data_dict:
-                _diff("company", _prev_label.correct_company, data_dict["correct_company"])
-            if "correct_job_title" in data_dict:
-                _diff("job_title", _prev_label.correct_job_title, data_dict["correct_job_title"])
-            if "correct_status" in data_dict:
-                _diff("status", _prev_label.correct_status, data_dict["correct_status"])
-        elif latest_pred:
-            # First save — record corrections from the pipeline prediction
+        if latest_pred:
+            # Classification
             if "is_job_related" in data_dict:
                 _diff("classification", latest_pred.predicted_is_job_related, data_dict["is_job_related"])
-            if "correct_company" in data_dict:
-                _diff("company", latest_pred.predicted_company, data_dict["correct_company"])
-            if "correct_job_title" in data_dict:
-                _diff("job_title", latest_pred.predicted_job_title, data_dict["correct_job_title"])
-            if "correct_status" in data_dict:
-                _diff("status", latest_pred.predicted_status, data_dict["correct_status"])
 
-    # ── Grouping decision learning analysis ──────────────
+            gt_is_job = data_dict.get("is_job_related")
+            if gt_is_job is False:
+                # GT says not job-related — any non-null field prediction is now wrong
+                for fld, pred_val in [
+                    ("company",   latest_pred.predicted_company),
+                    ("job_title", latest_pred.predicted_job_title),
+                    ("status",    latest_pred.predicted_status),
+                ]:
+                    if pred_val:  # only record if prediction actually had a value
+                        _diff(fld, pred_val, None)
+            else:
+                # Job-related: diff each labeled field against prediction
+                if "correct_company" in data_dict:
+                    _diff("company", latest_pred.predicted_company, data_dict["correct_company"])
+                if "correct_job_title" in data_dict:
+                    _diff("job_title", latest_pred.predicted_job_title, data_dict["correct_job_title"])
+                if "correct_status" in data_dict:
+                    _diff("status", latest_pred.predicted_status, data_dict["correct_status"])
+
+    # ── Grouping decision learning analysis v2 ───────────
     grouping_analysis: Optional[dict] = None
     correct_group_id = data_dict.get("correct_application_group_id")
+    is_not_job = data_dict.get("is_job_related") is False
 
-    if correct_group_id and latest_pred:
-        # Get predicted dedup key from EvalPredictedGroup
+    if correct_group_id is not None or is_not_job:
         from job_monitor.eval.models import EvalPredictedGroup
-        pred_group = (
-            session.query(EvalPredictedGroup)
-            .filter(EvalPredictedGroup.id == latest_pred.predicted_application_group_id)
-            .first()
-        ) if latest_pred.predicted_application_group_id else None
+        from difflib import SequenceMatcher as _SM
 
-        pred_company_norm = pred_group.company_norm if pred_group else (latest_pred.predicted_company or "").strip().lower()
-        pred_title_norm = pred_group.job_title_norm if pred_group else (latest_pred.predicted_job_title or "").strip().lower()
+        # ── Predicted group info ──────────────────────────
+        pred_group_id = latest_pred.predicted_application_group_id if latest_pred else None
+        pred_group = None
+        if pred_group_id:
+            pred_group = session.query(EvalPredictedGroup).get(pred_group_id)
 
-        # Compute correct dedup key from label values
-        correct_company = data_dict.get("correct_company") or (latest_pred.predicted_company or "")
-        correct_title = data_dict.get("correct_job_title") or (latest_pred.predicted_job_title or "")
+        pred_company = (latest_pred.predicted_company or "") if latest_pred else ""
+        pred_title   = (latest_pred.predicted_job_title or "") if latest_pred else ""
+        pred_company_norm = pred_group.company_norm if pred_group else pred_company.strip().lower()
+        pred_title_norm   = pred_group.job_title_norm if pred_group else pred_title.strip().lower()
+
+        # ── Correct dedup key ─────────────────────────────
+        correct_company = data_dict.get("correct_company") or ""
+        correct_title   = data_dict.get("correct_job_title") or ""
         correct_company_norm = correct_company.strip().lower()
-        correct_title_norm = correct_title.strip().lower()
+        correct_title_norm   = correct_title.strip().lower()
 
+        # ── Key match analysis ────────────────────────────
         company_matches = pred_company_norm == correct_company_norm
-        title_matches = pred_title_norm == correct_title_norm
-
+        title_matches   = pred_title_norm   == correct_title_norm
         if not company_matches and not title_matches:
-            dedup_failure = "both"
+            dedup_failure: Optional[str] = "both"
         elif not company_matches:
             dedup_failure = "company"
         elif not title_matches:
             dedup_failure = "title"
         else:
-            dedup_failure = None  # dedup key matches — grouping error is elsewhere
+            dedup_failure = None
 
-        # Co-members: other emails in the same correct application group
-        co_member_ids = [
-            lbl.cached_email_id
-            for lbl in session.query(EvalLabel)
-            .filter(
-                EvalLabel.correct_application_group_id == correct_group_id,
-                EvalLabel.cached_email_id != cached_email_id,
+        # ── Group sizes ───────────────────────────────────
+        pred_group_size = 0
+        if pred_group_id and latest_pred:
+            pred_group_size = (
+                session.query(func.count(EvalRunResult.id))
+                .filter(EvalRunResult.predicted_application_group_id == pred_group_id)
+                .scalar() or 0
             )
-            .all()
-        ]
+
+        correct_group_size = 0
+        if correct_group_id:
+            correct_group_size = (
+                session.query(func.count(EvalLabel.id))
+                .filter(EvalLabel.correct_application_group_id == correct_group_id)
+                .scalar() or 0
+            )
+
+        # ── Co-member analysis ────────────────────────────
+        co_member_ids: list[int] = []
+        co_member_subjects: list[Optional[str]] = []
+        co_member_predicted_group_ids: list[Optional[int]] = []
+        co_member_predicted_group_names: list[Optional[str]] = []
+        if correct_group_id:
+            co_labels = (
+                session.query(EvalLabel)
+                .filter(
+                    EvalLabel.correct_application_group_id == correct_group_id,
+                    EvalLabel.cached_email_id != cached_email_id,
+                )
+                .all()
+            )
+            co_member_ids = [lbl.cached_email_id for lbl in co_labels]
+
+            # Fetch subjects for display
+            for eid in co_member_ids:
+                ce_co = session.query(CachedEmail).get(eid)
+                co_member_subjects.append(ce_co.subject if ce_co else None)
+
+            if co_member_ids and latest_pred:
+                co_results = (
+                    session.query(EvalRunResult)
+                    .filter(
+                        EvalRunResult.eval_run_id == latest_pred.eval_run_id,
+                        EvalRunResult.cached_email_id.in_(co_member_ids),
+                    )
+                    .all()
+                )
+                # Build email_id → result map to preserve ordering
+                co_result_map = {r.cached_email_id: r for r in co_results}
+                for eid in co_member_ids:
+                    r = co_result_map.get(eid)
+                    if r and r.predicted_application_group_id:
+                        co_member_predicted_group_ids.append(r.predicted_application_group_id)
+                        pg_co = session.query(EvalPredictedGroup).get(r.predicted_application_group_id)
+                        if pg_co:
+                            co_member_predicted_group_names.append(
+                                f"#{pg_co.id} {pg_co.company or '?'} — {pg_co.job_title or 'Unknown'}"
+                            )
+                        else:
+                            co_member_predicted_group_names.append(f"#{r.predicted_application_group_id}")
+                    else:
+                        co_member_predicted_group_ids.append(None)
+                        co_member_predicted_group_names.append(None)
+
+        # ── Group ID match ────────────────────────────────
+        if dedup_failure is not None:
+            group_id_match = False
+        elif co_member_ids:
+            # All co-members must be in the same predicted group
+            group_id_match = all(
+                pgid == pred_group_id
+                for pgid in co_member_predicted_group_ids
+                if pgid is not None
+            )
+        else:
+            group_id_match = True  # no co-members yet; key match is sufficient
+
+        # ── Group decision type ───────────────────────────
+        if is_not_job:
+            group_decision_type: Optional[str] = "MARKED_NOT_JOB"
+        elif correct_group_id is None:
+            group_decision_type = None
+        elif pred_group_id is None:
+            group_decision_type = "NEW_GROUP_CREATED"
+        elif dedup_failure is not None:
+            group_decision_type = "SPLIT_FROM_EXISTING"
+        elif not co_member_ids:
+            group_decision_type = "NEW_GROUP_CREATED"
+        elif group_id_match:
+            group_decision_type = "CONFIRMED"
+        else:
+            # Some co-members landed in different predicted groups → over-split
+            group_decision_type = "MERGED_INTO_EXISTING"
+
+        # ── Grouping failure category ─────────────────────
+        if group_decision_type in ("CONFIRMED", "MARKED_NOT_JOB", "NEW_GROUP_CREATED", None):
+            grouping_failure_category: Optional[str] = None
+        elif group_decision_type == "MERGED_INTO_EXISTING":
+            grouping_failure_category = "OVER_SPLIT"
+        elif group_decision_type == "SPLIT_FROM_EXISTING":
+            # What kind of key error?
+            is_extraction_err = pred_company.strip().lower() in ("unknown", "", "none", "—")
+            if is_extraction_err:
+                grouping_failure_category = "EXTRACTION_ERROR"
+            else:
+                # Measure similarity of the failing dimension
+                fail_dim = dedup_failure or "company"
+                p_norm = pred_company_norm if fail_dim != "title" else pred_title_norm
+                c_norm = correct_company_norm if fail_dim != "title" else correct_title_norm
+                sim = _SM(None, p_norm, c_norm).ratio()
+                grouping_failure_category = "NORMALIZATION_WEAKNESS" if sim >= 0.75 else "KEY_MISMATCH"
+        else:
+            grouping_failure_category = None
 
         grouping_analysis = {
-            "predicted_company": latest_pred.predicted_company,
-            "predicted_title": latest_pred.predicted_job_title,
+            # Section 1: Dedup key
+            "predicted_company":      pred_company or None,
+            "predicted_title":        pred_title or None,
             "predicted_company_norm": pred_company_norm,
-            "predicted_title_norm": pred_title_norm,
-            "predicted_dedup_key": [pred_company_norm, pred_title_norm],
-            "correct_company": correct_company,
-            "correct_title": correct_title,
-            "correct_company_norm": correct_company_norm,
-            "correct_title_norm": correct_title_norm,
-            "correct_dedup_key": [correct_company_norm, correct_title_norm],
-            "dedup_key_failure": dedup_failure,
-            "company_key_matches": company_matches,
-            "title_key_matches": title_matches,
-            "co_member_email_ids": co_member_ids,
-            "co_member_count": len(co_member_ids),
+            "predicted_title_norm":   pred_title_norm,
+            "predicted_dedup_key":    [pred_company_norm, pred_title_norm],
+            "correct_company":        correct_company or None,
+            "correct_title":          correct_title or None,
+            "correct_company_norm":   correct_company_norm,
+            "correct_title_norm":     correct_title_norm,
+            "correct_dedup_key":      [correct_company_norm, correct_title_norm],
+            "dedup_key_failure":      dedup_failure,
+            "company_key_matches":    company_matches,
+            "title_key_matches":      title_matches,
+            # Section 2: Group-ID level
+            "predicted_group_id":     pred_group_id,
+            "correct_group_id":       correct_group_id,
+            "group_id_match":         group_id_match,
+            "predicted_group_size":   pred_group_size,
+            "correct_group_size":     correct_group_size,
+            # Section 3: Co-membership
+            "co_member_email_ids":                  co_member_ids,
+            "co_member_subjects":                   co_member_subjects,
+            "co_member_count":                      len(co_member_ids),
+            "co_member_predicted_group_ids":        co_member_predicted_group_ids,
+            "co_member_predicted_group_names":      co_member_predicted_group_names,
+            # Section 4: Decision
+            "group_decision_type":        group_decision_type,
+            "grouping_failure_category":  grouping_failure_category,
+            # Metadata
             "at": now_str,
         }
 
@@ -823,13 +967,16 @@ def upsert_label(
         for key, val in data_dict.items():
             setattr(label, key, val)
         label.labeled_at = datetime.now(timezone.utc)
-        # Append new corrections to existing log
-        if new_corrections:
-            existing_log = json.loads(label.corrections_json or "[]")
-            label.corrections_json = json.dumps(existing_log + new_corrections, ensure_ascii=False)
-        # Always overwrite grouping analysis with latest (re-computed on each save)
+        # Replace corrections_json with the current save's diff (not cumulative history).
+        # This ensures the log always reflects the gap between the CURRENT ground truth and
+        # the original prediction, discarding stale entries from earlier edits.
+        label.corrections_json = json.dumps(new_corrections, ensure_ascii=False) if new_corrections else None
+        # Always overwrite grouping analysis with latest (re-computed on each save).
+        # Clear it when not job-related (stale analysis from a previous job-related save).
         if grouping_analysis is not None:
             label.grouping_analysis_json = json.dumps(grouping_analysis, ensure_ascii=False)
+        elif data_dict.get("is_job_related") is False:
+            label.grouping_analysis_json = None
     else:
         label = EvalLabel(
             cached_email_id=cached_email_id,
@@ -1209,6 +1356,7 @@ def trigger_eval_run(
 async def stream_eval_run(
     name: Optional[str] = Query(None),
     max_emails: Optional[int] = Query(None, ge=1, description="Limit evaluation to the first N emails"),
+    email_ids: Optional[str] = Query(None, description="Comma-separated list of CachedEmail IDs to evaluate"),
     config: AppConfig = Depends(get_config),
 ):
     """Trigger a new evaluation run and stream SSE progress events.
@@ -1237,6 +1385,14 @@ async def stream_eval_run(
     def _progress_cb(message: str, current: int, total: int) -> None:
         msg_q.put({"type": "log", "message": message, "current": current, "total": total})
 
+    # Parse comma-separated email_ids into a list of ints (if provided)
+    parsed_email_ids: Optional[list[int]] = None
+    if email_ids:
+        try:
+            parsed_email_ids = [int(x.strip()) for x in email_ids.split(",") if x.strip()]
+        except ValueError:
+            parsed_email_ids = None
+
     def _run_thread() -> None:
         global _eval_running
         session_factory = get_session_factory()
@@ -1248,6 +1404,7 @@ async def stream_eval_run(
                 progress_cb=_progress_cb,
                 cancel_token=_eval_cancel_event,
                 max_emails=max_emails,
+                email_ids=parsed_email_ids,
             )
             db.commit()
             if _eval_cancel_event.is_set():
@@ -1262,17 +1419,52 @@ async def stream_eval_run(
                     _all_groups: list[EvalApplicationGroup] = db.query(EvalApplicationGroup).all()
                     _now = datetime.now(timezone.utc)
 
+                    import re as _re_boot
+                    from difflib import SequenceMatcher as _SM_bootstrap
+
+                    # Common legal / descriptive suffixes to strip before comparing
+                    _COMPANY_STRIP = _re_boot.compile(
+                        r"\b(inc\.?|llc\.?|ltd\.?|corp\.?|co\.?|company|"
+                        r"communications?|group|technologies?|solutions?|"
+                        r"systems?|services?|international|global|your)\b",
+                        _re_boot.IGNORECASE,
+                    )
+
+                    def _normalize_co(name: str) -> str:
+                        stripped = _COMPANY_STRIP.sub("", name)
+                        return _re_boot.sub(r"\s+", " ", stripped).strip()
+
+                    def _company_fuzzy(a: str, b: str, threshold: float = 0.80) -> bool:
+                        """True when two company norms represent the same company.
+
+                        Strategy:
+                        1. Exact match on raw norms (fast path)
+                        2. Exact match after stripping common legal suffixes
+                           → "zoom communications" → "zoom", "zoom" → "zoom" = SAME
+                        3. SequenceMatcher on stripped names >= threshold
+                        """
+                        if a == b:
+                            return True
+                        na, nb = _normalize_co(a), _normalize_co(b)
+                        if na == nb and na:
+                            return True
+                        if not na or not nb:
+                            return False
+                        return _SM_bootstrap(None, na, nb).ratio() >= threshold
+
                     for _pg in db.query(_EPG).filter(_EPG.eval_run_id == result.id).all():
                         if not _pg.company:
                             continue
                         _cn = (_pg.company or "").strip().lower()
                         _tn = (_pg.job_title or "").strip().lower()
-                        # Runs are isolated — match only within this run's groups
+                        # Runs are isolated; use fuzzy company matching so "Zoom" and
+                        # "Zoom Communications" dedup to the same group instead of
+                        # creating separate near-duplicate groups.
                         _app_group = next(
                             (g for g in _all_groups
                              if g.eval_run_id == result.id
-                             and (g.company or "").strip().lower() == _cn
-                             and (g.job_title or "").strip().lower() == _tn),
+                             and (g.job_title or "").strip().lower() == _tn
+                             and _company_fuzzy((g.company or "").strip().lower(), _cn)),
                             None,
                         )
                         if _app_group is None:
