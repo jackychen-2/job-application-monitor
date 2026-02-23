@@ -809,6 +809,7 @@ def upsert_label(
         # ── Co-member analysis ────────────────────────────
         co_member_ids: list[int] = []
         co_member_subjects: list[Optional[str]] = []
+        co_member_email_dates: list[Optional[str]] = []
         co_member_predicted_group_ids: list[Optional[int]] = []
         co_member_predicted_group_names: list[Optional[str]] = []
         if correct_group_id:
@@ -822,10 +823,13 @@ def upsert_label(
             )
             co_member_ids = [lbl.cached_email_id for lbl in co_labels]
 
-            # Fetch subjects for display
+            # Fetch subjects and dates for display
             for eid in co_member_ids:
                 ce_co = session.query(CachedEmail).get(eid)
                 co_member_subjects.append(ce_co.subject if ce_co else None)
+                co_member_email_dates.append(
+                    ce_co.email_date.isoformat() if ce_co and ce_co.email_date else None
+                )
 
             if co_member_ids and latest_pred:
                 co_results = (
@@ -927,6 +931,7 @@ def upsert_label(
             # Section 3: Co-membership
             "co_member_email_ids":                  co_member_ids,
             "co_member_subjects":                   co_member_subjects,
+            "co_member_email_dates":                co_member_email_dates,
             "co_member_count":                      len(co_member_ids),
             "co_member_predicted_group_ids":        co_member_predicted_group_ids,
             "co_member_predicted_group_names":      co_member_predicted_group_names,

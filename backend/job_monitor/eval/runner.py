@@ -161,6 +161,8 @@ def run_evaluation(
         def dstep(stage: str, msg: str, level: str = "info") -> None:
             dlog.append({"stage": stage, "message": msg, "level": level})
 
+        email_date_str = cached.email_date.strftime("%Y-%m-%d %H:%M UTC") if cached.email_date else "unknown"
+        dstep("input", f"Date    : {email_date_str}")
         dstep("input", f"Subject : {subject[:120]!r}")
         dstep("input", f"Sender  : {sender[:120]!r}")
         dstep("input", f"Body    : {body[:200]!r}{'…' if len(body) > 200 else ''}")
@@ -294,7 +296,15 @@ def run_evaluation(
 
                 if candidates:
                     pred_group_id = candidates[0]
-                    dstep("grouping", f"Linked to existing group #{pred_group_id}", "success")
+                    # Use the group's canonical company/title as the prediction.
+                    # The follow-up email may have extracted a slightly different name
+                    # ("Your Zoom" vs "Zoom Communications") — the prediction should
+                    # always reflect the group's established canonical name.
+                    pred_company = app_group_info[pred_group_id].get("company_orig", pred_company)
+                    pred_title   = app_group_info[pred_group_id].get("job_title",    pred_title)
+                    dstep("grouping",
+                          f"Linked to existing group #{pred_group_id} "
+                          f"(canonical: {pred_company!r} / {pred_title!r})", "success")
                     # Update group state so subsequent emails see the latest status/date
                     if pred_status:
                         app_group_info[pred_group_id]["status"] = pred_status
@@ -315,8 +325,9 @@ def run_evaluation(
                     pred_group_id = pred_group.id
                     app_group_info[pred_group_id] = {
                         "company_norm": company_norm_prod,
-                        "job_title": pred_title,
-                        "status": pred_status,
+                        "company_orig": pred_company,   # canonical name from first email
+                        "job_title":    pred_title,
+                        "status":       pred_status,
                         "latest_email_date": cached.email_date,
                     }
                     dstep("grouping", f"New predicted group #{pred_group_id}", "info")

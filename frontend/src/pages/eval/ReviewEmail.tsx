@@ -415,7 +415,14 @@ export default function ReviewEmail() {
                     : l === "warn" ? "text-yellow-400" : "text-gray-300";
                   return (
                     <>
-                      <div className="text-xs text-indigo-600 font-medium mb-1">Pipeline Decision Log (from eval run)</div>
+                      <div className="text-xs text-indigo-600 font-medium mb-1">
+                        Pipeline Decision Log (from eval run)
+                        {email.email_date && (
+                          <span className="ml-2 text-gray-400 font-normal">
+                            · {new Date(email.email_date).toLocaleString()}
+                          </span>
+                        )}
+                      </div>
                       <div className="bg-gray-900 rounded p-2 max-h-72 overflow-y-auto font-mono text-xs space-y-0.5">
                         {stored.map((e, i) => (
                           <div key={i} className={levelColor(e.level)}>
@@ -614,7 +621,16 @@ export default function ReviewEmail() {
                       .map(g => (
                       <div
                         key={g.id}
-                        onClick={() => { setLabel(p => ({ ...p, correct_application_group_id: g.id })); setAppDropdownOpen(false); setAppSearch(""); }}
+                        onClick={() => {
+                          setLabel(p => ({
+                            ...p,
+                            correct_application_group_id: g.id,
+                            correct_company:   g.company   || p.correct_company,
+                            correct_job_title: g.job_title || p.correct_job_title,
+                          }));
+                          setAppDropdownOpen(false);
+                          setAppSearch("");
+                        }}
                         className={`px-3 py-2 text-sm cursor-pointer hover:bg-gray-100 flex items-center justify-between gap-2 ${
                           label.correct_application_group_id === g.id ? "bg-blue-100" : ""
                         } ${g.email_count === 0 ? "opacity-50" : ""}`}>
@@ -665,7 +681,12 @@ export default function ReviewEmail() {
                           onClick={async () => {
                             const g = await createGroup({ company: newGroupCompany, job_title: newGroupTitle, eval_run_id: runId });
                             setGroups(prev => [g, ...prev]);
-                            setLabel(p => ({ ...p, correct_application_group_id: g.id }));
+                            setLabel(p => ({
+                              ...p,
+                              correct_application_group_id: g.id,
+                              correct_company:   g.company   || p.correct_company,
+                              correct_job_title: g.job_title || p.correct_job_title,
+                            }));
                             setShowNewGroup(false);
                             setAppDropdownOpen(false);
                             setNewGroupCompany("");
@@ -729,6 +750,7 @@ export default function ReviewEmail() {
             {savedLabelData && (
               <CorrectionLog
                 emailId={emailId}
+                emailDate={email.email_date}
                 correctionsJson={savedLabelData.corrections_json}
                 groupingAnalysisJson={savedLabelData.grouping_analysis_json}
               />
@@ -759,14 +781,25 @@ export default function ReviewEmail() {
 interface LogLine { stage: string; message: string; level: "info" | "success" | "warn" | "error" }
 
 function CorrectionLog({
+  emailDate,
   correctionsJson,
   groupingAnalysisJson,
 }: {
   emailId: number;
+  emailDate: string | null;
   correctionsJson: string | null;
   groupingAnalysisJson: string | null;
 }) {
   const lines: LogLine[] = [];
+
+  // ── Email timestamp header ────────────────────────────
+  if (emailDate) {
+    lines.push({
+      stage: "email",
+      message: `Email received: ${new Date(emailDate).toLocaleString()}`,
+      level: "info",
+    });
+  }
 
   // ── Corrections (all entries — label is already run-scoped) ───
   const corrections: (CorrectionEntry & Record<string, unknown>)[] =
@@ -848,6 +881,8 @@ function CorrectionLog({
       // Per co-member: #id "subject" → predicted group name
       ga.co_member_email_ids.slice(0, 8).forEach((eid, i) => {
         const subj = ga.co_member_subjects?.[i] ?? "(no subject)";
+        const rawDate = ga.co_member_email_dates?.[i];
+        const dateLabel = rawDate ? ` (${new Date(rawDate).toLocaleDateString()})` : "";
         const predGrpName = ga.co_member_predicted_group_names?.[i];
         const issamePred = ga.co_member_predicted_group_ids?.[i] === ga.predicted_group_id;
         const grpLabel = predGrpName
@@ -855,7 +890,7 @@ function CorrectionLog({
           : "→ predicted: (none)";
         lines.push({
           stage: "grouping",
-          message: `    email #${eid} "${subj}"  ${grpLabel}`,
+          message: `    email #${eid}${dateLabel} "${subj}"  ${grpLabel}`,
           level: issamePred ? "success" : "error",
         });
       });

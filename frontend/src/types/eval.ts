@@ -167,6 +167,7 @@ export interface GroupingAnalysis {
   // ── Section 3: Cluster co-membership ────────────────────────────────────
   co_member_email_ids: number[];
   co_member_subjects: (string | null)[];            // subject line for each co-member email
+  co_member_email_dates: (string | null)[];         // ISO send date for each co-member email
   co_member_count: number;
   co_member_predicted_group_ids: (number | null)[]; // predicted groups for each co-member
   co_member_predicted_group_names: (string | null)[]; // "#ID Company — Title" for each
