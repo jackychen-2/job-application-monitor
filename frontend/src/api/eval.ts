@@ -64,8 +64,9 @@ export function listCachedEmails(params: {
   return request(`/cache/emails?${qs}`);
 }
 
-export function getCachedEmail(id: number): Promise<CachedEmailDetail> {
-  return request(`/cache/emails/${id}`);
+export function getCachedEmail(id: number, runId?: number): Promise<CachedEmailDetail> {
+  const qs = runId ? `?run_id=${runId}` : "";
+  return request(`/cache/emails/${id}${qs}`);
 }
 
 // ── Labels ───────────────────────────────────────────────

@@ -109,7 +109,7 @@ export default function ReviewEmail() {
   // Load email data
   useEffect(() => {
     if (!emailId) return;
-    getCachedEmail(emailId).then(setEmail);
+    getCachedEmail(emailId, runId).then(setEmail);
     getLabel(emailId, runId).then(l => {
       setSavedLabelData(l);
       if (l) {
@@ -128,7 +128,7 @@ export default function ReviewEmail() {
         setLabel({});
       }
     });
-  }, [emailId]);
+  }, [emailId, runId]);
 
   // Refresh navigation list scoped to the current run (or all emails if no run selected)
   const loadNav = () =>
@@ -938,5 +938,4 @@ function CorrectionLog({
     </div>
   );
 }
-
 

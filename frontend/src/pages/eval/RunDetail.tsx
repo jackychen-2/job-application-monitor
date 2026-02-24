@@ -29,6 +29,7 @@ export default function RunDetail() {
   if (!run) return <div className="p-8 text-gray-500">Loading...</div>;
 
   const pct = (v: number | null | undefined) => v != null ? `${(v * 100).toFixed(1)}%` : "—";
+  const reviewHref = (emailId: number) => id ? `/eval/review/${emailId}?run_id=${id}` : `/eval/review/${emailId}`;
 
   return (
     <div className="space-y-6">
@@ -83,7 +84,7 @@ export default function RunDetail() {
               <ul className="mt-2 text-xs space-y-1">
                 {report.classification_fp_examples.map(e => (
                   <li key={e.email_id} className="text-gray-600">
-                    <Link to={`/eval/review/${e.email_id}`} className="text-blue-600 hover:underline">#{e.email_id}</Link>: {e.subject}
+                    <Link to={reviewHref(e.email_id)} className="text-blue-600 hover:underline">#{e.email_id}</Link>: {e.subject}
                   </li>
                 ))}
               </ul>
@@ -97,7 +98,7 @@ export default function RunDetail() {
               <ul className="mt-2 text-xs space-y-1">
                 {report.classification_fn_examples.map(e => (
                   <li key={e.email_id} className="text-gray-600">
-                    <Link to={`/eval/review/${e.email_id}`} className="text-blue-600 hover:underline">#{e.email_id}</Link>: {e.subject}
+                    <Link to={reviewHref(e.email_id)} className="text-blue-600 hover:underline">#{e.email_id}</Link>: {e.subject}
                   </li>
                 ))}
               </ul>
@@ -150,7 +151,7 @@ export default function RunDetail() {
               <ul className="mt-2 text-xs space-y-2">
                 {report.field_error_examples.slice(0, 20).map(e => (
                   <li key={e.email_id} className="bg-gray-50 p-2 rounded">
-                    <Link to={`/eval/review/${e.email_id}`} className="text-blue-600 hover:underline">#{e.email_id}</Link>: {e.subject}
+                    <Link to={reviewHref(e.email_id)} className="text-blue-600 hover:underline">#{e.email_id}</Link>: {e.subject}
                     <div className="mt-1 space-y-0.5">
                       {e.errors.map((err, i) => (
                         <div key={i} className="text-gray-600">
@@ -320,10 +321,12 @@ export default function RunDetail() {
                     ? "bg-red-50/30" : "";
                   const cell = (pred: string | boolean | null, truth: string | boolean | null, correct: boolean | null) => {
                     const match = correct === true ? "text-green-700" : correct === false ? "text-red-600 font-medium" : "text-gray-500";
+                    const predStr = String(pred ?? "—");
+                    const truthStr = String(truth ?? "—");
                     return (
                       <>
-                        <td className={`px-2 py-1 max-w-[80px] truncate border-l ${match}`}>{String(pred ?? "—")}</td>
-                        <td className={`px-2 py-1 max-w-[80px] truncate text-gray-600`}>{String(truth ?? "—")}</td>
+                        <td title={predStr} className={`px-2 py-1 max-w-[120px] truncate border-l ${match}`}>{predStr}</td>
+                        <td title={truthStr} className={`px-2 py-1 max-w-[120px] truncate text-gray-600`}>{truthStr}</td>
                       </>
                     );
                   };
@@ -344,7 +347,7 @@ export default function RunDetail() {
                       {cell(r.predicted_job_title, r.label_job_title, r.job_title_correct)}
                       {cell(r.predicted_status, r.label_status, r.status_correct)}
                       <td className="px-2 py-1 border-l">
-                        <Link to={`/eval/review/${r.cached_email_id}`} className="text-blue-600 hover:underline whitespace-nowrap">Review →</Link>
+                        <Link to={reviewHref(r.cached_email_id)} className="text-blue-600 hover:underline whitespace-nowrap">Review →</Link>
                       </td>
                     </tr>
                   );
@@ -381,4 +384,3 @@ function MiniStat({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
-

@@ -127,12 +127,14 @@ def run_evaluation(
     # app_group_info: group_id → {company_norm, job_title, status, latest_email_date}
     # Replaces the old (company_stripped, title_norm) dedup dict so Stage 4
     # uses the exact same Rules A/B/C as resolve_by_company() in production.
+    from difflib import SequenceMatcher as _SM
     from job_monitor.linking.resolver import (
         normalize_company as _prod_normalize_company,
         titles_similar as _prod_titles_similar,
         _PROGRESSED_STATUSES as _PROD_PROGRESSED,
     )
     _MAX_SAME_CYCLE_DAYS = 3
+    _FUZZY_THRESHOLD = 0.75
 
     app_group_info: dict[int, dict] = {}  # group_id → metadata
     total = len(cached_emails)
@@ -311,26 +313,78 @@ def run_evaluation(
                     if cached.email_date:
                         app_group_info[pred_group_id]["latest_email_date"] = cached.email_date
                 else:
-                    # No surviving candidate — create new group
-                    title_norm_for_key = (pred_title or "").strip().lower()
-                    pred_group = EvalPredictedGroup(
-                        eval_run_id=eval_run.id,
-                        company=pred_company,
-                        job_title=pred_title,
-                        company_norm=company_norm_prod,
-                        job_title_norm=title_norm_for_key,
-                    )
-                    session.add(pred_group)
-                    session.flush()
-                    pred_group_id = pred_group.id
-                    app_group_info[pred_group_id] = {
-                        "company_norm": company_norm_prod,
-                        "company_orig": pred_company,   # canonical name from first email
-                        "job_title":    pred_title,
-                        "status":       pred_status,
-                        "latest_email_date": cached.email_date,
-                    }
-                    dstep("grouping", f"New predicted group #{pred_group_id}", "info")
+                    # No surviving candidate — try fuzzy rescue before creating new group
+                    fuzzy_rescued = False
+                    if llm_provider is not None and company_norm_prod:
+                        # Find groups with similar company norms (fuzzy match).
+                        # Includes exact company-norm matches too — they may have been
+                        # eliminated by Rule A (title mismatch) without LLM confirmation,
+                        # so the LLM should still get a chance to decide.
+                        fuzzy_matches = [
+                            gid for gid, info in app_group_info.items()
+                            if info["company_norm"]
+                            and _SM(None, company_norm_prod, info["company_norm"]).ratio() >= _FUZZY_THRESHOLD
+                        ]
+                        if fuzzy_matches:
+                            dstep("grouping",
+                                  f"Fuzzy rescue: {len(fuzzy_matches)} candidate(s) with similar company norm",
+                                  "info")
+                            for gid in fuzzy_matches[:3]:
+                                try:
+                                    confirm = llm_provider.confirm_same_application(
+                                        email_subject=subject,
+                                        email_sender=sender,
+                                        email_body=body,
+                                        app_company=app_group_info[gid].get("company_orig", ""),
+                                        app_job_title=app_group_info[gid].get("job_title") or "",
+                                        app_status=app_group_info[gid].get("status") or "",
+                                        app_last_email_subject="",
+                                    )
+                                    if confirm.is_same_application:
+                                        pred_group_id = gid
+                                        pred_company = app_group_info[gid].get("company_orig", pred_company)
+                                        pred_title   = app_group_info[gid].get("job_title",    pred_title)
+                                        dstep("grouping",
+                                              f"Fuzzy rescue linked to group #{gid} "
+                                              f"(canonical: {pred_company!r} / {pred_title!r})",
+                                              "success")
+                                        eval_run.total_prompt_tokens += confirm.prompt_tokens
+                                        eval_run.total_completion_tokens += confirm.completion_tokens
+                                        eval_run.total_estimated_cost += confirm.estimated_cost_usd
+                                        if pred_status:
+                                            app_group_info[gid]["status"] = pred_status
+                                        if cached.email_date:
+                                            app_group_info[gid]["latest_email_date"] = cached.email_date
+                                        fuzzy_rescued = True
+                                        break
+                                    else:
+                                        dstep("grouping",
+                                              f"Fuzzy rescue LLM rejected group #{gid}", "info")
+                                except Exception as exc:
+                                    dstep("grouping",
+                                          f"Fuzzy rescue LLM error for group #{gid}: {exc}", "warn")
+
+                    if not fuzzy_rescued:
+                        # Create new group
+                        title_norm_for_key = (pred_title or "").strip().lower()
+                        pred_group = EvalPredictedGroup(
+                            eval_run_id=eval_run.id,
+                            company=pred_company,
+                            job_title=pred_title,
+                            company_norm=company_norm_prod,
+                            job_title_norm=title_norm_for_key,
+                        )
+                        session.add(pred_group)
+                        session.flush()
+                        pred_group_id = pred_group.id
+                        app_group_info[pred_group_id] = {
+                            "company_norm": company_norm_prod,
+                            "company_orig": pred_company,   # canonical name from first email
+                            "job_title":    pred_title,
+                            "status":       pred_status,
+                            "latest_email_date": cached.email_date,
+                        }
+                        dstep("grouping", f"New predicted group #{pred_group_id}", "info")
             else:
                 dstep("grouping", "Skipped (company normalization returned empty)", "warn")
         else:
@@ -402,19 +456,30 @@ def run_evaluation(
         result.grouping_correct = no_split and no_merge
 
     # Classification / field correctness
+    # Use normalize_company() for company comparison so that "Microsoft Corporation"
+    # and "Microsoft" are treated as the same company (both normalize to "microsoft").
+    # Use titles_similar() for title comparison so abbreviation variants match.
+    from job_monitor.linking.resolver import (
+        normalize_company as _norm_co_runner,
+        titles_similar as _titles_sim_runner,
+    )
+
     for result in results:
         label = labels_map.get(result.cached_email_id)
         if label and label.is_job_related is not None:
             result.classification_correct = (result.predicted_is_job_related == label.is_job_related)
         if label and label.correct_company is not None and result.predicted_is_job_related:
-            pn = (result.predicted_company or "").strip().lower()
-            ln = label.correct_company.strip().lower()
+            pn = _norm_co_runner(result.predicted_company or "") or (result.predicted_company or "").strip().lower()
+            ln = _norm_co_runner(label.correct_company) or label.correct_company.strip().lower()
             result.company_correct = (pn == ln)
             result.company_partial = SequenceMatcher(None, pn, ln).ratio() >= 0.8
         if label and label.correct_job_title is not None and result.predicted_is_job_related:
+            pred_t = (result.predicted_job_title or "").strip()
+            true_t = label.correct_job_title.strip()
+            # Exact match first; fall back to titles_similar for abbreviation variants
             result.job_title_correct = (
-                (result.predicted_job_title or "").strip().lower() ==
-                label.correct_job_title.strip().lower()
+                pred_t.lower() == true_t.lower() or
+                (bool(pred_t) and bool(true_t) and _titles_sim_runner(pred_t, true_t))
             )
         if label and label.correct_status is not None and result.predicted_is_job_related:
             result.status_correct = (
@@ -442,6 +507,101 @@ def run_evaluation(
         accuracy=eval_run.classification_accuracy,
     )
     return eval_run
+
+
+def refresh_eval_run_report(session: Session, run_id: int) -> None:
+    """Recompute report_json and per-result correctness flags for an existing run.
+
+    Called after the auto-bootstrap updates run-scoped labels so that
+    field_error_examples and aggregate metrics reflect the current labels,
+    not the stale snapshot taken before bootstrap.
+    """
+    from collections import defaultdict
+    from difflib import SequenceMatcher
+    from job_monitor.linking.resolver import (
+        normalize_company as _norm_co,
+        titles_similar as _titles_sim,
+    )
+
+    eval_run = session.query(EvalRun).get(run_id)
+    if eval_run is None:
+        return
+
+    results = (
+        session.query(EvalRunResult)
+        .filter(EvalRunResult.eval_run_id == run_id)
+        .all()
+    )
+    if not results:
+        return
+
+    # Build labels_map from run-scoped labels (the bootstrap just committed these)
+    labels_map: dict[int, EvalLabel] = {}
+    for lbl in session.query(EvalLabel).filter(EvalLabel.eval_run_id == run_id).all():
+        labels_map[lbl.cached_email_id] = lbl
+
+    # Load cached emails for the results in this run
+    email_ids = [r.cached_email_id for r in results]
+    cached_emails = (
+        session.query(CachedEmail).filter(CachedEmail.id.in_(email_ids)).all()
+    )
+
+    # Recompute aggregate report
+    report = _compute_report(results, labels_map, cached_emails)
+    eval_run.classification_accuracy = report.classification.accuracy
+    eval_run.classification_precision = report.classification.precision
+    eval_run.classification_recall = report.classification.recall
+    eval_run.classification_f1 = report.classification.f1
+    eval_run.field_extraction_accuracy = report.overall_field_accuracy
+    eval_run.status_detection_accuracy = report.field_status.overall_accuracy
+    eval_run.grouping_ari = report.grouping.ari
+    eval_run.grouping_v_measure = report.grouping.v_measure
+    eval_run.report_json = report.to_json()
+    eval_run.labeled_emails = len(labels_map)
+
+    # Recompute per-result grouping correctness
+    _true_to_pred: dict[int, set[int]] = defaultdict(set)
+    _pred_to_true: dict[int, set[int]] = defaultdict(set)
+    _grouping_results = []
+    for r in results:
+        lbl = labels_map.get(r.cached_email_id)
+        if (lbl
+                and lbl.correct_application_group_id is not None
+                and r.predicted_application_group_id is not None):
+            _true_to_pred[lbl.correct_application_group_id].add(r.predicted_application_group_id)
+            _pred_to_true[r.predicted_application_group_id].add(lbl.correct_application_group_id)
+            _grouping_results.append(r)
+    for r in _grouping_results:
+        lbl = labels_map.get(r.cached_email_id)
+        no_split = len(_true_to_pred[lbl.correct_application_group_id]) == 1
+        no_merge = len(_pred_to_true[r.predicted_application_group_id]) == 1
+        r.grouping_correct = no_split and no_merge
+
+    # Recompute per-result classification / field correctness
+    for r in results:
+        lbl = labels_map.get(r.cached_email_id)
+        if lbl and lbl.is_job_related is not None:
+            r.classification_correct = (r.predicted_is_job_related == lbl.is_job_related)
+        if lbl and lbl.correct_company is not None and r.predicted_is_job_related:
+            pn = _norm_co(r.predicted_company or "") or (r.predicted_company or "").strip().lower()
+            ln = _norm_co(lbl.correct_company) or lbl.correct_company.strip().lower()
+            r.company_correct = (pn == ln)
+            r.company_partial = SequenceMatcher(None, pn, ln).ratio() >= 0.8
+        if lbl and lbl.correct_job_title is not None and r.predicted_is_job_related:
+            pred_t = (r.predicted_job_title or "").strip()
+            true_t = lbl.correct_job_title.strip()
+            r.job_title_correct = (
+                pred_t.lower() == true_t.lower() or
+                (bool(pred_t) and bool(true_t) and _titles_sim(pred_t, true_t))
+            )
+        if lbl and lbl.correct_status is not None and r.predicted_is_job_related:
+            r.status_correct = (
+                (r.predicted_status or "").strip().lower() ==
+                lbl.correct_status.strip().lower()
+            )
+
+    session.flush()
+    logger.info("eval_report_refreshed", run_id=run_id, labeled=len(labels_map))
 
 
 def _compute_report(
@@ -492,14 +652,26 @@ def _compute_report(
         status_preds.append(r.predicted_status)
         status_labels.append(label.correct_status)
 
-        # Collect field error examples
+        # Collect field error examples — use normalize_company() and titles_similar()
+        # so "Microsoft Corporation" vs "Microsoft" and "Sr. Engineer" vs "Senior Engineer"
+        # are not reported as errors (matches how company_correct is computed above).
+        from job_monitor.linking.resolver import (
+            normalize_company as _nc_report,
+            titles_similar as _ts_report,
+        )
         ce = email_map.get(r.cached_email_id)
         subj = ce.subject if ce else ""
         errors = []
-        if label.correct_company and (r.predicted_company or "").strip().lower() != label.correct_company.strip().lower():
-            errors.append({"field": "company", "predicted": r.predicted_company, "expected": label.correct_company})
-        if label.correct_job_title and (r.predicted_job_title or "").strip().lower() != label.correct_job_title.strip().lower():
-            errors.append({"field": "job_title", "predicted": r.predicted_job_title, "expected": label.correct_job_title})
+        if label.correct_company:
+            pco = _nc_report(r.predicted_company or "") or (r.predicted_company or "").strip().lower()
+            lco = _nc_report(label.correct_company) or label.correct_company.strip().lower()
+            if pco != lco:
+                errors.append({"field": "company", "predicted": r.predicted_company, "expected": label.correct_company})
+        if label.correct_job_title:
+            pt = (r.predicted_job_title or "").strip()
+            lt = label.correct_job_title.strip()
+            if pt.lower() != lt.lower() and not (pt and lt and _ts_report(pt, lt)):
+                errors.append({"field": "job_title", "predicted": r.predicted_job_title, "expected": label.correct_job_title})
         if label.correct_status and (r.predicted_status or "").strip().lower() != label.correct_status.strip().lower():
             errors.append({"field": "status", "predicted": r.predicted_status, "expected": label.correct_status})
         if errors:

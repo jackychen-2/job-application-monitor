@@ -230,19 +230,25 @@ def cache_list_emails(
 
 
 @router.get("/cache/emails/{email_id}", response_model=CachedEmailDetailOut)
-def cache_get_email(email_id: int, session: Session = Depends(get_db)):
-    """Get a single cached email with full body and latest pipeline predictions."""
+def cache_get_email(
+    email_id: int,
+    run_id: Optional[int] = Query(None, description="When provided, return predictions from this eval run"),
+    session: Session = Depends(get_db),
+):
+    """Get a single cached email with full body and pipeline predictions.
+
+    If ``run_id`` is provided, predictions are read from that run. Otherwise,
+    the latest run result for the email is returned.
+    """
     ce = session.query(CachedEmail).get(email_id)
     if not ce:
         raise HTTPException(404, "Cached email not found")
 
-    # Get latest eval run result for this email
-    latest_result = (
-        session.query(EvalRunResult)
-        .filter(EvalRunResult.cached_email_id == email_id)
-        .order_by(EvalRunResult.eval_run_id.desc())
-        .first()
-    )
+    # Get eval run result for this email (run-scoped when run_id is provided)
+    result_q = session.query(EvalRunResult).filter(EvalRunResult.cached_email_id == email_id)
+    if run_id is not None:
+        result_q = result_q.filter(EvalRunResult.eval_run_id == run_id)
+    latest_result = result_q.order_by(EvalRunResult.eval_run_id.desc()).first()
 
     # Get EvalPredictedGroup display info if predicted group exists
     app_display = None
@@ -759,6 +765,7 @@ def upsert_label(
     if correct_group_id is not None or is_not_job:
         from job_monitor.eval.models import EvalPredictedGroup
         from difflib import SequenceMatcher as _SM
+        from job_monitor.linking.resolver import normalize_company as _norm_co, titles_similar as _titles_sim
 
         # ── Predicted group info ──────────────────────────
         pred_group_id = latest_pred.predicted_application_group_id if latest_pred else None
@@ -768,18 +775,23 @@ def upsert_label(
 
         pred_company = (latest_pred.predicted_company or "") if latest_pred else ""
         pred_title   = (latest_pred.predicted_job_title or "") if latest_pred else ""
-        pred_company_norm = pred_group.company_norm if pred_group else pred_company.strip().lower()
+        pred_company_norm = pred_group.company_norm if pred_group else (_norm_co(pred_company) or pred_company.strip().lower())
         pred_title_norm   = pred_group.job_title_norm if pred_group else pred_title.strip().lower()
 
         # ── Correct dedup key ─────────────────────────────
+        # Use normalize_company() — same function as the production pipeline — so
+        # "Qventus, Inc" → "qventus" instead of the naive "qventus, inc", preventing
+        # false company-key mismatches in the grouping analysis report.
         correct_company = data_dict.get("correct_company") or ""
         correct_title   = data_dict.get("correct_job_title") or ""
-        correct_company_norm = correct_company.strip().lower()
+        correct_company_norm = _norm_co(correct_company) or correct_company.strip().lower()
         correct_title_norm   = correct_title.strip().lower()
 
         # ── Key match analysis ────────────────────────────
         company_matches = pred_company_norm == correct_company_norm
-        title_matches   = pred_title_norm   == correct_title_norm
+        # Use titles_similar() for title comparison so abbreviations like
+        # "Sr. Data Engineer" vs "Senior Data Engineer" are correctly treated as matching.
+        title_matches   = _titles_sim(pred_title_norm, correct_title_norm) if (pred_title_norm and correct_title_norm) else (pred_title_norm == correct_title_norm)
         if not company_matches and not title_matches:
             dedup_failure: Optional[str] = "both"
         elif not company_matches:
@@ -1590,6 +1602,16 @@ async def stream_eval_run(
 
                     db.commit()
                     _progress_cb(f"✓ Labels reset to Run #{result.id} predictions.", 0, 0)
+
+                    # Refresh report_json and per-result flags now that labels reflect
+                    # actual predictions — otherwise field_error_examples stays stale.
+                    try:
+                        from job_monitor.eval.runner import refresh_eval_run_report
+                        refresh_eval_run_report(db, result.id)
+                        db.commit()
+                        _progress_cb("✓ Report refreshed with bootstrap labels.", 0, 0)
+                    except Exception as _rbe:
+                        logger.warning("report_refresh_failed", error=str(_rbe))
                 except Exception as _be:
                     logger.warning("auto_bootstrap_failed", error=str(_be))
 
@@ -1674,30 +1696,68 @@ def get_run_results(
     errors_only: bool = Query(False),
     session: Session = Depends(get_db),
 ):
-    """Get per-email results for an evaluation run."""
-    q = (
+    """Get per-email results for an evaluation run.
+
+    Correctness flags are recomputed against run-scoped labels so results stay
+    consistent even after labels are edited post-run.
+    """
+    from difflib import SequenceMatcher
+    from job_monitor.linking.resolver import normalize_company as _norm_co, titles_similar as _titles_sim
+
+    results = (
         session.query(EvalRunResult)
         .filter(EvalRunResult.eval_run_id == run_id)
+        .all()
     )
-    if errors_only:
-        q = q.filter(
-            (EvalRunResult.classification_correct == False) |  # noqa: E712
-            (EvalRunResult.company_correct == False) |
-            (EvalRunResult.job_title_correct == False) |
-            (EvalRunResult.status_correct == False) |
-            (EvalRunResult.grouping_correct == False)  # noqa: E712
-        )
-
-    results = q.all()
     out = []
     for r in results:
         ce = session.query(CachedEmail).get(r.cached_email_id)
         pg = r.predicted_group  # Lazy-loaded relationship
         lbl = (
             session.query(EvalLabel)
-            .filter(EvalLabel.cached_email_id == r.cached_email_id)
+            .filter(
+                EvalLabel.cached_email_id == r.cached_email_id,
+                EvalLabel.eval_run_id == run_id,
+            )
             .first()
         )
+
+        # Recompute correctness against current run-scoped labels.
+        cls_correct = r.classification_correct
+        company_correct = r.company_correct
+        company_partial = r.company_partial
+        title_correct = r.job_title_correct
+        status_correct = r.status_correct
+
+        if lbl and lbl.is_job_related is not None:
+            cls_correct = (r.predicted_is_job_related == lbl.is_job_related)
+        if lbl and lbl.correct_company is not None and r.predicted_is_job_related:
+            pn = _norm_co(r.predicted_company or "") or (r.predicted_company or "").strip().lower()
+            ln = _norm_co(lbl.correct_company) or lbl.correct_company.strip().lower()
+            company_correct = (pn == ln)
+            company_partial = SequenceMatcher(None, pn, ln).ratio() >= 0.8
+        if lbl and lbl.correct_job_title is not None and r.predicted_is_job_related:
+            pt = (r.predicted_job_title or "").strip()
+            lt = lbl.correct_job_title.strip()
+            title_correct = (
+                pt.lower() == lt.lower() or
+                (bool(pt) and bool(lt) and _titles_sim(pt, lt))
+            )
+        if lbl and lbl.correct_status is not None and r.predicted_is_job_related:
+            status_correct = (
+                (r.predicted_status or "").strip().lower() ==
+                lbl.correct_status.strip().lower()
+            )
+
+        if errors_only and not (
+            cls_correct is False or
+            company_correct is False or
+            title_correct is False or
+            status_correct is False or
+            r.grouping_correct is False
+        ):
+            continue
+
         out.append(EvalRunResultOut(
             id=r.id,
             cached_email_id=r.cached_email_id,
@@ -1708,11 +1768,11 @@ def get_run_results(
             predicted_application_group_id=r.predicted_application_group_id,
             predicted_group=pg,
             predicted_confidence=r.predicted_confidence,
-            classification_correct=r.classification_correct,
-            company_correct=r.company_correct,
-            company_partial=r.company_partial,
-            job_title_correct=r.job_title_correct,
-            status_correct=r.status_correct,
+            classification_correct=cls_correct,
+            company_correct=company_correct,
+            company_partial=company_partial,
+            job_title_correct=title_correct,
+            status_correct=status_correct,
             grouping_correct=r.grouping_correct,
             llm_used=r.llm_used,
             prompt_tokens=r.prompt_tokens,

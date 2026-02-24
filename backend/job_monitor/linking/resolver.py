@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from typing import Optional, List
 
 import structlog
@@ -72,7 +73,10 @@ def normalize_company(name: str | None) -> str | None:
     if not name:
         return None
 
-    name = name.lower().strip()
+    # Normalise all Unicode whitespace (non-breaking space, thin space, etc.)
+    # to plain ASCII space BEFORE suffix matching, otherwise suffixes like
+    # " inc." won't be detected when the space is U+00A0.
+    name = re.sub(r"\s+", " ", name).lower().strip()
 
     # ── Step 1: Strip legal entity suffixes (end of string) ──────────────
     legal_suffixes = [
@@ -123,10 +127,44 @@ def normalize_company(name: str | None) -> str | None:
             name = name[len(prefix):].strip()
             break
 
-    # Remove extra whitespace
-    name = re.sub(r"\s+", " ", name).strip()
+    return name.strip() if name.strip() else None
 
-    return name if name else None
+
+# ---------------------------------------------------------------------------
+# Fuzzy company candidate search
+# ---------------------------------------------------------------------------
+
+def _find_fuzzy_company_candidates(
+    session: Session,
+    normalized: str,
+    threshold: float = 0.75,
+) -> list:
+    """Find Application records with a similar normalized company name.
+
+    Uses SequenceMatcher ratio to catch minor variations, e.g.:
+      "zoom" vs "zoom communications"  → 0.80 ✓
+      "tesla" vs "tesla motors"         → 0.83 ✓
+      "google" vs "amazon"              → 0.31 ✗
+
+    Returns applications sorted by similarity descending, then most-recent first.
+    Only used as a fallback rescue when the exact-match query returns zero results.
+    """
+    if not normalized:
+        return []
+
+    all_apps = session.query(Application).all()
+    scored: list[tuple[float, Application]] = []
+    for app in all_apps:
+        existing_norm = app.normalized_company or ""
+        if not existing_norm:
+            continue
+        sim = SequenceMatcher(None, normalized, existing_norm).ratio()
+        if sim >= threshold:
+            scored.append((sim, app))
+
+    # Sort: highest similarity first, then most-recently created
+    scored.sort(key=lambda x: (-x[0], -(x[1].id)))
+    return [app for _, app in scored]
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +482,62 @@ def resolve_by_company(
             extracted_status=extracted_status,
             job_title=job_title,
         )
+
+        # ── Rescue pass: fuzzy company match + LLM confirmation ──────────
+        # When rules filter everything out (often due to minor company name
+        # variations like "Zoom" vs "Zoom Communications"), try a broader
+        # fuzzy search and let the LLM decide before creating a new group.
+        if llm_provider is not None and hasattr(llm_provider, "confirm_same_application"):
+            fuzzy_candidates = _find_fuzzy_company_candidates(session, normalized, threshold=0.75)
+            if fuzzy_candidates:
+                logger.info(
+                    "company_link_fuzzy_rescue_attempt",
+                    company=company,
+                    normalized=normalized,
+                    fuzzy_candidate_count=len(fuzzy_candidates),
+                )
+                for candidate in fuzzy_candidates[:3]:  # Check top 3 most similar
+                    try:
+                        confirm_result = llm_provider.confirm_same_application(
+                            email_subject=email_subject,
+                            email_sender=email_sender,
+                            email_body=email_body,
+                            app_company=candidate.company,
+                            app_job_title=candidate.job_title or "",
+                            app_status=candidate.status,
+                            app_last_email_subject=candidate.email_subject or "",
+                        )
+                        if confirm_result.is_same_application:
+                            logger.info(
+                                "linked_by_fuzzy_llm_rescue",
+                                company=company,
+                                matched_company=candidate.company,
+                                normalized_incoming=normalized,
+                                normalized_matched=candidate.normalized_company,
+                                application_id=candidate.id,
+                                prompt_tokens=confirm_result.prompt_tokens,
+                            )
+                            return LinkResult(
+                                application_id=candidate.id,
+                                confidence=0.75,
+                                link_method="company_fuzzy",
+                            )
+                        else:
+                            logger.info(
+                                "fuzzy_rescue_llm_rejected",
+                                company=company,
+                                matched_company=candidate.company,
+                                application_id=candidate.id,
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "fuzzy_rescue_llm_error",
+                            company=company,
+                            application_id=candidate.id,
+                            error=str(exc),
+                        )
+                        continue
+
         return LinkResult(
             application_id=None,
             confidence=0.0,
