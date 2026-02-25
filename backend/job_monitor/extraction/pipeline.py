@@ -55,13 +55,13 @@ def _validate_job_title(title: str) -> str:
         return ""
     if len(cleaned) < 3:
         return ""
-    # Max length: real job titles are rarely > 80 chars
-    if len(cleaned) > 80:
+    # Max length: allow up to 200 chars to accommodate titles with team qualifiers and job IDs
+    if len(cleaned) > 200:
         return ""
     if cleaned.lower() in _INVALID_TITLES:
         return ""
-    # Reject sentence-like patterns (contains periods followed by spaces, or starts with lowercase)
-    if ". " in cleaned or cleaned[0].islower():
+    # Reject values that start with lowercase (likely a sentence fragment, not a title)
+    if cleaned[0].islower():
         return ""
     return cleaned
 from job_monitor.models import Application, ProcessedEmail, ScanState, StatusHistory

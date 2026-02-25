@@ -8,6 +8,7 @@ import {
   listCachedEmails,
   listGroups,
   createGroup,
+  updateGroup,
   deleteGroup,
   upsertLabel,
   replayEmailPipeline,
@@ -52,6 +53,9 @@ export default function ReviewEmail() {
   const [newGroupCompany, setNewGroupCompany] = useState("");
   const [newGroupTitle, setNewGroupTitle] = useState("");
   const [showNewGroup, setShowNewGroup] = useState(false);
+  const [editingGroupId, setEditingGroupId] = useState<number | null>(null);
+  const [editGroupCompany, setEditGroupCompany] = useState("");
+  const [editGroupTitle, setEditGroupTitle] = useState("");
   const [saving, setSaving] = useState(false);
   const [navIds, setNavIds] = useState<number[]>([]);
   const [, setTotalCount] = useState(0);
@@ -634,24 +638,59 @@ export default function ReviewEmail() {
                         className={`px-3 py-2 text-sm cursor-pointer hover:bg-gray-100 flex items-center justify-between gap-2 ${
                           label.correct_application_group_id === g.id ? "bg-blue-100" : ""
                         } ${g.email_count === 0 ? "opacity-50" : ""}`}>
-                        <span>
-                          {g.company || "?"} — {g.job_title || "?"}
-                          <span className={`ml-1.5 text-xs ${g.email_count > 0 ? "text-green-600 font-medium" : "text-gray-400"}`}>
-                            ({g.email_count} email{g.email_count !== 1 ? "s" : ""})
+                        {editingGroupId === g.id ? (
+                          <div className="flex-1 flex flex-col gap-1" onClick={e => e.stopPropagation()}>
+                            <input
+                              value={editGroupCompany}
+                              onChange={e => setEditGroupCompany(e.target.value)}
+                              className="w-full border rounded px-2 py-0.5 text-xs"
+                              placeholder="Company" />
+                            <input
+                              value={editGroupTitle}
+                              onChange={e => setEditGroupTitle(e.target.value)}
+                              className="w-full border rounded px-2 py-0.5 text-xs"
+                              placeholder="Job Title" />
+                            <div className="flex gap-1">
+                              <button
+                                onClick={async () => {
+                                  const updated = await updateGroup(g.id, { company: editGroupCompany, job_title: editGroupTitle });
+                                  setGroups(prev => prev.map(x => x.id === g.id ? { ...x, ...updated } : x));
+                                  setEditingGroupId(null);
+                                }}
+                                className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs">Save</button>
+                              <button
+                                onClick={() => setEditingGroupId(null)}
+                                className="px-2 py-0.5 bg-gray-200 text-gray-700 rounded text-xs">Cancel</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <span>
+                            {g.company || "?"} — {g.job_title || "?"}
+                            <span className={`ml-1.5 text-xs ${g.email_count > 0 ? "text-green-600 font-medium" : "text-gray-400"}`}>
+                              ({g.email_count} email{g.email_count !== 1 ? "s" : ""})
+                            </span>
                           </span>
-                        </span>
-                        {g.email_count === 0 && (
-                          <button
-                            onClick={async e => {
-                              e.stopPropagation();
-                              if (!confirm(`Delete empty group "${g.company} — ${g.job_title}"?`)) return;
-                              await deleteGroup(g.id);
-                              setGroups(prev => prev.filter(x => x.id !== g.id));
-                            }}
-                            className="shrink-0 text-red-400 hover:text-red-600 text-xs px-1"
-                            title="Delete empty group"
-                          >×</button>
                         )}
+                        <div className="shrink-0 flex gap-1" onClick={e => e.stopPropagation()}>
+                          <button
+                            onClick={() => {
+                              setEditingGroupId(g.id);
+                              setEditGroupCompany(g.company || "");
+                              setEditGroupTitle(g.job_title || "");
+                            }}
+                            className="text-gray-400 hover:text-blue-600 text-xs px-1"
+                            title="Edit group">✎</button>
+                          {g.email_count === 0 && (
+                            <button
+                              onClick={async () => {
+                                if (!confirm(`Delete empty group "${g.company} — ${g.job_title}"?`)) return;
+                                await deleteGroup(g.id);
+                                setGroups(prev => prev.filter(x => x.id !== g.id));
+                              }}
+                              className="text-red-400 hover:text-red-600 text-xs px-1"
+                              title="Delete empty group">×</button>
+                          )}
+                        </div>
                       </div>
                     ))}
                     {groups.length === 0 && (

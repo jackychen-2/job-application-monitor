@@ -181,6 +181,10 @@ export function deleteEvalRun(id: number): Promise<void> {
   return request(`/runs/${id}`, { method: "DELETE" });
 }
 
+export function refreshEvalRunReport(id: number): Promise<EvalRunDetail> {
+  return request(`/runs/${id}/refresh-report`, { method: "POST" });
+}
+
 export function cancelEvalRun(): Promise<{ cancelled: boolean; running: boolean }> {
   return request("/runs/cancel", { method: "POST" });
 }

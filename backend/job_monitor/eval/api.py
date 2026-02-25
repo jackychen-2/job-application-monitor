@@ -1473,14 +1473,15 @@ async def stream_eval_run(
                 email_ids=parsed_email_ids,
             )
             db.commit()
-            if _eval_cancel_event.is_set():
-                msg_q.put({"type": "cancelled"})
-            else:
-                # Auto-bootstrap: reset EvalLabel fields to new run's predictions
-                # so Review Queue shows "unlabeled" with fresh defaults.
-                # Corrections history (corrections_json) is preserved.
-                _progress_cb(f"Auto-bootstrapping labels from run #{result.id}…", 0, 0)
-                try:
+            _was_cancelled = _eval_cancel_event.is_set()
+            if _was_cancelled:
+                _progress_cb(f"Cancelled — saving partial results for run #{result.id}…", 0, 0)
+            # Auto-bootstrap: reset EvalLabel fields to new run's predictions
+            # so Review Queue shows "unlabeled" with fresh defaults.
+            # Corrections history (corrections_json) is preserved.
+            # Runs even on cancel so partial results are usable.
+            _progress_cb(f"Auto-bootstrapping labels from run #{result.id}…", 0, 0)
+            try:
                     from job_monitor.eval.models import EvalPredictedGroup as _EPG
                     _all_groups: list[EvalApplicationGroup] = db.query(EvalApplicationGroup).all()
                     _now = datetime.now(timezone.utc)
@@ -1612,9 +1613,12 @@ async def stream_eval_run(
                         _progress_cb("✓ Report refreshed with bootstrap labels.", 0, 0)
                     except Exception as _rbe:
                         logger.warning("report_refresh_failed", error=str(_rbe))
-                except Exception as _be:
-                    logger.warning("auto_bootstrap_failed", error=str(_be))
+            except Exception as _be:
+                logger.warning("auto_bootstrap_failed", error=str(_be))
 
+            if _was_cancelled:
+                msg_q.put({"type": "cancelled", "run_id": result.id})
+            else:
                 msg_q.put({"type": "done", "run_id": result.id})
         except Exception as exc:
             logger.exception("eval_stream_error", error=str(exc))
@@ -1687,6 +1691,18 @@ def get_run(run_id: int, session: Session = Depends(get_db)):
     run = session.query(EvalRun).get(run_id)
     if not run:
         raise HTTPException(404, "Run not found")
+    return run
+
+
+@router.post("/runs/{run_id}/refresh-report", response_model=EvalRunDetailOut)
+def refresh_run_report(run_id: int, session: Session = Depends(get_db)):
+    """Recompute report_json and per-result correctness flags from current labels."""
+    run = session.query(EvalRun).get(run_id)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    from job_monitor.eval.runner import refresh_eval_run_report
+    refresh_eval_run_report(session, run_id)
+    session.commit()
     return run
 
 

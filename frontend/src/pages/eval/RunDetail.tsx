@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { getEvalRun, getEvalRunResults } from "../../api/eval";
+import { getEvalRun, getEvalRunResults, refreshEvalRunReport } from "../../api/eval";
 import type { EvalRunDetail, EvalRunResult, EvalReport } from "../../types/eval";
 
 export default function RunDetail() {
@@ -9,6 +9,7 @@ export default function RunDetail() {
   const [report, setReport] = useState<EvalReport | null>(null);
   const [errors, setErrors] = useState<EvalRunResult[]>([]);
   const [showErrors, setShowErrors] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -24,6 +25,17 @@ export default function RunDetail() {
     if (!id) return;
     getEvalRunResults(Number(id), true).then(setErrors);
     setShowErrors(true);
+  };
+
+  const handleRefreshReport = () => {
+    if (!id) return;
+    setRefreshing(true);
+    refreshEvalRunReport(Number(id)).then(r => {
+      setRun(r);
+      if (r.report_json) {
+        try { setReport(JSON.parse(r.report_json)); } catch {}
+      }
+    }).finally(() => setRefreshing(false));
   };
 
   if (!run) return <div className="p-8 text-gray-500">Loading...</div>;
@@ -42,6 +54,13 @@ export default function RunDetail() {
             — Cost: ${run.total_estimated_cost.toFixed(4)}
           </p>
         </div>
+        <button
+          onClick={handleRefreshReport}
+          disabled={refreshing}
+          className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing…" : "Refresh Report"}
+        </button>
       </div>
 
       {/* Summary Metrics */}

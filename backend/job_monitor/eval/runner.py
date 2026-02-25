@@ -365,18 +365,30 @@ def run_evaluation(
                                           f"Fuzzy rescue LLM error for group #{gid}: {exc}", "warn")
 
                     if not fuzzy_rescued:
-                        # Create new group
+                        # Create new group — guard against duplicate (company_norm, job_title_norm)
+                        # which can happen when two emails extract slightly different titles that
+                        # both normalize to the same key but fail Rule A against each other.
                         title_norm_for_key = (pred_title or "").strip().lower()
-                        pred_group = EvalPredictedGroup(
-                            eval_run_id=eval_run.id,
-                            company=pred_company,
-                            job_title=pred_title,
-                            company_norm=company_norm_prod,
-                            job_title_norm=title_norm_for_key,
-                        )
-                        session.add(pred_group)
-                        session.flush()
-                        pred_group_id = pred_group.id
+                        existing_group = session.query(EvalPredictedGroup).filter(
+                            EvalPredictedGroup.eval_run_id == eval_run.id,
+                            EvalPredictedGroup.company_norm == company_norm_prod,
+                            EvalPredictedGroup.job_title_norm == title_norm_for_key,
+                        ).first()
+                        if existing_group:
+                            pred_group_id = existing_group.id
+                            dstep("grouping", f"Reused existing group #{pred_group_id} (same norm key)", "info")
+                        else:
+                            pred_group = EvalPredictedGroup(
+                                eval_run_id=eval_run.id,
+                                company=pred_company,
+                                job_title=pred_title,
+                                company_norm=company_norm_prod,
+                                job_title_norm=title_norm_for_key,
+                            )
+                            session.add(pred_group)
+                            session.flush()
+                            pred_group_id = pred_group.id
+                            dstep("grouping", f"New predicted group #{pred_group_id}", "info")
                         app_group_info[pred_group_id] = {
                             "company_norm": company_norm_prod,
                             "company_orig": pred_company,   # canonical name from first email
@@ -384,7 +396,6 @@ def run_evaluation(
                             "status":       pred_status,
                             "latest_email_date": cached.email_date,
                         }
-                        dstep("grouping", f"New predicted group #{pred_group_id}", "info")
             else:
                 dstep("grouping", "Skipped (company normalization returned empty)", "warn")
         else:
@@ -407,8 +418,13 @@ def run_evaluation(
         )
         results.append(result)
         session.add(result)
-
-    session.flush()
+        # Commit after each email so progress is preserved if the run fails mid-way.
+        # This avoids losing LLM calls already made for earlier emails.
+        try:
+            session.commit()
+        except Exception as commit_err:
+            logger.warning("eval_email_commit_failed", email_id=cached.id, error=str(commit_err))
+            session.rollback()
 
     # Compute metrics against labels
     _log(f"Pipeline complete — processed {len(results)} emails. Computing metrics…", total, total)
