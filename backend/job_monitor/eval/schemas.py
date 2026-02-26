@@ -55,6 +55,7 @@ class CachedEmailDetailOut(CachedEmailOut):
     """Full detail including pipeline prediction from most recent eval run."""
     # Pipeline predictions (from latest eval run, if any)
     predicted_is_job_related: Optional[bool] = None
+    predicted_email_category: Optional[str] = None
     predicted_company: Optional[str] = None
     predicted_job_title: Optional[str] = None
     predicted_status: Optional[str] = None
@@ -102,8 +103,9 @@ CORRECTION_ERROR_TYPES: dict[str, list[dict]] = {
     "classification": [
         {"key": "false_pos_newsletter",     "label": "Newsletter / job alert",       "desc": "Email is a digest or newsletter, not an application confirmation"},
         {"key": "false_pos_verification",   "label": "Security / verification email","desc": "OTP, password reset, or identity verification"},
-        {"key": "false_pos_recruiter",      "label": "Recruiter cold outreach",      "desc": "Recruiter inquiry — no application was submitted"},
+        {"key": "false_pos_recruiter",      "label": "Recruiter cold outreach",      "desc": "Recruiter reach out — no application was submitted (should be 'recruiter_reach_out' category)"},
         {"key": "false_neg_no_keywords",    "label": "Job email missing keywords",   "desc": "Genuine job email but lacked any signal keywords"},
+        {"key": "recruiter_misclassified",  "label": "Recruiter reach out missed",   "desc": "Pipeline classified as job_application or not_job_related, but this is a recruiter reach out"},
     ],
     "application_group": [
         {"key": "same_app_split",           "label": "Same application split",       "desc": "Emails from one application were split into multiple predicted groups"},
@@ -129,6 +131,8 @@ class CorrectionEntryIn(BaseModel):
 
 class EvalLabelIn(BaseModel):
     is_job_related: Optional[bool] = None
+    # Three-way category: "job_application" | "recruiter_reach_out" | "not_job_related"
+    email_category: Optional[str] = None
     correct_company: Optional[str] = None
     correct_job_title: Optional[str] = None
     correct_status: Optional[str] = None
@@ -147,6 +151,7 @@ class EvalLabelOut(BaseModel):
     id: int
     cached_email_id: int
     is_job_related: Optional[bool] = None
+    email_category: Optional[str] = None
     correct_company: Optional[str] = None
     correct_job_title: Optional[str] = None
     correct_status: Optional[str] = None
@@ -250,6 +255,7 @@ class EvalRunResultOut(BaseModel):
     id: int
     cached_email_id: int
     predicted_is_job_related: bool
+    predicted_email_category: Optional[str] = None
     predicted_company: Optional[str] = None
     predicted_job_title: Optional[str] = None
     predicted_status: Optional[str] = None

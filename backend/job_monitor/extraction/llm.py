@@ -20,6 +20,8 @@ class LLMExtractionResult:
     """Structured output from an LLM extraction call."""
 
     is_job_application: bool = False
+    # Three-way classification: "job_application" | "recruiter_reach_out" | "not_job_related" | ""
+    email_category: str = ""
     company: str = ""
     job_title: str = ""
     status: str = ""
@@ -80,9 +82,8 @@ class OpenAIProvider:
         )
 
     _SYSTEM_PROMPT = (
-        "You determine if an email is about a REAL job application that the user actually submitted, "
-        "and extract structured fields. "
-        "Return strict JSON only with keys: is_job_application, company, job_title, status, confidence. "
+        "You classify an email for a job-tracking system and extract structured fields. "
+        "Return strict JSON only with keys: is_job_application, email_category, company, job_title, status, confidence. "
         "\n\n"
         "IMPORTANT: is_job_application=true ONLY if the user actually applied for a job and this email "
         "is a confirmation, acknowledgment, status update, interview invite, or offer/rejection. "
@@ -93,10 +94,20 @@ class OpenAIProvider:
         "talent community notifications, job recommendation emails listing multiple open positions, "
         "application summary digests (emails summarizing multiple application statuses), "
         "promotional emails, unsubscribe confirmations, "
-        "general company newsletters even if from a careers/talent team. "
+        "general company newsletters even if from a careers/talent team, "
+        "recruiter or TA proactively reaching out about a role (the user did NOT apply — use email_category='recruiter_reach_out'). "
         "If the email lists multiple job openings or says 'Your Job Alert matched the following jobs', "
         "it is a job alert digest, NOT an application — return is_job_application=false. "
         "\n\n"
+        "- email_category: REQUIRED — classify into exactly one of:\n"
+        "  * 'job_application'     — user submitted an application; email is a confirmation, "
+        "acknowledgment, status update, interview invite, offer, or rejection\n"
+        "  * 'recruiter_reach_out' — recruiter, TA, or staffing/recruiting agency proactively "
+        "reached out to the user about a role; the user did NOT apply for this role\n"
+        "  * 'not_job_related'     — not about a specific job application at all "
+        "(newsletter, verification code, job alert digest, marketing, etc.)\n"
+        "  email_category='job_application' if and only if is_job_application=true.\n"
+        "\n"
         "Rules:\n"
         "- company: the real hiring company name, not ATS vendor.\n"
         "  COMPANY NAME RULES (important for consistent grouping):\n"
@@ -152,8 +163,22 @@ class OpenAIProvider:
             + (completion_tokens / 1_000_000.0) * cfg.cost_output_per_mtok
         )
 
-        is_job_raw = str(parsed.get("is_job_application", "")).strip().lower()
-        is_job = is_job_raw in {"true", "1", "yes"}
+        # Parse email_category first; derive is_job_application from it when present.
+        _VALID_CATEGORIES = {"job_application", "recruiter_reach_out", "not_job_related"}
+        email_category = str(parsed.get("email_category", "")).strip().lower()
+        if email_category not in _VALID_CATEGORIES:
+            email_category = ""
+
+        if email_category == "job_application":
+            is_job = True
+        elif email_category in ("recruiter_reach_out", "not_job_related"):
+            is_job = False
+        else:
+            # Fallback: use explicit is_job_application field
+            is_job_raw = str(parsed.get("is_job_application", "")).strip().lower()
+            is_job = is_job_raw in {"true", "1", "yes"}
+            if is_job:
+                email_category = "job_application"
 
         confidence_raw = parsed.get("confidence", 0)
         try:
@@ -163,6 +188,7 @@ class OpenAIProvider:
 
         return LLMExtractionResult(
             is_job_application=is_job,
+            email_category=email_category,
             company=str(parsed.get("company", "")).strip(),
             job_title=str(parsed.get("job_title", "")).strip(),
             status=str(parsed.get("status", "")).strip(),

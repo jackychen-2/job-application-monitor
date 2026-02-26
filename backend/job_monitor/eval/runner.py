@@ -184,9 +184,10 @@ def run_evaluation(
                 eval_run.total_prompt_tokens += llm_result.prompt_tokens
                 eval_run.total_completion_tokens += llm_result.completion_tokens
                 eval_run.total_estimated_cost += llm_result.estimated_cost_usd
-                dstep("llm", f"is_job={llm_result.is_job_application}  company={llm_result.company!r}  "
-                      f"title={llm_result.job_title!r}  status={llm_result.status!r}  "
-                      f"confidence={llm_result.confidence}  tokens={llm_result.prompt_tokens}+{llm_result.completion_tokens}")
+                dstep("llm", f"is_job={llm_result.is_job_application}  category={llm_result.email_category!r}  "
+                      f"company={llm_result.company!r}  title={llm_result.job_title!r}  "
+                      f"status={llm_result.status!r}  confidence={llm_result.confidence}  "
+                      f"tokens={llm_result.prompt_tokens}+{llm_result.completion_tokens}")
             except Exception as llm_exc:
                 dstep("llm", f"LLM failed: {llm_exc} — falling back to rules", "error")
                 llm_result = None
@@ -401,10 +402,19 @@ def run_evaluation(
         else:
             dstep("grouping", "Skipped (not job-related or no company extracted)", "warn")
 
+        # Derive predicted_email_category from LLM result or boolean fallback
+        if llm_result and llm_result.email_category:
+            pred_email_category: str | None = llm_result.email_category
+        elif pred_is_job:
+            pred_email_category = "job_application"
+        else:
+            pred_email_category = None  # rule-based: can't distinguish recruiter vs. not_job_related
+
         result = EvalRunResult(
             eval_run_id=eval_run.id,
             cached_email_id=cached.id,
             predicted_is_job_related=pred_is_job,
+            predicted_email_category=pred_email_category,
             predicted_company=pred_company if pred_is_job else None,
             predicted_job_title=pred_title if pred_is_job else None,
             predicted_status=pred_status if pred_is_job else None,

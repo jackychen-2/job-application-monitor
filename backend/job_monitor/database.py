@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Generator
 
 import structlog
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -28,6 +28,23 @@ def _enable_sqlite_wal(dbapi_conn: object, _connection_record: object) -> None:
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
+
+
+def _add_column_if_missing(engine: Engine, table: str, column: str, definition: str) -> None:
+    """Add a column to an existing table only if it doesn't already exist (SQLite-safe)."""
+    with engine.connect() as conn:
+        rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+        existing = {r[1] for r in rows}
+        if column not in existing:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
+            conn.commit()
+            logger.info("schema_migration_applied", table=table, column=column)
+
+
+def _apply_schema_migrations(engine: Engine) -> None:
+    """Run incremental column additions for existing databases."""
+    _add_column_if_missing(engine, "eval_labels", "email_category", "VARCHAR(50)")
+    _add_column_if_missing(engine, "eval_run_results", "predicted_email_category", "VARCHAR(50)")
 
 
 def init_db(config: AppConfig) -> Engine:
@@ -51,6 +68,8 @@ def init_db(config: AppConfig) -> Engine:
 
     # Create all tables
     Base.metadata.create_all(bind=_engine)
+    # Incremental migrations for columns added after initial table creation
+    _apply_schema_migrations(_engine)
     logger.info("database_initialized", url=config.database_url)
 
     _SessionLocal = sessionmaker(bind=_engine, autocommit=False, autoflush=False)

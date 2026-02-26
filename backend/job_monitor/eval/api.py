@@ -277,6 +277,7 @@ def cache_get_email(
         fetched_at=ce.fetched_at,
         review_status=ce.label.review_status if ce.label else "unlabeled",
         predicted_is_job_related=latest_result.predicted_is_job_related if latest_result else None,
+        predicted_email_category=latest_result.predicted_email_category if latest_result else None,
         predicted_company=latest_result.predicted_company if latest_result else None,
         predicted_job_title=latest_result.predicted_job_title if latest_result else None,
         predicted_status=latest_result.predicted_status if latest_result else None,

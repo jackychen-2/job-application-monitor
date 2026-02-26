@@ -148,6 +148,8 @@ class EvalLabel(Base):
 
     # Classification
     is_job_related: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Three-way category: "job_application" | "recruiter_reach_out" | "not_job_related"
+    email_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     # Field extraction ground truth
     correct_company: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -248,6 +250,8 @@ class EvalRunResult(Base):
 
     # Pipeline outputs
     predicted_is_job_related: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Three-way predicted category: "job_application" | "recruiter_reach_out" | "not_job_related"
+    predicted_email_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
     predicted_company: Mapped[str | None] = mapped_column(String(200), nullable=True)
     predicted_job_title: Mapped[str | None] = mapped_column(String(300), nullable=True)
     predicted_status: Mapped[str | None] = mapped_column(String(50), nullable=True)

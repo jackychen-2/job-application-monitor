@@ -61,8 +61,12 @@ export default function ReviewEmail() {
   const [, setTotalCount] = useState(0);
   const [labeledCount, setLabeledCount] = useState(0);
   const [savedLabelData, setSavedLabelData] = useState<EvalLabel | null>(null);
-
-
+  // True once getLabel has resolved for the current email (null = not yet fetched).
+  const [labelFetched, setLabelFetched] = useState(false);
+  // Tracks whether we've done the initial pre-populate for the current email.
+  // Prevents re-running pre-populate (and overwriting user edits) when groups
+  // or savedLabelData changes after the user has started editing.
+  const labelInitializedRef = useRef(false);
 
   // Group membership preview
   const [groupMembers, setGroupMembers] = useState<GroupMember[]>([]);
@@ -77,8 +81,11 @@ export default function ReviewEmail() {
 
   // Reset all per-email state when navigating to a different email
   useEffect(() => {
-    setLabel({});         // clear so pre-populate effect can set prediction defaults
+    setEmail(null);       // clear old email so pre-populate doesn't fire with stale data
+    setLabel({});
     setSavedLabelData(null);
+    setLabelFetched(false);
+    labelInitializedRef.current = false;
     setReplayLogs([]);
     setReplayOpen(false);
     setGroupMembers([]);
@@ -110,28 +117,18 @@ export default function ReviewEmail() {
     }
   };
 
-  // Load email data
+  // Load email data — use a "cancelled" flag so stale responses from a previous
+  // emailId are silently dropped (handles fast navigation and React StrictMode double-invoke).
   useEffect(() => {
     if (!emailId) return;
-    getCachedEmail(emailId, runId).then(setEmail);
+    let cancelled = false;
+    getCachedEmail(emailId, runId).then(e => { if (!cancelled) setEmail(e); });
     getLabel(emailId, runId).then(l => {
+      if (cancelled) return;
       setSavedLabelData(l);
-      if (l) {
-        setLabel({
-          is_job_related: l.is_job_related,
-          correct_company: l.correct_company,
-          correct_job_title: l.correct_job_title,
-          correct_status: l.correct_status,
-          correct_recruiter_name: l.correct_recruiter_name,
-          correct_date_applied: l.correct_date_applied,
-          correct_application_group_id: l.correct_application_group_id,
-          notes: l.notes,
-          review_status: l.review_status,
-        });
-      } else {
-        setLabel({});
-      }
+      setLabelFetched(true);
     });
+    return () => { cancelled = true; };
   }, [emailId, runId]);
 
   // Refresh navigation list scoped to the current run (or all emails if no run selected)
@@ -150,11 +147,15 @@ export default function ReviewEmail() {
     loadNav();
   }, [runId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Pre-populate labels from predictions if empty.
-  // Run whenever email OR groups changes so that group matching works even if
-  // groups loads after the email.
+  // Pre-populate labels from predictions, merging with any saved label.
+  // Runs when email, groups, or savedLabelData changes (all three may arrive
+  // asynchronously in any order). Saved values always win; prediction values
+  // fill in any field the saved label left null/missing.
+  // Once initialized for this email, does not re-run (prevents overwriting user edits
+  // when groups reload or savedLabelData refreshes after a save).
   useEffect(() => {
-    if (!email || Object.keys(label).length > 0) return;
+    if (!email || !labelFetched) return;
+    if (labelInitializedRef.current) return;
 
     // Try to find an EvalApplicationGroup that matches the predicted company+title
     let guessedGroupId: number | undefined;
@@ -169,15 +170,33 @@ export default function ReviewEmail() {
       if (match) guessedGroupId = match.id;
     }
 
+    const predCategory = email.predicted_email_category ?? (
+      email.predicted_is_job_related === true  ? "job_application" :
+      email.predicted_is_job_related === false ? "not_job_related" : undefined
+    );
+
+    const l = savedLabelData;
     setLabel({
-      is_job_related: email.predicted_is_job_related ?? undefined,
-      correct_company: email.predicted_company ?? undefined,
-      correct_job_title: email.predicted_job_title ?? undefined,
-      correct_status: email.predicted_status ?? undefined,
-      correct_application_group_id: guessedGroupId,
+      // Saved value wins; fall back to prediction when saved value is null/missing
+      is_job_related: l?.is_job_related ?? (email.predicted_is_job_related ?? undefined),
+      email_category: l?.email_category ?? predCategory ?? undefined,
+      correct_company: l?.correct_company ?? (email.predicted_company ?? undefined),
+      correct_job_title: l?.correct_job_title ?? (email.predicted_job_title ?? undefined),
+      correct_status: l?.correct_status ?? (email.predicted_status ?? undefined),
+      correct_recruiter_name: l?.correct_recruiter_name ?? undefined,
+      correct_date_applied: l?.correct_date_applied ?? undefined,
+      // Don't pre-assign a group for non-application emails
+      correct_application_group_id:
+        (l?.correct_application_group_id) ??
+        (predCategory === "recruiter_reach_out" || predCategory === "not_job_related"
+          ? undefined
+          : guessedGroupId),
+      notes: l?.notes ?? undefined,
+      review_status: l?.review_status ?? undefined,
     });
+    labelInitializedRef.current = true;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [email, groups]);
+  }, [email, groups, savedLabelData, labelFetched]);
 
   const currentIdx = navIds.indexOf(emailId);
   const prevId = currentIdx > 0 ? navIds[currentIdx - 1] : null;
@@ -201,9 +220,19 @@ export default function ReviewEmail() {
   }, [emailId, label]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveAndNext = useCallback(async () => {
-    await save();
-    if (nextId) navTo(nextId);
-  }, [save, nextId]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!nextId) return;
+    setSaving(true);
+    try {
+      // Save the label, reload nav count, but do NOT reload savedLabelData —
+      // we're about to navigate away; updating savedLabelData here would race
+      // with the next email's reset+fetch cycle and corrupt its pre-populate.
+      await upsertLabel(emailId, { ...label, review_status: "labeled", run_id: runId });
+      await loadNav();
+    } finally {
+      setSaving(false);
+    }
+    navTo(nextId);
+  }, [emailId, label, nextId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const skip = useCallback(async () => {
     await upsertLabel(emailId, { review_status: "skipped" });
@@ -370,13 +399,19 @@ export default function ReviewEmail() {
           </div>
           <div className="p-4 flex-1 overflow-auto space-y-3">
             <div className={`p-2 rounded ${boolDiffClass(email.predicted_is_job_related, label.is_job_related)}`}>
-              <span className="text-xs text-gray-500">Is Job Related</span>
+              <span className="text-xs text-gray-500">Email Category</span>
               <div className="text-sm font-medium">
-                {email.predicted_is_job_related === null ? "—" :
+                {email.predicted_email_category === "job_application" ? (
+                  <span className="text-green-700">Job Application</span>
+                ) : email.predicted_email_category === "recruiter_reach_out" ? (
+                  <span className="text-blue-700">Recruiter Reach Out</span>
+                ) : email.predicted_email_category === "not_job_related" ? (
+                  <span className="text-red-700">Not Related</span>
+                ) : email.predicted_is_job_related === null ? "—" : (
                   <span className={email.predicted_is_job_related ? "text-green-700" : "text-red-700"}>
-                    {email.predicted_is_job_related ? "Yes" : "No"}
+                    {email.predicted_is_job_related ? "Job Application" : "Not Related"}
                   </span>
-                }
+                )}
               </div>
             </div>
 
@@ -471,48 +506,69 @@ export default function ReviewEmail() {
             <h2 className="text-sm font-semibold text-gray-700">Ground Truth Labels</h2>
           </div>
           <div className="p-4 flex-1 overflow-auto space-y-4">
-            {/* Is Job Related */}
+            {/* Email Category */}
             <div>
-              <label className="block text-xs text-gray-500 mb-1">Is Job Related</label>
-              <div className="flex gap-2">
+              <label className="block text-xs text-gray-500 mb-1">Email Category</label>
+              <div className="flex flex-wrap gap-2">
                 {[
-                  { val: true, label: "Yes ✓", color: "green" },
-                  { val: false, label: "No ✗", color: "red" },
-                  { val: undefined, label: "Unlabeled", color: "gray" },
-                ].map(opt => (
-                  <button
-                    key={String(opt.val)}
-                    onClick={() => {
-                      if (opt.val === false) {
-                        // Selecting "not job related" — clear all field-level labels
-                        setLabel(p => ({
-                          ...p,
-                          is_job_related: false,
-                          correct_company: undefined,
-                          correct_job_title: undefined,
-                          correct_status: undefined,
-                          correct_application_group_id: undefined,
-                        }));
-                      } else {
-                        setLabel(p => ({ ...p, is_job_related: opt.val as boolean | undefined }));
-                      }
-                    }}
-                    className={`px-3 py-1.5 rounded text-sm border ${label.is_job_related === opt.val
-                      ? opt.color === "green" ? "bg-green-100 border-green-500 text-green-700"
-                        : opt.color === "red" ? "bg-red-100 border-red-500 text-red-700"
-                          : "bg-gray-100 border-gray-400 text-gray-700"
-                      : "border-gray-200 text-gray-500 hover:bg-gray-50"}`}>
-                    {opt.label}
-                  </button>
-                ))}
+                  { cat: "job_application",     label: "Job Application", color: "green" },
+                  { cat: "recruiter_reach_out",  label: "Recruiter Reach Out", color: "blue" },
+                  { cat: "not_job_related",      label: "Not Related", color: "red" },
+                  { cat: undefined,              label: "Unlabeled", color: "gray" },
+                ].map(opt => {
+                  const isActive = label.email_category === opt.cat;
+                  return (
+                    <button
+                      key={String(opt.cat)}
+                      onClick={() => {
+                        if (opt.cat === "job_application") {
+                          setLabel(p => ({ ...p, email_category: "job_application", is_job_related: true }));
+                        } else if (opt.cat === "recruiter_reach_out") {
+                          setLabel(p => ({
+                            ...p,
+                            email_category: "recruiter_reach_out",
+                            is_job_related: false,
+                            correct_status: undefined,
+                            correct_application_group_id: undefined,
+                          }));
+                        } else if (opt.cat === "not_job_related") {
+                          setLabel(p => ({
+                            ...p,
+                            email_category: "not_job_related",
+                            is_job_related: false,
+                            correct_company: undefined,
+                            correct_job_title: undefined,
+                            correct_status: undefined,
+                            correct_recruiter_name: undefined,
+                            correct_application_group_id: undefined,
+                          }));
+                        } else {
+                          setLabel(p => ({ ...p, email_category: undefined, is_job_related: undefined }));
+                        }
+                      }}
+                      className={`px-3 py-1.5 rounded text-sm border ${isActive
+                        ? opt.color === "green"  ? "bg-green-100 border-green-500 text-green-700"
+                        : opt.color === "blue"   ? "bg-blue-100 border-blue-500 text-blue-700"
+                        : opt.color === "red"    ? "bg-red-100 border-red-500 text-red-700"
+                                                 : "bg-gray-100 border-gray-400 text-gray-700"
+                        : "border-gray-200 text-gray-500 hover:bg-gray-50"}`}>
+                      {opt.label}
+                    </button>
+                  );
+                })}
               </div>
-              {label.is_job_related === false && (
-                <p className="text-xs text-red-500 mt-1">Not job-related — company / title / status fields are not required.</p>
+              {label.email_category === "not_job_related" && (
+                <p className="text-xs text-red-500 mt-1">Not job-related — no field-level labels needed.</p>
+              )}
+              {label.email_category === "recruiter_reach_out" && (
+                <p className="text-xs text-blue-600 mt-1">Recruiter reach out — candidate did NOT apply. Company and recruiter name are relevant.</p>
               )}
             </div>
 
-            {/* Company, Title, Status, Group — hidden when not job-related */}
-            {label.is_job_related !== false && (
+            {/* Company, Title, (Status+Group for job_application), (Recruiter Name for recruiter_reach_out) */}
+            {(label.email_category === "job_application" ||
+              label.email_category === "recruiter_reach_out" ||
+              (label.email_category == null && label.is_job_related !== false)) && (
               <>
             {/* Company */}
             <div>
@@ -544,7 +600,21 @@ export default function ReviewEmail() {
               </datalist>
             </div>
 
-            {/* Status */}
+            {/* Recruiter Name — only for recruiter_reach_out */}
+            {label.email_category === "recruiter_reach_out" && (
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Recruiter Name</label>
+                <input
+                  value={label.correct_recruiter_name || ""}
+                  onChange={e => setLabel(p => ({ ...p, correct_recruiter_name: e.target.value || undefined }))}
+                  className="w-full border rounded px-3 py-2 text-sm"
+                  placeholder="Recruiter or agency name..."
+                />
+              </div>
+            )}
+
+            {/* Status — only for job_application */}
+            {label.email_category !== "recruiter_reach_out" && (
             <div>
               <label className="block text-xs text-gray-500 mb-1">Correct Status</label>
               <select
@@ -555,8 +625,10 @@ export default function ReviewEmail() {
                 {options?.statuses.map(s => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
+            )}
 
-            {/* Application Group */}
+            {/* Application Group — only for job_application */}
+            {label.email_category !== "recruiter_reach_out" && (
             <div className={`p-2 rounded ${groupDiffClass(email.predicted_application_group, label.correct_application_group_id)}`}>
               <label className="block text-xs text-gray-500 mb-1">
                 Application Group
@@ -782,7 +854,8 @@ export default function ReviewEmail() {
                 </div>
               )}
             </div>
-            </> /* end label.is_job_related !== false */
+            )} {/* end label.email_category !== "recruiter_reach_out" */}
+            </> /* end category fields */
             )}
 
             {/* Correction & Decision Log — inline in GT column */}
