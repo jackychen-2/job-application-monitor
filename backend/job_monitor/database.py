@@ -44,7 +44,10 @@ def _add_column_if_missing(engine: Engine, table: str, column: str, definition: 
 def _apply_schema_migrations(engine: Engine) -> None:
     """Run incremental column additions for existing databases."""
     _add_column_if_missing(engine, "eval_labels", "email_category", "VARCHAR(50)")
+    _add_column_if_missing(engine, "eval_labels", "correct_req_id", "VARCHAR(80)")
     _add_column_if_missing(engine, "eval_run_results", "predicted_email_category", "VARCHAR(50)")
+    _add_column_if_missing(engine, "eval_run_results", "predicted_req_id", "VARCHAR(80)")
+    _add_column_if_missing(engine, "eval_run_results", "req_id_correct", "BOOLEAN")
 
 
 def init_db(config: AppConfig) -> Engine:

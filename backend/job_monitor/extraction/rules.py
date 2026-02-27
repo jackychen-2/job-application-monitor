@@ -113,6 +113,122 @@ def extract_company(subject: str, sender: str) -> str:
 
 # ── Job title extraction ──────────────────────────────────
 
+_REQ_ID_TOKEN = r"(?:R-?\d{5,}|JR\d{5,}|\d{5,8})"
+_REQ_ID_RE = re.compile(rf"\b{_REQ_ID_TOKEN}\b", re.IGNORECASE)
+
+
+def normalize_req_id(value: str) -> str:
+    """Normalize requisition IDs like r0612345 / jr123456 to uppercase."""
+    compact = re.sub(r"\s+", "", value or "")
+    if not compact:
+        return ""
+    matched = _REQ_ID_RE.search(compact)
+    if not matched:
+        return ""
+    return matched.group(0).upper()
+
+
+def split_title_and_req_id(title: str) -> tuple[str, str]:
+    """Split a combined title into (base_title, req_id) when possible."""
+    value = _normalize_space(title or "")
+    if not value:
+        return "", ""
+
+    tail = re.search(
+        rf"^(?P<title>.*?)(?:\s*[-,:]\s*|\s+)(?P<req>{_REQ_ID_TOKEN})\s*$",
+        value,
+        re.IGNORECASE,
+    )
+    if tail:
+        return _normalize_space(tail.group("title")), normalize_req_id(tail.group("req"))
+
+    head = re.search(
+        rf"^(?P<req>{_REQ_ID_TOKEN})\s*[-,:]\s*(?P<title>.+)$",
+        value,
+        re.IGNORECASE,
+    )
+    if head:
+        return _normalize_space(head.group("title")), normalize_req_id(head.group("req"))
+
+    return value, ""
+
+
+def compose_title_with_req_id(base_title: str, req_id: str) -> str:
+    """Compose display title with requisition ID when both are present."""
+    title = _normalize_space(base_title or "")
+    rid = normalize_req_id(req_id)
+    if not title:
+        return ""
+    return f"{title} - {rid}" if rid else title
+
+
+def _extract_req_id_near_title(text: str, title: str, max_dist: int = 90) -> str:
+    """Find a requisition ID near a known title span."""
+    parts = [re.escape(p) for p in title.split() if p]
+    if not parts:
+        return ""
+    title_re = re.compile(r"\s+".join(parts), re.IGNORECASE)
+    candidates: list[tuple[int, int, int, str]] = []
+
+    for tm in title_re.finditer(text):
+        win_start = max(0, tm.start() - max_dist)
+        win_end = min(len(text), tm.end() + max_dist)
+        window = text[win_start:win_end]
+        title_local_start = tm.start() - win_start
+
+        for rm in _REQ_ID_RE.finditer(window):
+            req = normalize_req_id(rm.group(0))
+            if not req:
+                continue
+            is_after = 1 if rm.start() > title_local_start else 0
+            dist = min(abs(rm.start() - title_local_start), abs(rm.end() - title_local_start))
+            prefix_penalty = 1 if req[:1].isdigit() else 0
+            candidates.append((is_after, dist, prefix_penalty, req))
+
+    if not candidates:
+        return ""
+    candidates.sort()
+    return candidates[0][3]
+
+
+_REQ_CONTEXT_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        rf"\b(?:position(?:\(s\))?|role|opening|requisition|job requisition)\b[^\n\r]{{0,60}}?\b(?P<req>{_REQ_ID_TOKEN})\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bsubject:\s*[^\n\r]{{0,120}}?\b(?P<req>{_REQ_ID_TOKEN})\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?:-|:|\|)\s*(?P<req>{_REQ_ID_TOKEN})\s*(?:-|:|\|)\s*[A-Za-z]",
+        re.IGNORECASE,
+    ),
+]
+
+
+def extract_job_req_id(subject: str, body: str, job_title: str = "") -> str:
+    """Extract requisition ID associated with a job title from subject/body."""
+    text = f"{subject}\n{body}"
+
+    base_title, req_from_title = split_title_and_req_id(job_title)
+    if req_from_title:
+        return req_from_title
+
+    if base_title:
+        near = _extract_req_id_near_title(text, base_title)
+        if near:
+            return near
+
+    for pattern in _REQ_CONTEXT_PATTERNS:
+        matched = pattern.search(text)
+        if matched:
+            req = normalize_req_id(matched.group("req"))
+            if req:
+                return req
+    return ""
+
+
 JOB_TITLE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(
         r"(?:(?<=^)|(?<=\s))(?:position|role|title)\s*[:：\-]\s*([^\n\r]{2,100})",
@@ -229,16 +345,54 @@ def extract_job_title(subject: str, body: str) -> str:
 # ── Status extraction ─────────────────────────────────────
 
 _STATUS_MAP: list[tuple[list[str], str]] = [
+    (
+        [
+            "background check",
+            "background screening",
+            "pre-employment screening",
+            "drug test",
+            "drug screen",
+            "i-9",
+            "i9",
+            "e-verify",
+            "onboarding",
+            "on-boarding",
+            "new hire paperwork",
+            "new hire portal",
+            "benefits enrollment",
+            "benefits enrolment",
+            "direct deposit",
+            "payroll setup",
+            "w-4",
+            "w4",
+            "orientation",
+        ],
+        "Onboarding",
+    ),
     (["offer letter", "congratulations", "录用", "录取"], "Offer"),
+    (
+        [
+            "online assessment",
+            "online assessemnt",
+            "oa invitation",
+            "oa invite",
+            "coding challenge",
+            "assessment",
+            "online test",
+            "take-home",
+            "hackerrank",
+            "codesignal",
+            "codility",
+            "笔试",
+        ],
+        "OA",
+    ),
     (
         [
             "interview",
             "phone screen",
             "onsite",
-            "coding challenge",
-            "assessment",
             "面试",
-            "笔试",
         ],
         "面试",
     ),

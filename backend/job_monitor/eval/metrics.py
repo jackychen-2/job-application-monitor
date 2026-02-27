@@ -146,7 +146,7 @@ def compute_field_metrics(
 # Status confusion matrix
 # ---------------------------------------------------------------------------
 
-KNOWN_STATUSES = ["已申请", "面试", "拒绝", "Offer", "Unknown"]
+KNOWN_STATUSES = ["Recruiter Reach-out", "已申请", "OA", "面试", "Offer", "Onboarding", "拒绝", "Unknown"]
 
 
 @dataclass
@@ -345,6 +345,7 @@ class FullReport:
     classification: ClassificationMetrics = field(default_factory=ClassificationMetrics)
     field_company: FieldMetrics = field(default_factory=FieldMetrics)
     field_job_title: FieldMetrics = field(default_factory=FieldMetrics)
+    field_req_id: FieldMetrics = field(default_factory=FieldMetrics)
     field_status: StatusMetrics = field(default_factory=StatusMetrics)
     grouping: GroupingMetrics = field(default_factory=GroupingMetrics)
 
@@ -358,6 +359,7 @@ class FullReport:
             "classification": self.classification.to_dict(),
             "field_company": self.field_company.to_dict(),
             "field_job_title": self.field_job_title.to_dict(),
+            "field_req_id": self.field_req_id.to_dict(),
             "field_status": self.field_status.to_dict(),
             "grouping": self.grouping.to_dict(),
             "classification_fp_examples": self.classification_fp_examples[:20],
@@ -367,8 +369,8 @@ class FullReport:
 
     @property
     def overall_field_accuracy(self) -> float:
-        """Average exact accuracy across company and job_title fields."""
-        fields = [self.field_company, self.field_job_title]
+        """Average exact accuracy across company, job_title, and req_id fields."""
+        fields = [self.field_company, self.field_job_title, self.field_req_id]
         scored = [f for f in fields if f.total_scored > 0]
         if not scored:
             return 0.0

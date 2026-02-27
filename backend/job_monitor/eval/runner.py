@@ -33,7 +33,14 @@ from job_monitor.extraction.llm import (
     create_llm_provider,
     extract_with_timeout,
 )
-from job_monitor.extraction.rules import extract_company, extract_job_title, extract_status
+from job_monitor.extraction.rules import (
+    compose_title_with_req_id,
+    extract_company,
+    extract_job_req_id,
+    extract_job_title,
+    extract_status,
+    normalize_req_id,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -186,6 +193,7 @@ def run_evaluation(
                 eval_run.total_estimated_cost += llm_result.estimated_cost_usd
                 dstep("llm", f"is_job={llm_result.is_job_application}  category={llm_result.email_category!r}  "
                       f"company={llm_result.company!r}  title={llm_result.job_title!r}  "
+                      f"req_id={llm_result.req_id!r}  "
                       f"status={llm_result.status!r}  confidence={llm_result.confidence}  "
                       f"tokens={llm_result.prompt_tokens}+{llm_result.completion_tokens}")
             except Exception as llm_exc:
@@ -196,10 +204,42 @@ def run_evaluation(
 
         # Stage 2: Classification
         dstep("classification", "═══ Stage 2: Classification ═══")
+        is_recruiter_reach_out = False
+        is_onboarding = False
+        is_oa = False
         if llm_result is not None:
-            pred_is_job = llm_result.is_job_application
-            dstep("classification", f"LLM result: is_job_application={pred_is_job}",
-                  "success" if pred_is_job else "warn")
+            normalized_status = (llm_result.status or "").strip().lower().replace("_", " ")
+            is_recruiter_reach_out = normalized_status in {
+                "recruiter reach-out",
+                "recruiter reach out",
+            }
+            is_onboarding = normalized_status in {
+                "onboarding",
+                "background check",
+                "background screening",
+            }
+            is_oa = normalized_status in {
+                "oa",
+                "online assessment",
+                "online assessemnt",
+                "online test",
+                "coding challenge",
+                "assessment",
+                "take-home",
+                "take home",
+                "hackerrank",
+                "codesignal",
+                "codility",
+            }
+            pred_is_job = llm_result.is_job_application or is_recruiter_reach_out or is_onboarding or is_oa
+            dstep(
+                "classification",
+                f"LLM result: is_job_application={llm_result.is_job_application} "
+                f"email_category={llm_result.email_category!r} "
+                f"trackable={pred_is_job} "
+                f"(confidence={llm_result.confidence:.2f})",
+                "success" if pred_is_job else "warn",
+            )
         else:
             pred_is_job = is_job_related(subject, sender)
             dstep("classification",
@@ -210,35 +250,60 @@ def run_evaluation(
             dstep("classification", "→ Not job-related — field extraction skipped", "warn")
             pred_company = None
             pred_title = None
+            pred_req_id = None
             pred_status = None
             pred_confidence = None
         else:
             # Stage 3: Field extraction (only for job-related emails)
             dstep("company", "═══ Stage 3: Company ═══")
             dstep("title",   "═══ Stage 3: Title ═══")
+            dstep("req_id",  "═══ Stage 3: Req ID ═══")
             dstep("status",  "═══ Stage 3: Status ═══")
-            if llm_result is not None and llm_result.is_job_application:
-                pred_company = llm_result.company or extract_company(subject, sender)
-                pred_title = _validate_job_title(llm_result.job_title) or _validate_job_title(extract_job_title(subject, body))
-                llm_status = llm_result.status
-                if llm_status and llm_status.lower() != "unknown":
-                    pred_status = llm_status
-                    dstep("status", f"LLM: {pred_status!r}", "success")
+            if llm_result is not None:
+                pred_company = (llm_result.company or "").strip() or "Unknown"
+                base_title = _validate_job_title(llm_result.base_title or llm_result.job_title)
+                pred_req_id = normalize_req_id(llm_result.req_id)
+                pred_title = (
+                    _validate_job_title(llm_result.title_with_req_id)
+                    or base_title
+                )
+                if is_recruiter_reach_out:
+                    pred_status = "Recruiter Reach-out"
+                    dstep("status", "LLM status recruiter reach-out -> Recruiter Reach-out", "success")
+                elif is_oa:
+                    pred_status = "OA"
+                    dstep("status", "LLM status OA-like -> OA", "success")
+                elif is_onboarding:
+                    pred_status = "Onboarding"
+                    dstep("status", "LLM status onboarding-like -> Onboarding", "success")
                 else:
-                    pred_status = extract_status(subject, body)
-                    dstep("status", f"LLM returned unknown → rule fallback: {pred_status!r}", "warn")
+                    llm_status = llm_result.status
+                    if llm_status and llm_status.lower() != "unknown":
+                        pred_status = llm_status
+                        dstep("status", f"LLM: {pred_status!r}", "success")
+                    else:
+                        pred_status = "Unknown"
+                        dstep("status", "LLM returned unknown", "warn")
                 pred_confidence = llm_result.confidence
-                dstep("company", f"LLM: {pred_company!r} (raw={llm_result.company!r})",
+                dstep("company", f"LLM: {pred_company!r}",
                       "success" if pred_company else "warn")
-                dstep("title",   f"LLM: {pred_title!r} (raw={llm_result.job_title!r})",
+                dstep("title",   f"LLM: {pred_title!r}",
                       "success" if pred_title else "warn")
+                dstep("req_id",  f"LLM: {pred_req_id!r}",
+                      "success" if pred_req_id else "warn")
             else:
                 pred_company = extract_company(subject, sender)
-                pred_title = _validate_job_title(extract_job_title(subject, body))
+                base_title = _validate_job_title(extract_job_title(subject, body))
+                pred_req_id = extract_job_req_id(subject, body, base_title)
+                pred_title = (
+                    _validate_job_title(compose_title_with_req_id(base_title, pred_req_id))
+                    or base_title
+                )
                 pred_status = extract_status(subject, body)
                 pred_confidence = None
                 dstep("company", f"Rules: {pred_company!r}", "success" if pred_company and pred_company != "Unknown" else "warn")
                 dstep("title",   f"Rules: {pred_title!r}", "success" if pred_title else "warn")
+                dstep("req_id",  f"Rules: {pred_req_id!r}", "success" if pred_req_id else "warn")
                 dstep("status",  f"Rules: {pred_status!r}", "success")
 
         # Stage 4: Grouping
@@ -417,6 +482,7 @@ def run_evaluation(
             predicted_email_category=pred_email_category,
             predicted_company=pred_company if pred_is_job else None,
             predicted_job_title=pred_title if pred_is_job else None,
+            predicted_req_id=pred_req_id if pred_is_job else None,
             predicted_status=pred_status if pred_is_job else None,
             predicted_application_group_id=pred_group_id,
             predicted_confidence=pred_confidence,
@@ -511,6 +577,11 @@ def run_evaluation(
             result.status_correct = (
                 (result.predicted_status or "").strip().lower() ==
                 label.correct_status.strip().lower()
+            )
+        if label and label.correct_req_id is not None and result.predicted_is_job_related:
+            result.req_id_correct = (
+                normalize_req_id(result.predicted_req_id or "") ==
+                normalize_req_id(label.correct_req_id)
             )
 
     session.commit()
@@ -625,6 +696,11 @@ def refresh_eval_run_report(session: Session, run_id: int) -> None:
                 (r.predicted_status or "").strip().lower() ==
                 lbl.correct_status.strip().lower()
             )
+        if lbl and lbl.correct_req_id is not None and r.predicted_is_job_related:
+            r.req_id_correct = (
+                normalize_req_id(r.predicted_req_id or "") ==
+                normalize_req_id(lbl.correct_req_id)
+            )
 
     session.flush()
     logger.info("eval_report_refreshed", run_id=run_id, labeled=len(labels_map))
@@ -665,6 +741,7 @@ def _compute_report(
     # Field extraction (only for emails labeled as job-related)
     company_preds, company_labels = [], []
     title_preds, title_labels = [], []
+    req_preds, req_labels = [], []
     status_preds, status_labels = [], []
 
     for r in results:
@@ -675,6 +752,8 @@ def _compute_report(
         company_labels.append(label.correct_company)
         title_preds.append(r.predicted_job_title)
         title_labels.append(label.correct_job_title)
+        req_preds.append(r.predicted_req_id)
+        req_labels.append(label.correct_req_id)
         status_preds.append(r.predicted_status)
         status_labels.append(label.correct_status)
 
@@ -700,6 +779,15 @@ def _compute_report(
                 errors.append({"field": "job_title", "predicted": r.predicted_job_title, "expected": label.correct_job_title})
         if label.correct_status and (r.predicted_status or "").strip().lower() != label.correct_status.strip().lower():
             errors.append({"field": "status", "predicted": r.predicted_status, "expected": label.correct_status})
+        if label.correct_req_id:
+            pr = normalize_req_id(r.predicted_req_id or "")
+            lr = normalize_req_id(label.correct_req_id)
+            if pr != lr:
+                errors.append({
+                    "field": "req_id",
+                    "predicted": r.predicted_req_id,
+                    "expected": label.correct_req_id,
+                })
         if errors:
             report.field_error_examples.append({
                 "email_id": r.cached_email_id, "subject": subj, "errors": errors,
@@ -707,6 +795,7 @@ def _compute_report(
 
     report.field_company = compute_field_metrics(company_preds, company_labels)
     report.field_job_title = compute_field_metrics(title_preds, title_labels)
+    report.field_req_id = compute_field_metrics(req_preds, req_labels)
     report.field_status = compute_status_metrics(status_preds, status_labels)
 
     # Grouping

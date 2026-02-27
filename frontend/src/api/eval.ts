@@ -8,6 +8,7 @@ import type {
   CacheDownloadRequest,
   CacheDownloadResult,
   CacheStats,
+  EmailPredictionRun,
   CorrectionEntryInput,
   DropdownOptions,
   EvalApplicationGroup,
@@ -67,6 +68,10 @@ export function listCachedEmails(params: {
 export function getCachedEmail(id: number, runId?: number): Promise<CachedEmailDetail> {
   const qs = runId ? `?run_id=${runId}` : "";
   return request(`/cache/emails/${id}${qs}`);
+}
+
+export function getEmailPredictionRuns(id: number): Promise<EmailPredictionRun[]> {
+  return request(`/cache/emails/${id}/prediction-runs`);
 }
 
 // ── Labels ───────────────────────────────────────────────

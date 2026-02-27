@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
@@ -11,8 +12,39 @@ from typing import Protocol
 import structlog
 
 from job_monitor.config import AppConfig
+from job_monitor.extraction.rules import (
+    compose_title_with_req_id,
+    normalize_req_id,
+    split_title_and_req_id,
+)
 
 logger = structlog.get_logger(__name__)
+
+
+def _normalize_llm_text(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").replace("\u200b", " ")).strip()
+
+
+def _pick_more_specific_title(a: str, b: str) -> str:
+    """Prefer the title that carries more concrete qualifiers."""
+    ta = _normalize_llm_text(a)
+    tb = _normalize_llm_text(b)
+    if not ta:
+        return tb
+    if not tb:
+        return ta
+    la = ta.lower()
+    lb = tb.lower()
+    if la in lb and len(tb) > len(ta):
+        return tb
+    if lb in la and len(ta) > len(tb):
+        return ta
+
+    def _score(v: str) -> tuple[int, int]:
+        has_qualifier = 1 if any(tok in v for tok in (" - ", ",", "/", "(")) else 0
+        return (has_qualifier, len(v))
+
+    return ta if _score(ta) >= _score(tb) else tb
 
 
 @dataclass(frozen=True)
@@ -20,10 +52,13 @@ class LLMExtractionResult:
     """Structured output from an LLM extraction call."""
 
     is_job_application: bool = False
-    # Three-way classification: "job_application" | "recruiter_reach_out" | "not_job_related" | ""
+    # Two-way classification: "job_application" | "not_job_related" | ""
     email_category: str = ""
     company: str = ""
     job_title: str = ""
+    base_title: str = ""
+    req_id: str = ""
+    title_with_req_id: str = ""
     status: str = ""
     confidence: float = 0.0
     prompt_tokens: int = 0
@@ -83,10 +118,11 @@ class OpenAIProvider:
 
     _SYSTEM_PROMPT = (
         "You classify an email for a job-tracking system and extract structured fields. "
-        "Return strict JSON only with keys: is_job_application, email_category, company, job_title, status, confidence. "
+        "Return strict JSON only with keys: is_job_application, email_category, company, "
+        "job_title, base_title, req_id, title_with_req_id, status, confidence. "
         "\n\n"
         "IMPORTANT: is_job_application=true ONLY if the user actually applied for a job and this email "
-        "is a confirmation, acknowledgment, status update, interview invite, or offer/rejection. "
+        "is a confirmation, acknowledgment, status update, OA/assessment invite, interview invite, offer/rejection, or post-offer onboarding communication. "
         "\n"
         "is_job_application=false for: "
         "account verification emails, password resets, marketing newsletters, career tips, "
@@ -95,18 +131,18 @@ class OpenAIProvider:
         "application summary digests (emails summarizing multiple application statuses), "
         "promotional emails, unsubscribe confirmations, "
         "general company newsletters even if from a careers/talent team, "
-        "recruiter or TA proactively reaching out about a role (the user did NOT apply — use email_category='recruiter_reach_out'). "
+        "recruiter or TA proactively reaching out about a role (the user did NOT apply — set status='Recruiter Reach-out'). "
         "If the email lists multiple job openings or says 'Your Job Alert matched the following jobs', "
         "it is a job alert digest, NOT an application — return is_job_application=false. "
         "\n\n"
         "- email_category: REQUIRED — classify into exactly one of:\n"
         "  * 'job_application'     — user submitted an application; email is a confirmation, "
-        "acknowledgment, status update, interview invite, offer, or rejection\n"
-        "  * 'recruiter_reach_out' — recruiter, TA, or staffing/recruiting agency proactively "
-        "reached out to the user about a role; the user did NOT apply for this role\n"
+        "acknowledgment, status update, OA/assessment invite, interview invite, offer, rejection, or onboarding/background-check communication\n"
         "  * 'not_job_related'     — not about a specific job application at all "
         "(newsletter, verification code, job alert digest, marketing, etc.)\n"
         "  email_category='job_application' if and only if is_job_application=true.\n"
+        "  recruiter outreach should still use email_category='not_job_related' and set "
+        "status='Recruiter Reach-out'.\n"
         "\n"
         "Rules:\n"
         "- company: the real hiring company name, not ATS vendor.\n"
@@ -123,9 +159,20 @@ class OpenAIProvider:
         "Include team/department qualifiers and job IDs when present to distinguish roles at the same company "
         "(e.g. 'Software Engineer, Payments Infrastructure (ID: 12345)'). "
         "Do NOT use sentences or phrases from email body. Return empty string only if truly not found anywhere.\n"
+        "  TITLE COMPLETENESS RULES (critical):\n"
+        "  * If body has explicit labels like 'Position:', 'Job Title:', or 'Role:', copy the value exactly.\n"
+        "  * Keep full specialization suffixes; do NOT shorten 'A - B' to 'A'.\n"
+        "  * If subject is generic but body title is specific, always choose body title.\n"
+        "- base_title: title without requisition ID (e.g. 'Data Engineer').\n"
+        "- req_id: requisition ID if present (e.g. 'R0615432', 'JR299365', '1841261').\n"
+        "- title_with_req_id: combine base_title + req_id when req_id exists "
+        "(e.g. 'Data Engineer - R0615432'). If no req_id, this equals base_title.\n"
         "- status: infer from BOTH email subject AND body. Must be one of:\n"
+        "  * 'Recruiter Reach-out' - recruiter/TA proactively reached out about a role and the user has not applied yet\n"
+        "  * 'OA' - online assessment, coding challenge, take-home test, HackerRank/CodeSignal/Codility\n"
+        "  * 'Onboarding' - after offer acceptance: background check, I-9/E-Verify, payroll/benefits setup, onboarding tasks\n"
         "  * 'Offer' - offer letter, congratulations\n"
-        "  * '面试' - interview, assessment, coding challenge\n"
+        "  * '面试' - interview, phone screen, onsite\n"
         "  * '拒绝' - rejection ('unfortunately', 'regret', 'not moving forward')\n"
         "  * '已申请' - application received/confirmed\n"
         "  * 'Unknown' - only if truly unclear\n"
@@ -136,7 +183,8 @@ class OpenAIProvider:
         self, sender: str, subject: str, body: str
     ) -> LLMExtractionResult:
         cfg = self._config
-        body_snippet = body[:8000]
+        body_clean = _normalize_llm_text(body)
+        body_snippet = body_clean[:8000]
 
         user_prompt = (
             f"Sender: {sender}\nSubject: {subject}\nBody:\n{body_snippet}\nReturn JSON."
@@ -145,6 +193,7 @@ class OpenAIProvider:
         resp = self._client.chat.completions.create(
             model=cfg.llm_model,
             timeout=cfg.llm_timeout_sec,
+            temperature=0,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": self._SYSTEM_PROMPT},
@@ -164,21 +213,20 @@ class OpenAIProvider:
         )
 
         # Parse email_category first; derive is_job_application from it when present.
-        _VALID_CATEGORIES = {"job_application", "recruiter_reach_out", "not_job_related"}
+        _VALID_CATEGORIES = {"job_application", "not_job_related"}
         email_category = str(parsed.get("email_category", "")).strip().lower()
         if email_category not in _VALID_CATEGORIES:
             email_category = ""
 
         if email_category == "job_application":
             is_job = True
-        elif email_category in ("recruiter_reach_out", "not_job_related"):
+        elif email_category == "not_job_related":
             is_job = False
         else:
             # Fallback: use explicit is_job_application field
             is_job_raw = str(parsed.get("is_job_application", "")).strip().lower()
             is_job = is_job_raw in {"true", "1", "yes"}
-            if is_job:
-                email_category = "job_application"
+            email_category = "job_application" if is_job else "not_job_related"
 
         confidence_raw = parsed.get("confidence", 0)
         try:
@@ -186,11 +234,33 @@ class OpenAIProvider:
         except (ValueError, TypeError):
             confidence = 0.0
 
+        raw_job_title = _normalize_llm_text(str(parsed.get("job_title", "")))
+        raw_base_title = _normalize_llm_text(str(parsed.get("base_title", "")))
+        raw_req_id = normalize_req_id(str(parsed.get("req_id", "")).strip())
+        raw_title_with_req = _normalize_llm_text(str(parsed.get("title_with_req_id", "")))
+
+        tw_base, tw_req = split_title_and_req_id(raw_title_with_req)
+        jt_base, jt_req = split_title_and_req_id(raw_job_title)
+
+        # Prefer the most specific non-req title, and avoid losing qualifiers.
+        base_title = tw_base or _pick_more_specific_title(raw_base_title, jt_base or raw_job_title)
+        req_id = raw_req_id or tw_req or jt_req
+        if req_id:
+            title_with_req_id = raw_title_with_req or compose_title_with_req_id(base_title, req_id)
+            canonical_job_title = title_with_req_id or base_title
+        else:
+            canonical_job_title = _pick_more_specific_title(raw_job_title, base_title)
+            title_with_req_id = canonical_job_title
+            base_title = canonical_job_title
+
         return LLMExtractionResult(
             is_job_application=is_job,
             email_category=email_category,
             company=str(parsed.get("company", "")).strip(),
-            job_title=str(parsed.get("job_title", "")).strip(),
+            job_title=canonical_job_title,
+            base_title=base_title,
+            req_id=req_id,
+            title_with_req_id=title_with_req_id,
             status=str(parsed.get("status", "")).strip(),
             confidence=confidence,
             prompt_tokens=prompt_tokens,

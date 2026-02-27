@@ -277,7 +277,7 @@ def resolve_by_thread_id(
 # Statuses that indicate an application has progressed beyond initial submission.
 # If an existing app is in one of these AND the new email is a fresh application
 # confirmation (已申请), treat it as a re-application → skip that candidate.
-_PROGRESSED_STATUSES = {"拒绝", "面试"}
+_PROGRESSED_STATUSES = {"OA", "面试", "Offer", "Onboarding", "拒绝"}
 
 # Title normalization synonyms
 _TITLE_SYNONYMS = {
@@ -359,12 +359,12 @@ def resolve_by_company(
     Rule B (Time gap): If new email is 已申请 and titles match but the time
         gap exceeds 3 days from the app's last email, skip (different cycle).
     Rule C (Re-application): If existing app is in a progressed status
-        (拒绝/面试) and the new email is 已申请, skip that candidate.
+        (OA/面试/Offer/Onboarding/拒绝) and the new email is 已申请, skip that candidate.
 
     Args:
         session: Database session.
         company: Company name extracted from the email.
-        extracted_status: Status extracted from the new email (已申请/面试/Offer/拒绝).
+        extracted_status: Status extracted from the new email (已申请/OA/面试/Offer/Onboarding/拒绝).
         job_title: Job title extracted from the new email.
         email_date: Date of the new email (from email header).
 
@@ -456,7 +456,7 @@ def resolve_by_company(
             )
 
     # Rule C: Re-application after rejection/interview
-    # If existing app has progressed (拒绝/面试) and new email is a fresh
+    # If existing app has progressed (OA/面试/Offer/Onboarding/拒绝) and new email is a fresh
     # application confirmation (已申请), treat as re-application.
     if extracted_status == "已申请" and candidates:
         before = len(candidates)

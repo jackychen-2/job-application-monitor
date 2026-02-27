@@ -32,7 +32,14 @@ from job_monitor.extraction.llm import (
     create_llm_provider,
     extract_with_timeout,
 )
-from job_monitor.extraction.rules import extract_company, extract_job_title, extract_status
+from job_monitor.extraction.rules import (
+    compose_title_with_req_id,
+    extract_company,
+    extract_job_req_id,
+    extract_job_title,
+    extract_status,
+    normalize_req_id,
+)
 from job_monitor.linking.resolver import (
     is_message_already_processed,
     normalize_company,
@@ -64,6 +71,8 @@ def _validate_job_title(title: str) -> str:
     if cleaned[0].islower():
         return ""
     return cleaned
+
+
 from job_monitor.models import Application, ProcessedEmail, ScanState, StatusHistory
 
 logger = structlog.get_logger(__name__)
@@ -356,6 +365,10 @@ def _process_single_email(
 
     llm_result: Optional[LLMExtractionResult] = None
     llm_used = False
+    is_trackable_job = False
+    is_recruiter_reach_out = False
+    is_onboarding = False
+    is_oa = False
 
     # ── Step 2: LLM classification + extraction ──────────
     if llm_provider is not None:
@@ -374,8 +387,34 @@ def _process_single_email(
 
     # ── Step 3: Determine if job-related ──────────────────
     if llm_result is not None:
-        if not llm_result.is_job_application:
-            logger.info("email_skipped_llm", uid=uid)
+        pred_is_job = llm_result.is_job_application
+        normalized_status = (llm_result.status or "").strip().lower().replace("_", " ")
+        is_recruiter_reach_out = normalized_status in {
+            "recruiter reach-out",
+            "recruiter reach out",
+        }
+        is_onboarding = normalized_status in {
+            "onboarding",
+            "background check",
+            "background screening",
+        }
+        is_oa = normalized_status in {
+            "oa",
+            "online assessment",
+            "online assessemnt",
+            "online test",
+            "coding challenge",
+            "assessment",
+            "take-home",
+            "take home",
+            "hackerrank",
+            "codesignal",
+            "codility",
+        }
+        is_trackable_job = pred_is_job or is_recruiter_reach_out or is_onboarding or is_oa
+
+        if not is_trackable_job:
+            logger.info("email_skipped_llm", uid=uid, email_category=llm_result.email_category)
             _cleanup_orphaned_app(session, previous_app_id, exclude_uid=uid, summary=summary)
             _record_processed(
                 session, uid, config, parsed, is_job=False, app_id=None, llm_used=True,
@@ -383,7 +422,8 @@ def _process_single_email(
             )
             return
     else:
-        if not is_job_related(subject, sender):
+        is_trackable_job = is_job_related(subject, sender)
+        if not is_trackable_job:
             if llm_used:
                 logger.info("email_skipped_rules_fallback", uid=uid)
             else:
@@ -395,25 +435,40 @@ def _process_single_email(
             return
 
     # ── Step 4: Extract fields ────────────────────────────
-    if llm_result is not None and llm_result.is_job_application:
-        company = llm_result.company or extract_company(subject, sender)
-        job_title = _validate_job_title(llm_result.job_title) or _validate_job_title(extract_job_title(subject, body))
-        # 如果 LLM 返回空或 "Unknown"，使用规则提取
-        llm_status = llm_result.status
-        if llm_status and llm_status.lower() != "unknown":
-            status = llm_status
+    if llm_result is not None and is_trackable_job:
+        company = (llm_result.company or "").strip()
+        base_title = _validate_job_title(llm_result.base_title or llm_result.job_title)
+        req_id = normalize_req_id(llm_result.req_id)
+        llm_full_title = _validate_job_title(llm_result.title_with_req_id)
+        job_title = (
+            llm_full_title
+            or base_title
+        )
+        if is_recruiter_reach_out:
+            status = "Recruiter Reach-out"
+        elif is_oa:
+            status = "OA"
+        elif is_onboarding:
+            status = "Onboarding"
         else:
-            status = extract_status(subject, body)
+            # Keep LLM status as source of truth when LLM path is used.
+            llm_status = llm_result.status
+            if llm_status and llm_status.lower() != "unknown":
+                status = llm_status
+            else:
+                status = "Unknown"
     else:
         company = extract_company(subject, sender)
-        job_title = _validate_job_title(extract_job_title(subject, body))
+        base_title = _validate_job_title(extract_job_title(subject, body))
+        req_id = extract_job_req_id(subject, body, base_title)
+        job_title = _validate_job_title(compose_title_with_req_id(base_title, req_id)) or base_title
         status = extract_status(subject, body)
 
     if not company:
         company = "Unknown"
 
     # ── Step 4.5: Company-based linking (fallback) ────────
-    # If thread linking didn't find a match, try company name
+    # If thread linking didn't find a match, try company name.
     if linked_app_id is None and company != "Unknown":
         company_link = resolve_by_company(
             session, company,
@@ -503,7 +558,7 @@ def _process_single_email(
     # ── Step 7: Record processed email ────────────────────
     _record_processed(
         session, uid, config, parsed,
-        is_job=True, app_id=app.id, llm_used=llm_used, llm_result=llm_result,
+        is_job=is_trackable_job, app_id=app.id, llm_used=llm_used, llm_result=llm_result,
         link_method=link_method, needs_review=needs_review,
     )
 

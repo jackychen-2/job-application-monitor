@@ -35,6 +35,7 @@ from job_monitor.eval.schemas import (
     CachedEmailOut,
     CacheStatsOut,
     DropdownOptions,
+    EmailPredictionRunOut,
     EvalGroupIn,
     EvalGroupOut,
     EvalLabelIn,
@@ -61,6 +62,7 @@ def get_settings(config: AppConfig = Depends(get_config)):
         "llm_enabled": config.llm_enabled,
         "llm_provider": config.llm_provider,
         "llm_model": config.llm_model,
+        "llm_confidence_threshold": config.llm_confidence_threshold,
     }
 
 
@@ -76,6 +78,7 @@ def update_settings(
         "llm_enabled": llm_enabled if llm_enabled is not None else config.llm_enabled,
         "llm_provider": config.llm_provider,
         "llm_model": config.llm_model,
+        "llm_confidence_threshold": config.llm_confidence_threshold,
     }
 
 
@@ -280,12 +283,42 @@ def cache_get_email(
         predicted_email_category=latest_result.predicted_email_category if latest_result else None,
         predicted_company=latest_result.predicted_company if latest_result else None,
         predicted_job_title=latest_result.predicted_job_title if latest_result else None,
+        predicted_req_id=latest_result.predicted_req_id if latest_result else None,
         predicted_status=latest_result.predicted_status if latest_result else None,
         predicted_application_group=pred_group_id,
         predicted_application_group_display=app_display,
         predicted_confidence=latest_result.predicted_confidence if latest_result else None,
         decision_log_json=latest_result.decision_log_json if latest_result else None,
     )
+
+
+@router.get("/cache/emails/{email_id}/prediction-runs", response_model=list[EmailPredictionRunOut])
+def cache_get_email_prediction_runs(
+    email_id: int,
+    session: Session = Depends(get_db),
+):
+    """List historical eval runs that contain predictions for this cached email."""
+    ce = session.query(CachedEmail).get(email_id)
+    if not ce:
+        raise HTTPException(404, "Cached email not found")
+
+    rows = (
+        session.query(EvalRun)
+        .join(EvalRunResult, EvalRunResult.eval_run_id == EvalRun.id)
+        .filter(EvalRunResult.cached_email_id == email_id)
+        .order_by(EvalRun.started_at.desc())
+        .all()
+    )
+
+    return [
+        EmailPredictionRunOut(
+            run_id=r.id,
+            run_name=r.run_name,
+            started_at=r.started_at,
+            completed_at=r.completed_at,
+        )
+        for r in rows
+    ]
 
 
 # ── Pipeline Replay (decision trace) ─────────────────────
@@ -358,6 +391,7 @@ def replay_email_pipeline(
         log("llm", f"  is_job_related = {latest.predicted_is_job_related}", "info")
         log("llm", f"  company        = {latest.predicted_company!r}", "info")
         log("llm", f"  job_title      = {latest.predicted_job_title!r}", "info")
+        log("llm", f"  req_id         = {latest.predicted_req_id!r}", "info")
         log("llm", f"  status         = {latest.predicted_status!r}", "info")
         log("llm", f"  confidence     = {latest.predicted_confidence}", "info")
     else:
@@ -745,6 +779,7 @@ def upsert_label(
                 for fld, pred_val in [
                     ("company",   latest_pred.predicted_company),
                     ("job_title", latest_pred.predicted_job_title),
+                    ("req_id",    latest_pred.predicted_req_id),
                     ("status",    latest_pred.predicted_status),
                 ]:
                     if pred_val:  # only record if prediction actually had a value
@@ -755,6 +790,8 @@ def upsert_label(
                     _diff("company", latest_pred.predicted_company, data_dict["correct_company"])
                 if "correct_job_title" in data_dict:
                     _diff("job_title", latest_pred.predicted_job_title, data_dict["correct_job_title"])
+                if "correct_req_id" in data_dict:
+                    _diff("req_id", latest_pred.predicted_req_id, data_dict["correct_req_id"])
                 if "correct_status" in data_dict:
                     _diff("status", latest_pred.predicted_status, data_dict["correct_status"])
 
@@ -1343,6 +1380,7 @@ def bootstrap_groups_from_predictions(session: Session = Depends(get_db)):
                     correct_application_group_id=app_group.id,
                     correct_company=result.predicted_company,
                     correct_job_title=result.predicted_job_title,
+                    correct_req_id=result.predicted_req_id,
                     correct_status=result.predicted_status,
                     is_job_related=result.predicted_is_job_related,
                     review_status="unlabeled",
@@ -1356,6 +1394,7 @@ def bootstrap_groups_from_predictions(session: Session = Depends(get_db)):
                 # history is preserved — it retains all previous runs' corrections.
                 label.correct_company = result.predicted_company
                 label.correct_job_title = result.predicted_job_title
+                label.correct_req_id = result.predicted_req_id
                 label.correct_status = result.predicted_status
                 label.is_job_related = result.predicted_is_job_related
                 label.correct_application_group_id = app_group.id
@@ -1396,7 +1435,7 @@ def dropdown_options(session: Session = Depends(get_db)):
         t[0] for t in label_titles if t[0]
     ))
 
-    statuses = ["已申请", "面试", "拒绝", "Offer", "Unknown"]
+    statuses = ["Recruiter Reach-out", "已申请", "OA", "面试", "Offer", "Onboarding", "拒绝", "Unknown"]
 
     return DropdownOptions(companies=companies, job_titles=job_titles, statuses=statuses)
 
@@ -1562,6 +1601,7 @@ async def stream_eval_run(
                                     correct_application_group_id=_app_group.id,
                                     correct_company=_r.predicted_company,
                                     correct_job_title=_r.predicted_job_title,
+                                    correct_req_id=_r.predicted_req_id,
                                     correct_status=_r.predicted_status,
                                     is_job_related=_r.predicted_is_job_related,
                                     review_status="unlabeled",
@@ -1571,6 +1611,7 @@ async def stream_eval_run(
                                 # Reset to new predictions for this run
                                 _lbl.correct_company = _r.predicted_company
                                 _lbl.correct_job_title = _r.predicted_job_title
+                                _lbl.correct_req_id = _r.predicted_req_id
                                 _lbl.correct_status = _r.predicted_status
                                 _lbl.is_job_related = _r.predicted_is_job_related
                                 _lbl.correct_application_group_id = _app_group.id
@@ -1598,6 +1639,7 @@ async def stream_eval_run(
                             _lbl.is_job_related = False
                             _lbl.correct_company = None
                             _lbl.correct_job_title = None
+                            _lbl.correct_req_id = None
                             _lbl.correct_status = None
                             _lbl.correct_application_group_id = None
                             _lbl.review_status = "unlabeled"
@@ -1681,8 +1723,13 @@ def cancel_eval_run():
 
 @router.get("/runs", response_model=list[EvalRunOut])
 def list_runs(session: Session = Depends(get_db)):
-    """List all evaluation runs."""
-    runs = session.query(EvalRun).order_by(EvalRun.started_at.desc()).all()
+    """List batch evaluation runs (single-email ad-hoc runs are hidden)."""
+    runs = (
+        session.query(EvalRun)
+        .filter(~func.coalesce(EvalRun.run_name, "").like("review-email-%"))
+        .order_by(EvalRun.started_at.desc())
+        .all()
+    )
     return runs
 
 
@@ -1719,6 +1766,7 @@ def get_run_results(
     consistent even after labels are edited post-run.
     """
     from difflib import SequenceMatcher
+    from job_monitor.extraction.rules import normalize_req_id as _norm_req
     from job_monitor.linking.resolver import normalize_company as _norm_co, titles_similar as _titles_sim
 
     results = (
@@ -1744,6 +1792,7 @@ def get_run_results(
         company_correct = r.company_correct
         company_partial = r.company_partial
         title_correct = r.job_title_correct
+        req_id_correct = r.req_id_correct
         status_correct = r.status_correct
 
         if lbl and lbl.is_job_related is not None:
@@ -1765,11 +1814,14 @@ def get_run_results(
                 (r.predicted_status or "").strip().lower() ==
                 lbl.correct_status.strip().lower()
             )
+        if lbl and lbl.correct_req_id is not None and r.predicted_is_job_related:
+            req_id_correct = _norm_req(r.predicted_req_id or "") == _norm_req(lbl.correct_req_id)
 
         if errors_only and not (
             cls_correct is False or
             company_correct is False or
             title_correct is False or
+            req_id_correct is False or
             status_correct is False or
             r.grouping_correct is False
         ):
@@ -1779,8 +1831,10 @@ def get_run_results(
             id=r.id,
             cached_email_id=r.cached_email_id,
             predicted_is_job_related=r.predicted_is_job_related,
+            predicted_email_category=r.predicted_email_category,
             predicted_company=r.predicted_company,
             predicted_job_title=r.predicted_job_title,
+            predicted_req_id=r.predicted_req_id,
             predicted_status=r.predicted_status,
             predicted_application_group_id=r.predicted_application_group_id,
             predicted_group=pg,
@@ -1789,6 +1843,7 @@ def get_run_results(
             company_correct=company_correct,
             company_partial=company_partial,
             job_title_correct=title_correct,
+            req_id_correct=req_id_correct,
             status_correct=status_correct,
             grouping_correct=r.grouping_correct,
             llm_used=r.llm_used,
@@ -1801,6 +1856,7 @@ def get_run_results(
             label_is_job_related=lbl.is_job_related if lbl else None,
             label_company=lbl.correct_company if lbl else None,
             label_job_title=lbl.correct_job_title if lbl else None,
+            label_req_id=lbl.correct_req_id if lbl else None,
             label_status=lbl.correct_status if lbl else None,
             label_review_status=lbl.review_status if lbl else "unlabeled",
             # Eval run decision log

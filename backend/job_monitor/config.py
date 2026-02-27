@@ -40,6 +40,7 @@ class AppConfig(BaseSettings):
     llm_api_key: SecretStr = SecretStr("")
     openai_api_key: SecretStr = SecretStr("")  # backward compat
     llm_timeout_sec: int = 45
+    llm_confidence_threshold: float = 0.6
     cost_input_per_mtok: float = 0.15   # gpt-4o-mini: $0.15/MTok input
     cost_output_per_mtok: float = 0.60  # gpt-4o-mini: $0.60/MTok output
 
@@ -64,6 +65,14 @@ class AppConfig(BaseSettings):
     @classmethod
     def ensure_string(cls, v: object) -> str:
         return str(v).strip()
+
+    @field_validator("llm_confidence_threshold")
+    @classmethod
+    def validate_confidence_threshold(cls, v: float) -> float:
+        value = float(v)
+        if value < 0.0 or value > 1.0:
+            raise ValueError("llm_confidence_threshold must be between 0.0 and 1.0")
+        return value
 
     @model_validator(mode="after")
     def _resolve_api_key(self) -> "AppConfig":

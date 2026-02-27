@@ -17,7 +17,7 @@ export interface CachedEmail {
 
 export interface CachedEmailDetail extends CachedEmail {
   predicted_is_job_related: boolean | null;
-  predicted_email_category: string | null; // "job_application" | "recruiter_reach_out" | "not_job_related"
+  predicted_email_category: string | null; // "job_application" | "not_job_related"
   predicted_company: string | null;
   predicted_job_title: string | null;
   predicted_status: string | null;
@@ -32,6 +32,13 @@ export interface CachedEmailListResponse {
   total: number;
   page: number;
   page_size: number;
+}
+
+export interface EmailPredictionRun {
+  run_id: number;
+  run_name: string | null;
+  started_at: string;
+  completed_at: string | null;
 }
 
 export interface CacheStats {
@@ -184,7 +191,7 @@ export interface EvalLabel {
   id: number;
   cached_email_id: number;
   is_job_related: boolean | null;
-  email_category: string | null; // "job_application" | "recruiter_reach_out" | "not_job_related"
+  email_category: string | null; // "job_application" | "not_job_related"
   correct_company: string | null;
   correct_job_title: string | null;
   correct_status: string | null;
@@ -201,7 +208,7 @@ export interface EvalLabel {
 
 export interface EvalLabelInput {
   is_job_related?: boolean | null;
-  email_category?: string | null; // "job_application" | "recruiter_reach_out" | "not_job_related"
+  email_category?: string | null; // "job_application" | "not_job_related"
   correct_company?: string | null;
   correct_job_title?: string | null;
   correct_status?: string | null;
