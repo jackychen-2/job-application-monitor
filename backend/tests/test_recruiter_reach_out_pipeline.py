@@ -9,9 +9,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from job_monitor.config import AppConfig
 from job_monitor.email.parser import ParsedEmailData
-from job_monitor.extraction.llm import LLMExtractionResult
+from job_monitor.extraction.llm import LLMExtractionResult, LLMLinkConfirmResult
 from job_monitor.extraction.pipeline import ScanSummary, _process_single_email
-from job_monitor.extraction.rules import extract_status
+from job_monitor.extraction.rules import extract_status, split_title_and_req_id
 from job_monitor.models import Application, Base, ProcessedEmail
 
 
@@ -21,6 +21,22 @@ class _StubLLMProvider:
 
     def extract_fields(self, sender: str, subject: str, body: str) -> LLMExtractionResult:
         return self._result
+
+
+class _StubLLMProviderNoConfirm(_StubLLMProvider):
+    def confirm_same_application(self, *args, **kwargs):  # pragma: no cover - guard rail
+        raise AssertionError("confirm_same_application should not be called")
+
+
+class _StubLLMProviderWithConfirm(_StubLLMProvider):
+    def __init__(self, result: LLMExtractionResult, *, is_same_application: bool) -> None:
+        super().__init__(result)
+        self._is_same_application = is_same_application
+        self.confirm_calls = 0
+
+    def confirm_same_application(self, *args, **kwargs) -> LLMLinkConfirmResult:
+        self.confirm_calls += 1
+        return LLMLinkConfirmResult(is_same_application=self._is_same_application)
 
 
 def _make_config() -> AppConfig:
@@ -76,6 +92,62 @@ def _make_job_application_result() -> LLMExtractionResult:
         req_id="",
         title_with_req_id="Senior Backend Engineer",
         status="已申请",
+        confidence=0.98,
+    )
+
+
+def _make_job_application_with_req_result() -> LLMExtractionResult:
+    return LLMExtractionResult(
+        is_job_application=True,
+        email_category="job_application",
+        company="Meta",
+        job_title="Senior Backend Engineer - R0615432",
+        base_title="Senior Backend Engineer",
+        req_id="R0615432",
+        title_with_req_id="Senior Backend Engineer - R0615432",
+        status="已申请",
+        confidence=0.98,
+    )
+
+
+def _make_job_application_with_parenthesized_req_result() -> LLMExtractionResult:
+    return LLMExtractionResult(
+        is_job_application=True,
+        email_category="job_application",
+        company="Casey's",
+        job_title="Data Integration Developer (2025-4844)",
+        base_title="",
+        req_id="",
+        title_with_req_id="Data Integration Developer (2025-4844)",
+        status="已申请",
+        confidence=0.98,
+    )
+
+
+def _make_follow_up_with_same_req_result() -> LLMExtractionResult:
+    return LLMExtractionResult(
+        is_job_application=True,
+        email_category="job_application",
+        company="Meta",
+        job_title="Senior Backend Engineer - R0615432",
+        base_title="Senior Backend Engineer",
+        req_id="R0615432",
+        title_with_req_id="Senior Backend Engineer - R0615432",
+        status="OA",
+        confidence=0.98,
+    )
+
+
+def _make_follow_up_with_same_req_different_title_result() -> LLMExtractionResult:
+    return LLMExtractionResult(
+        is_job_application=True,
+        email_category="job_application",
+        company="Meta",
+        job_title="Machine Learning Engineer - R0615432",
+        base_title="Machine Learning Engineer",
+        req_id="R0615432",
+        title_with_req_id="Machine Learning Engineer - R0615432",
+        status="OA",
         confidence=0.98,
     )
 
@@ -295,6 +367,132 @@ def test_application_followed_by_oa_reuses_group_and_advances_status() -> None:
         assert summary_applied.applications_created == 1
         assert summary_oa.applications_created == 0
         assert summary_oa.applications_updated == 1
+    finally:
+        session.close()
+
+
+def test_job_title_and_req_id_are_stored_separately() -> None:
+    session = _new_session()
+    try:
+        summary = ScanSummary()
+        _process_single_email(
+            session=session,
+            config=_make_config(),
+            llm_provider=_StubLLMProvider(_make_job_application_with_req_result()),
+            uid=50,
+            parsed=_make_parsed(50),
+            summary=summary,
+        )
+        session.commit()
+
+        app = session.query(Application).one()
+        assert app.job_title == "Senior Backend Engineer"
+        assert app.req_id == "R0615432"
+        assert summary.applications_created == 1
+    finally:
+        session.close()
+
+
+def test_split_title_and_req_id_handles_parenthesized_hyphen_id() -> None:
+    base_title, req_id = split_title_and_req_id("Data Integration Developer (2025-4844)")
+    assert base_title == "Data Integration Developer"
+    assert req_id == "2025-4844"
+
+
+def test_parenthesized_hyphen_req_id_is_stored_separately() -> None:
+    session = _new_session()
+    try:
+        summary = ScanSummary()
+        _process_single_email(
+            session=session,
+            config=_make_config(),
+            llm_provider=_StubLLMProvider(_make_job_application_with_parenthesized_req_result()),
+            uid=51,
+            parsed=_make_parsed(51),
+            summary=summary,
+        )
+        session.commit()
+
+        app = session.query(Application).one()
+        assert app.job_title == "Data Integration Developer"
+        assert app.req_id == "2025-4844"
+        assert summary.applications_created == 1
+    finally:
+        session.close()
+
+
+def test_exact_req_id_links_without_llm_confirmation() -> None:
+    session = _new_session()
+    try:
+        # Seed the application with the same req_id.
+        _process_single_email(
+            session=session,
+            config=_make_config(),
+            llm_provider=_StubLLMProvider(_make_job_application_with_req_result()),
+            uid=60,
+            parsed=_make_parsed(60),
+            summary=ScanSummary(),
+        )
+        session.commit()
+
+        # Follow-up email should link by req_id directly; confirm_same_application must not run.
+        _process_single_email(
+            session=session,
+            config=_make_config(),
+            llm_provider=_StubLLMProviderNoConfirm(_make_follow_up_with_same_req_result()),
+            uid=61,
+            parsed=_make_parsed(61),
+            summary=ScanSummary(),
+        )
+        session.commit()
+
+        apps = session.query(Application).order_by(Application.id.asc()).all()
+        assert len(apps) == 1
+        assert apps[0].req_id == "R0615432"
+        assert apps[0].status == "OA"
+
+        second = session.query(ProcessedEmail).filter(ProcessedEmail.uid == 61).one()
+        assert second.link_method == "company_req_id"
+    finally:
+        session.close()
+
+
+def test_req_id_match_but_title_mismatch_uses_llm_not_direct_link() -> None:
+    session = _new_session()
+    try:
+        # Seed with req_id + title.
+        _process_single_email(
+            session=session,
+            config=_make_config(),
+            llm_provider=_StubLLMProvider(_make_job_application_with_req_result()),
+            uid=62,
+            parsed=_make_parsed(62),
+            summary=ScanSummary(),
+        )
+        session.commit()
+
+        # Same req_id but different title: should NOT direct-link by req_id.
+        provider = _StubLLMProviderWithConfirm(
+            _make_follow_up_with_same_req_different_title_result(),
+            is_same_application=True,
+        )
+        _process_single_email(
+            session=session,
+            config=_make_config(),
+            llm_provider=provider,
+            uid=63,
+            parsed=_make_parsed(63),
+            summary=ScanSummary(),
+        )
+        session.commit()
+
+        apps = session.query(Application).order_by(Application.id.asc()).all()
+        assert len(apps) == 1
+        assert apps[0].status == "OA"
+
+        second = session.query(ProcessedEmail).filter(ProcessedEmail.uid == 63).one()
+        assert second.link_method == "company"
+        assert provider.confirm_calls > 0
     finally:
         session.close()
 

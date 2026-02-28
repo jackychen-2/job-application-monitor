@@ -41,8 +41,85 @@ def _add_column_if_missing(engine: Engine, table: str, column: str, definition: 
             logger.info("schema_migration_applied", table=table, column=column)
 
 
+def _migrate_applications_unique_constraint(engine: Engine) -> None:
+    """Upgrade applications unique constraint to include req_id for SQLite DBs."""
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT sql FROM sqlite_master WHERE type='table' AND name='applications'")
+        ).fetchone()
+        create_sql = (row[0] or "").lower() if row else ""
+        if not create_sql:
+            return
+
+        already_new = (
+            "uq_company_job_title_req_id" in create_sql
+            or "unique (company, job_title, req_id)" in create_sql
+        )
+        old_shape = (
+            "uq_company_job_title" in create_sql
+            or "unique (company, job_title)" in create_sql
+        )
+        if already_new or not old_shape:
+            return
+
+        conn.execute(text("PRAGMA foreign_keys=OFF"))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE applications_new (
+                    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                    company VARCHAR(200) NOT NULL,
+                    normalized_company VARCHAR(200),
+                    job_title VARCHAR(300),
+                    req_id VARCHAR(80),
+                    email_subject TEXT,
+                    email_sender VARCHAR(300),
+                    email_date DATETIME,
+                    status VARCHAR(50) NOT NULL DEFAULT '已申请',
+                    source VARCHAR(50) NOT NULL DEFAULT 'email',
+                    notes TEXT,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    CONSTRAINT uq_company_job_title_req_id UNIQUE (company, job_title, req_id)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO applications_new (
+                    id, company, normalized_company, job_title, req_id,
+                    email_subject, email_sender, email_date, status, source, notes,
+                    created_at, updated_at
+                )
+                SELECT
+                    id, company, normalized_company, job_title, req_id,
+                    email_subject, email_sender, email_date, status, source, notes,
+                    created_at, updated_at
+                FROM applications
+                """
+            )
+        )
+        conn.execute(text("DROP TABLE applications"))
+        conn.execute(text("ALTER TABLE applications_new RENAME TO applications"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_applications_company ON applications (company)"))
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_applications_normalized_company ON applications (normalized_company)")
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_applications_status ON applications (status)"))
+        conn.execute(text("PRAGMA foreign_keys=ON"))
+        conn.commit()
+        logger.info("schema_migration_applied", table="applications", change="unique_constraint_req_id")
+
+
 def _apply_schema_migrations(engine: Engine) -> None:
     """Run incremental column additions for existing databases."""
+    _add_column_if_missing(engine, "applications", "req_id", "VARCHAR(80)")
+    _migrate_applications_unique_constraint(engine)
     _add_column_if_missing(engine, "eval_labels", "email_category", "VARCHAR(50)")
     _add_column_if_missing(engine, "eval_labels", "correct_req_id", "VARCHAR(80)")
     _add_column_if_missing(engine, "eval_run_results", "predicted_email_category", "VARCHAR(50)")
@@ -87,6 +164,7 @@ def _cleanup_on_startup() -> None:
     """Re-process existing data with latest rules on startup (skip LLM)."""
     from job_monitor.linking.resolver import normalize_company
     from job_monitor.models import Application
+    from job_monitor.extraction.rules import normalize_req_id, split_title_and_req_id
     
     if _SessionLocal is None:
         return
@@ -97,13 +175,23 @@ def _cleanup_on_startup() -> None:
         
         # Step 1: Re-normalize all company names
         normalized_count = 0
+        split_title_count = 0
         for app in apps:
             new_normalized = normalize_company(app.company)
             if app.normalized_company != new_normalized:
                 app.normalized_company = new_normalized
                 normalized_count += 1
+            # Split legacy "Title - REQ" into separate columns on startup.
+            base_title, req_from_title = split_title_and_req_id(app.job_title or "")
+            existing_req = normalize_req_id(app.req_id or "")
+            merged_req = existing_req or req_from_title
+            if base_title and base_title != (app.job_title or ""):
+                app.job_title = base_title
+                split_title_count += 1
+            if merged_req and merged_req != (app.req_id or ""):
+                app.req_id = merged_req
         
-        # Step 2: Merge duplicates (same normalized_company + job_title)
+        # Step 2: Merge duplicates (same normalized_company + job_title + req_id)
         # Keep the one with most recent email_date, delete others
         from sqlalchemy import func
         duplicates_deleted = 0
@@ -113,14 +201,15 @@ def _cleanup_on_startup() -> None:
             session.query(
                 Application.normalized_company,
                 Application.job_title,
+                Application.req_id,
                 func.count(Application.id).label("cnt"),
             )
-            .group_by(Application.normalized_company, Application.job_title)
+            .group_by(Application.normalized_company, Application.job_title, Application.req_id)
             .having(func.count(Application.id) > 1)
             .all()
         )
         
-        for norm_company, job_title, _ in dup_groups:
+        for norm_company, job_title, req_id, _ in dup_groups:
             # Get all apps in this group, ordered by email_date desc
             group_apps = (
                 session.query(Application)
@@ -128,6 +217,9 @@ def _cleanup_on_startup() -> None:
                     Application.normalized_company == norm_company,
                     Application.job_title == job_title if job_title else (
                         (Application.job_title == None) | (Application.job_title == "")
+                    ),
+                    Application.req_id == req_id if req_id else (
+                        (Application.req_id == None) | (Application.req_id == "")
                     ),
                 )
                 .order_by(Application.email_date.desc().nullslast())
@@ -211,6 +303,7 @@ def _cleanup_on_startup() -> None:
                 app.company,
                 extracted_status=email_status,
                 job_title=app.job_title,
+                req_id=app.req_id,
                 email_date=pe.email_date,
             )
             
@@ -239,10 +332,17 @@ def _cleanup_on_startup() -> None:
         
         session.commit()
         
-        if normalized_count > 0 or duplicates_deleted > 0 or email_dates_updated > 0 or relinked_count > 0:
+        if (
+            normalized_count > 0
+            or split_title_count > 0
+            or duplicates_deleted > 0
+            or email_dates_updated > 0
+            or relinked_count > 0
+        ):
             logger.info(
                 "startup_cleanup_complete",
                 normalized=normalized_count,
+                title_req_split=split_title_count,
                 duplicates_deleted=duplicates_deleted,
                 email_dates_updated=email_dates_updated,
                 relinked=relinked_count,

@@ -28,6 +28,53 @@ import type {
   GroupingAnalysis,
 } from "../../types/eval";
 
+const REQ_ID_TOKEN = "(?:R-?\\d{5,}|JR\\d{5,}|\\d{4}-\\d{3,6}|\\d{5,8})";
+const REQ_ID_RE = new RegExp(`\\b${REQ_ID_TOKEN}\\b`, "i");
+
+function normalizeReqId(value: string | null | undefined): string {
+  const compact = (value || "").replace(/\s+/g, "");
+  if (!compact) return "";
+  const m = compact.match(REQ_ID_RE);
+  return m ? m[0].toUpperCase() : "";
+}
+
+function splitTitleAndReqId(title: string | null | undefined): { baseTitle: string; reqId: string } {
+  const value = (title || "").replace(/\s+/g, " ").trim();
+  if (!value) return { baseTitle: "", reqId: "" };
+
+  const parenTail = value.match(
+    new RegExp(`^(?<title>.*?)\\s*\\((?<req>${REQ_ID_TOKEN})\\)\\s*$`, "i"),
+  );
+  if (parenTail?.groups) {
+    return {
+      baseTitle: (parenTail.groups.title || "").replace(/\s+/g, " ").trim(),
+      reqId: normalizeReqId(parenTail.groups.req || ""),
+    };
+  }
+
+  const tail = value.match(
+    new RegExp(`^(?<title>.*?)(?:\\s*[-,:]\\s*|\\s+)(?<req>${REQ_ID_TOKEN})\\s*$`, "i"),
+  );
+  if (tail?.groups) {
+    return {
+      baseTitle: (tail.groups.title || "").replace(/\s+/g, " ").trim(),
+      reqId: normalizeReqId(tail.groups.req || ""),
+    };
+  }
+
+  const head = value.match(
+    new RegExp(`^(?<req>${REQ_ID_TOKEN})\\s*[-,:]\\s*(?<title>.+)$`, "i"),
+  );
+  if (head?.groups) {
+    return {
+      baseTitle: (head.groups.title || "").replace(/\s+/g, " ").trim(),
+      reqId: normalizeReqId(head.groups.req || ""),
+    };
+  }
+
+  return { baseTitle: value, reqId: "" };
+}
+
 export default function ReviewEmail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -261,11 +308,16 @@ export default function ReviewEmail() {
     if (!email || !labelFetched) return;
     if (labelInitializedRef.current) return;
 
-    // Try to find an EvalApplicationGroup that matches the predicted company+title
+    const splitPred = splitTitleAndReqId(email.predicted_job_title);
+    const predictedTitle = splitPred.baseTitle || (email.predicted_job_title || "");
+    const predictedReqId = normalizeReqId(email.predicted_req_id) || splitPred.reqId;
+
+    // Try to find an EvalApplicationGroup that matches the predicted company+title.
+    // Eval groups are title-scoped today; req_id is labeled separately.
     let guessedGroupId: number | undefined;
     if (email.predicted_company && groups.length > 0) {
       const predComp = email.predicted_company.toLowerCase().trim();
-      const predTitle = (email.predicted_job_title || "").toLowerCase().trim();
+      const predTitle = predictedTitle.toLowerCase().trim();
       const match = groups.find(
         g =>
           (g.company || "").toLowerCase().trim() === predComp &&
@@ -287,7 +339,8 @@ export default function ReviewEmail() {
       is_job_related: l?.is_job_related ?? (email.predicted_is_job_related ?? undefined),
       email_category: l?.email_category ?? predCategory ?? undefined,
       correct_company: l?.correct_company ?? (email.predicted_company ?? undefined),
-      correct_job_title: l?.correct_job_title ?? (email.predicted_job_title ?? undefined),
+      correct_job_title: l?.correct_job_title ?? (predictedTitle || undefined),
+      correct_req_id: l?.correct_req_id ?? (predictedReqId || undefined),
       correct_status: l?.correct_status ?? (email.predicted_status ?? undefined),
       correct_recruiter_name: l?.correct_recruiter_name ?? undefined,
       correct_date_applied: l?.correct_date_applied ?? undefined,
@@ -373,10 +426,12 @@ export default function ReviewEmail() {
   const groupDiffers = (pred: number | null | undefined, gt: number | null | undefined) => {
     if (gt === null || gt === undefined) return false;
     if (!email) return false;
+    const splitPred = splitTitleAndReqId(email.predicted_job_title);
+    const predictedTitle = splitPred.baseTitle || (email.predicted_job_title || "");
     const selectedGroup = groups.find(g => g.id === gt);
     if (!selectedGroup) return true; // GT group exists but hasn't loaded yet → treat as mismatch
     const predCompany = normalizeForCompare(email.predicted_company);
-    const predTitle = normalizeForCompare(email.predicted_job_title);
+    const predTitle = normalizeForCompare(predictedTitle);
     const gtCompany = normalizeForCompare(selectedGroup.company);
     const gtTitle = normalizeForCompare(selectedGroup.job_title);
     // If pred is null (no prediction), any labeled group is a mismatch
@@ -394,6 +449,9 @@ export default function ReviewEmail() {
   };
 
   if (!email) return <div className="p-8 text-gray-500">Loading...</div>;
+  const splitPred = splitTitleAndReqId(email.predicted_job_title);
+  const predictedTitle = splitPred.baseTitle || (email.predicted_job_title || "");
+  const predictedReqId = normalizeReqId(email.predicted_req_id) || splitPred.reqId;
 
   // Diff helpers
   const differs = (pred: string | null | undefined, gt: string | null | undefined) => {
@@ -430,7 +488,8 @@ export default function ReviewEmail() {
     if (boolDiffers(email.predicted_is_job_related, label.is_job_related)) discrepancies++;
   }
   if (label.correct_company) { totalFields++; if (differs(email.predicted_company, label.correct_company)) discrepancies++; }
-  if (label.correct_job_title) { totalFields++; if (differs(email.predicted_job_title, label.correct_job_title)) discrepancies++; }
+  if (label.correct_job_title) { totalFields++; if (differs(predictedTitle, label.correct_job_title)) discrepancies++; }
+  if (label.correct_req_id) { totalFields++; if (differs(predictedReqId, label.correct_req_id)) discrepancies++; }
   if (label.correct_status) { totalFields++; if (differs(email.predicted_status, label.correct_status)) discrepancies++; }
   if (label.correct_application_group_id != null) { totalFields++; if (groupDiffers(email.predicted_application_group, label.correct_application_group_id)) discrepancies++; }
 
@@ -575,9 +634,14 @@ export default function ReviewEmail() {
               <div className="text-sm font-medium">{email.predicted_company || "—"}</div>
             </div>
 
-            <div className={`p-2 rounded ${diffClass(email.predicted_job_title, label.correct_job_title)}`}>
+            <div className={`p-2 rounded ${diffClass(predictedTitle, label.correct_job_title)}`}>
               <span className="text-xs text-gray-500">Job Title</span>
-              <div className="text-sm font-medium">{email.predicted_job_title || "—"}</div>
+              <div className="text-sm font-medium">{predictedTitle || "—"}</div>
+            </div>
+
+            <div className={`p-2 rounded ${diffClass(predictedReqId, label.correct_req_id)}`}>
+              <span className="text-xs text-gray-500">Req ID</span>
+              <div className="text-sm font-medium">{predictedReqId || "—"}</div>
             </div>
 
             <div className={`p-2 rounded ${diffClass(email.predicted_status, label.correct_status)}`}>
@@ -684,6 +748,7 @@ export default function ReviewEmail() {
                             is_job_related: false,
                             correct_company: undefined,
                             correct_job_title: undefined,
+                            correct_req_id: undefined,
                             correct_status: undefined,
                             correct_recruiter_name: undefined,
                             correct_application_group_id: undefined,
@@ -742,6 +807,16 @@ export default function ReviewEmail() {
               <datalist id="title-options">
                 {options?.job_titles.map(t => <option key={t} value={t} />)}
               </datalist>
+            </div>
+
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Correct Req ID</label>
+              <input
+                value={label.correct_req_id || ""}
+                onChange={e => setLabel(p => ({ ...p, correct_req_id: e.target.value || undefined }))}
+                className="w-full border rounded px-3 py-2 text-sm"
+                placeholder="e.g. R0615432"
+              />
             </div>
 
             {/* Recruiter Name — only when status is recruiter outreach */}

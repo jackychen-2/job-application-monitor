@@ -12,7 +12,7 @@ from typing import Optional
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import distinct, func
+from sqlalchemy import distinct, func, or_
 from sqlalchemy.orm import Session
 
 from job_monitor.config import AppConfig, get_config, set_llm_enabled
@@ -186,7 +186,15 @@ def cache_list_emails(
 
     if review_status:
         if review_status == "unlabeled":
-            q = q.filter(EvalLabel.id == None)  # noqa: E711
+            # "unlabeled" can be represented either by missing label row (legacy)
+            # or an explicit run-scoped label row with review_status="unlabeled".
+            q = q.filter(
+                or_(
+                    EvalLabel.id.is_(None),
+                    EvalLabel.review_status.is_(None),
+                    EvalLabel.review_status == "unlabeled",
+                )
+            )
         else:
             q = q.filter(EvalLabel.review_status == review_status)
 

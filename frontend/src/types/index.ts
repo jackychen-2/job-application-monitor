@@ -4,6 +4,7 @@ export interface Application {
   id: number;
   company: string;
   job_title: string | null;
+  req_id: string | null;
   email_subject: string | null;
   email_sender: string | null;
   email_date: string | null;
@@ -61,6 +62,7 @@ export interface ApplicationListResponse {
 export interface ApplicationCreate {
   company: string;
   job_title?: string;
+  req_id?: string;
   status?: string;
   notes?: string;
   source?: string;
@@ -69,6 +71,7 @@ export interface ApplicationCreate {
 export interface ApplicationUpdate {
   company?: string;
   job_title?: string;
+  req_id?: string;
   status?: string;
   notes?: string;
 }

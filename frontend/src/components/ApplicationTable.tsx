@@ -28,7 +28,7 @@ function formatDate(dateStr: string | null): string {
   }
 }
 
-type EditField = { id: number; field: "status" | "job_title" | "company"; value: string };
+type EditField = { id: number; field: "status" | "job_title" | "req_id" | "company"; value: string };
 
 export default function ApplicationTable({ applications, loading, onRefresh }: Props) {
   const navigate = useNavigate();
@@ -117,7 +117,7 @@ export default function ApplicationTable({ applications, loading, onRefresh }: P
 
   const renderEditableCell = (
     app: Application,
-    field: "job_title" | "company",
+    field: "job_title" | "req_id" | "company",
     displayValue: string,
     placeholder: string
   ) => {
@@ -139,11 +139,17 @@ export default function ApplicationTable({ applications, loading, onRefresh }: P
     }
 
     return (
-      <span
-        onClick={(e) => {
-          e.stopPropagation();
-          startEdit(app.id, field, (field === "job_title" ? app.job_title : app.company) || "");
-        }}
+        <span
+          onClick={(e) => {
+            e.stopPropagation();
+            const current =
+              field === "job_title"
+                ? app.job_title
+                : field === "req_id"
+                  ? app.req_id
+                  : app.company;
+            startEdit(app.id, field, current || "");
+          }}
         className="cursor-pointer hover:bg-indigo-50 hover:text-indigo-700 px-1 py-0.5 rounded transition-colors"
         title="Click to edit"
       >
@@ -164,6 +170,9 @@ export default function ApplicationTable({ applications, loading, onRefresh }: P
               </th>
               <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 Job Title
+              </th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Req ID
               </th>
               <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 Status
@@ -214,6 +223,9 @@ export default function ApplicationTable({ applications, loading, onRefresh }: P
                     <td className="px-4 py-3 text-sm text-gray-600 max-w-[200px]" onClick={(e) => e.stopPropagation()}>
                       {renderEditableCell(app, "job_title", app.job_title || "", "Enter job title")}
                     </td>
+                    <td className="px-4 py-3 text-sm text-gray-600 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                      {renderEditableCell(app, "req_id", app.req_id || "", "Enter req ID")}
+                    </td>
                     <td className="px-4 py-3 text-sm" onClick={(e) => e.stopPropagation()}>
                       {editing?.id === app.id && editing?.field === "status" ? (
                         <div className="flex items-center gap-1">
@@ -257,7 +269,7 @@ export default function ApplicationTable({ applications, loading, onRefresh }: P
                   {/* Expanded email chain row */}
                   {isExpanded && (
                     <tr key={`${app.id}-expanded`} className="bg-indigo-50/50">
-                      <td colSpan={7} className="px-4 py-3">
+                      <td colSpan={8} className="px-4 py-3">
                         <div className="ml-6 border-l-2 border-indigo-300 pl-4">
                           <div className="text-xs font-medium text-indigo-700 mb-2">
                             📧 Application Timeline ({emails.length} emails)

@@ -113,12 +113,12 @@ def extract_company(subject: str, sender: str) -> str:
 
 # ── Job title extraction ──────────────────────────────────
 
-_REQ_ID_TOKEN = r"(?:R-?\d{5,}|JR\d{5,}|\d{5,8})"
+_REQ_ID_TOKEN = r"(?:R-?\d{5,}|JR\d{5,}|\d{4}-\d{3,6}|\d{5,8})"
 _REQ_ID_RE = re.compile(rf"\b{_REQ_ID_TOKEN}\b", re.IGNORECASE)
 
 
 def normalize_req_id(value: str) -> str:
-    """Normalize requisition IDs like r0612345 / jr123456 to uppercase."""
+    """Normalize requisition IDs like r0612345 / jr123456 / 2025-4844 to uppercase."""
     compact = re.sub(r"\s+", "", value or "")
     if not compact:
         return ""
@@ -133,6 +133,14 @@ def split_title_and_req_id(title: str) -> tuple[str, str]:
     value = _normalize_space(title or "")
     if not value:
         return "", ""
+
+    paren_tail = re.search(
+        rf"^(?P<title>.*?)\s*\((?P<req>{_REQ_ID_TOKEN})\)\s*$",
+        value,
+        re.IGNORECASE,
+    )
+    if paren_tail:
+        return _normalize_space(paren_tail.group("title")), normalize_req_id(paren_tail.group("req"))
 
     tail = re.search(
         rf"^(?P<title>.*?)(?:\s*[-,:]\s*|\s+)(?P<req>{_REQ_ID_TOKEN})\s*$",

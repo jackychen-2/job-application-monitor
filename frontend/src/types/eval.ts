@@ -20,6 +20,7 @@ export interface CachedEmailDetail extends CachedEmail {
   predicted_email_category: string | null; // "job_application" | "not_job_related"
   predicted_company: string | null;
   predicted_job_title: string | null;
+  predicted_req_id: string | null;
   predicted_status: string | null;
   predicted_application_group: number | null;
   predicted_application_group_display: string | null;
@@ -87,6 +88,11 @@ export const CORRECTION_ERROR_TYPES: Record<string, ErrorTypeOption[]> = {
     { key: "no_title_signal",          label: "No explicit title in email",    desc: "Email never states the job title explicitly" },
     { key: "wrong_pattern_phase",      label: "Wrong extraction phase",        desc: "Title came from a pattern/phase that was not the best match" },
   ],
+  req_id: [
+    { key: "missing_req_id",           label: "Missing requisition ID",        desc: "Email has an ID but extraction missed it" },
+    { key: "wrong_req_id",             label: "Wrong requisition ID",          desc: "Extracted requisition ID does not match email evidence" },
+    { key: "no_req_id_signal",         label: "No requisition ID signal",      desc: "Email does not include a clear requisition ID" },
+  ],
   status: [
     { key: "soft_rejection_missed",    label: "Soft rejection not detected",   desc: "Polite 'keep your resume on file' was not caught" },
     { key: "on_hold_not_rejection",    label: "'On hold' = effective rejection", desc: "Position on hold; pipeline did not treat it as rejection" },
@@ -111,7 +117,7 @@ export const CORRECTION_ERROR_TYPES: Record<string, ErrorTypeOption[]> = {
 };
 
 // All field categories that can bear a correction
-export type CorrectionField = "company" | "job_title" | "status" | "classification" | "application_group";
+export type CorrectionField = "company" | "job_title" | "req_id" | "status" | "classification" | "application_group";
 
 export interface CorrectionEntry {
   field: string;
@@ -194,6 +200,7 @@ export interface EvalLabel {
   email_category: string | null; // "job_application" | "not_job_related"
   correct_company: string | null;
   correct_job_title: string | null;
+  correct_req_id: string | null;
   correct_status: string | null;
   correct_recruiter_name: string | null;
   correct_date_applied: string | null;
@@ -211,6 +218,7 @@ export interface EvalLabelInput {
   email_category?: string | null; // "job_application" | "not_job_related"
   correct_company?: string | null;
   correct_job_title?: string | null;
+  correct_req_id?: string | null;
   correct_status?: string | null;
   correct_recruiter_name?: string | null;
   correct_date_applied?: string | null;
@@ -285,6 +293,7 @@ export interface EvalRunResult {
   predicted_email_category: string | null;
   predicted_company: string | null;
   predicted_job_title: string | null;
+  predicted_req_id: string | null;
   predicted_status: string | null;
   predicted_application_group_id: number | null;
   predicted_group: EvalPredictedGroup | null;
@@ -293,6 +302,7 @@ export interface EvalRunResult {
   company_correct: boolean | null;
   company_partial: boolean | null;
   job_title_correct: boolean | null;
+  req_id_correct: boolean | null;
   status_correct: boolean | null;
   grouping_correct: boolean | null;
   llm_used: boolean;
@@ -305,6 +315,7 @@ export interface EvalRunResult {
   label_is_job_related: boolean | null;
   label_company: string | null;
   label_job_title: string | null;
+  label_req_id: string | null;
   label_status: string | null;
   label_review_status: string | null;
 }
@@ -317,6 +328,7 @@ export interface EvalReport {
   };
   field_company: FieldMetrics;
   field_job_title: FieldMetrics;
+  field_req_id: FieldMetrics;
   field_status: {
     confusion_matrix: Record<string, Record<string, number>>;
     per_class: Record<string, { precision: number; recall: number; f1: number; support: number }>;

@@ -92,6 +92,11 @@ class LLMProvider(Protocol):
         app_job_title: str,
         app_status: str,
         app_last_email_subject: str,
+        new_email_date: str = "",
+        app_created_at: str = "",
+        app_last_email_date: str = "",
+        days_since_last_email: int | None = None,
+        recent_events: list[dict[str, str]] | None = None,
     ) -> LLMLinkConfirmResult: ...
 
 
@@ -164,7 +169,7 @@ class OpenAIProvider:
         "  * Keep full specialization suffixes; do NOT shorten 'A - B' to 'A'.\n"
         "  * If subject is generic but body title is specific, always choose body title.\n"
         "- base_title: title without requisition ID (e.g. 'Data Engineer').\n"
-        "- req_id: requisition ID if present (e.g. 'R0615432', 'JR299365', '1841261').\n"
+        "- req_id: requisition ID if present (e.g. 'R0615432', 'JR299365', '1841261', '2025-4844').\n"
         "- title_with_req_id: combine base_title + req_id when req_id exists "
         "(e.g. 'Data Engineer - R0615432'). If no req_id, this equals base_title.\n"
         "- status: infer from BOTH email subject AND body. Must be one of:\n"
@@ -275,6 +280,10 @@ class OpenAIProvider:
         "(e.g., application confirmation followed by interview invite for the same role).\n"
         "DIFFERENT means: different position, different application cycle, "
         "or the email is unrelated to this specific application.\n\n"
+        "Use timeline signals to judge application cycle continuity. "
+        "If timeline suggests a new cycle (e.g., rejection followed by a fresh application later), "
+        "prefer DIFFERENT.\n"
+        "If requisition IDs are explicitly provided and equal, treat that as the strongest SAME signal.\n\n"
         "Answer ONLY with the word \"same\" or \"different\"."
     )
 
@@ -287,10 +296,24 @@ class OpenAIProvider:
         app_job_title: str,
         app_status: str,
         app_last_email_subject: str,
+        new_email_date: str = "",
+        app_created_at: str = "",
+        app_last_email_date: str = "",
+        days_since_last_email: int | None = None,
+        recent_events: list[dict[str, str]] | None = None,
     ) -> LLMLinkConfirmResult:
         """Ask LLM whether a new email belongs to an existing application."""
         cfg = self._config
         body_snippet = (email_body or "")[:2000]
+        _recent = recent_events or []
+        recent_lines: list[str] = []
+        for idx, event in enumerate(_recent[:5], start=1):
+            edate = _normalize_llm_text(event.get("date", "")) or "(unknown)"
+            estat = _normalize_llm_text(event.get("status", "")) or "(none)"
+            esubj = _normalize_llm_text(event.get("subject", "")) or "(none)"
+            recent_lines.append(f"{idx}. {edate} | status={estat} | subject=\"{esubj[:140]}\"")
+        recent_events_block = "\n".join(recent_lines) if recent_lines else "(none)"
+        days_label = str(days_since_last_email) if days_since_last_email is not None else "(unknown)"
 
         user_prompt = (
             f"Existing Application:\n"
@@ -298,6 +321,12 @@ class OpenAIProvider:
             f"- Job Title: {app_job_title or '(unknown)'}\n"
             f"- Current Status: {app_status}\n"
             f"- Last Email Subject: \"{app_last_email_subject or '(none)'}\"\n\n"
+            f"Timeline Summary:\n"
+            f"- New Email Date: {new_email_date or '(unknown)'}\n"
+            f"- Application Created At: {app_created_at or '(unknown)'}\n"
+            f"- Application Last Email Date: {app_last_email_date or '(unknown)'}\n"
+            f"- Days Since Last Email: {days_label}\n"
+            f"- Recent Events (latest first):\n{recent_events_block}\n\n"
             f"New Email:\n"
             f"- Subject: \"{email_subject}\"\n"
             f"- From: {email_sender}\n"

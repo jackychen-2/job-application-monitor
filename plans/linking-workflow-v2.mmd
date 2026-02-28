@@ -1,0 +1,50 @@
+flowchart TD
+    A["Incoming email"] --> XE{"LLM enabled for extraction?"}
+    XE -- yes --> B1["Stage 1A (LLM): classify + extract<br/>timeout/failure -> rules fallback"]
+    XE -- no --> B2["Stage 1B (Rules): classify + extract"]
+    B1 --> B["Extraction output<br/>company/title/req_id/status/date"]
+    B2 --> B
+    B --> C{"company normalized?<br/>normalize_company(company) non-empty"}
+    C -- no --> N["Create new application group"]
+    C -- yes --> D["Load same-company candidates"]
+    D --> D1{"same-company candidates found?"}
+    D1 -- no --> N
+    D1 -- yes --> E
+
+    E{"Rule 0: incoming req_id exists?"}
+
+    E -- yes --> F{"Any candidate req_id == incoming req_id<br/>AND title exact match?"}
+    F -- yes --> G["Direct link to matched application<br/>link_method=company_req_id<br/>No LLM confirm (company+req_id+title)"]
+    F -- no --> H["Build base candidate pool<br/>if req match but title mismatch -> keep req-matched pool<br/>else keep legacy no-req candidates"]
+    E -- no --> H["Build base candidate pool<br/>no req_id -> keep all same-company candidates"]
+    H --> I{"title available and similar matches exist?"}
+    I -- yes --> J["Prioritize title-matched subset"]
+    I -- no --> K["Use base candidate pool"]
+
+    J --> P["Candidate pool after Rule 0 + title fallback"]
+    K --> P
+
+    P --> Q["Apply Rule 1 filter<br/>new status=已申请 and old in progressed"]
+    Q --> R{"candidate pool empty?"}
+    R -- no --> S1["Use filtered same-company pool"]
+    R -- yes --> X0{"LLM enabled?"}
+    X0 -- no --> N
+    X0 -- yes --> V["Build fuzzy-company rescue pool (top-N)"]
+    V --> W{"rescue pool empty?"}
+    W -- yes --> N
+    W -- no --> S2["Use fuzzy rescue pool"]
+
+    S1 --> X{"LLM enabled?"}
+    S2 --> X
+    X -- no --> N
+    X -- yes --> S["For each candidate:<br/>LLM confirm_same_application with timeline"]
+    S --> T{"any same?"}
+    T -- yes --> U["Link to confirmed application<br/>link_method=company / company_fuzzy"]
+    T -- no --> N
+
+    G --> AA["Persist email + update status history"]
+    U --> AA
+    N --> AA
+
+    classDef llm fill:#FFF4CC,stroke:#D9A300,stroke-width:2px,color:#5A4300;
+    class XE,B1,V,W,S2,X0,X,S,T,U llm;

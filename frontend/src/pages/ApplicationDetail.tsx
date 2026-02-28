@@ -124,6 +124,7 @@ export default function ApplicationDetail() {
           <div>
             <h1 className="text-xl font-bold text-gray-900">{app.company}</h1>
             <p className="text-gray-600 mt-1">{app.job_title || "No job title"}</p>
+            <p className="text-gray-500 text-sm mt-0.5">Req ID: {app.req_id || "—"}</p>
           </div>
           <div className="flex items-center gap-3">
             {editingStatus ? (

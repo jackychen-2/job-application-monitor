@@ -34,12 +34,12 @@ from job_monitor.extraction.llm import (
     extract_with_timeout,
 )
 from job_monitor.extraction.rules import (
-    compose_title_with_req_id,
     extract_company,
     extract_job_req_id,
     extract_job_title,
     extract_status,
     normalize_req_id,
+    split_title_and_req_id,
 )
 
 logger = structlog.get_logger(__name__)
@@ -140,7 +140,6 @@ def run_evaluation(
         titles_similar as _prod_titles_similar,
         _PROGRESSED_STATUSES as _PROD_PROGRESSED,
     )
-    _MAX_SAME_CYCLE_DAYS = 3
     _FUZZY_THRESHOLD = 0.75
 
     app_group_info: dict[int, dict] = {}  # group_id → metadata
@@ -261,12 +260,15 @@ def run_evaluation(
             dstep("status",  "═══ Stage 3: Status ═══")
             if llm_result is not None:
                 pred_company = (llm_result.company or "").strip() or "Unknown"
-                base_title = _validate_job_title(llm_result.base_title or llm_result.job_title)
-                pred_req_id = normalize_req_id(llm_result.req_id)
-                pred_title = (
-                    _validate_job_title(llm_result.title_with_req_id)
-                    or base_title
-                )
+                raw_title = _validate_job_title(llm_result.base_title or llm_result.job_title)
+                base_title, req_from_title = split_title_and_req_id(raw_title)
+                pred_req_id = normalize_req_id(llm_result.req_id) or normalize_req_id(req_from_title)
+                if not base_title:
+                    llm_title_with_req = _validate_job_title(llm_result.title_with_req_id)
+                    base_title, req_from_title_with_req = split_title_and_req_id(llm_title_with_req)
+                    if not pred_req_id:
+                        pred_req_id = normalize_req_id(req_from_title_with_req)
+                pred_title = base_title
                 if is_recruiter_reach_out:
                     pred_status = "Recruiter Reach-out"
                     dstep("status", "LLM status recruiter reach-out -> Recruiter Reach-out", "success")
@@ -293,12 +295,10 @@ def run_evaluation(
                       "success" if pred_req_id else "warn")
             else:
                 pred_company = extract_company(subject, sender)
-                base_title = _validate_job_title(extract_job_title(subject, body))
-                pred_req_id = extract_job_req_id(subject, body, base_title)
-                pred_title = (
-                    _validate_job_title(compose_title_with_req_id(base_title, pred_req_id))
-                    or base_title
-                )
+                raw_title = _validate_job_title(extract_job_title(subject, body))
+                base_title, req_from_title = split_title_and_req_id(raw_title)
+                pred_req_id = normalize_req_id(extract_job_req_id(subject, body, base_title) or req_from_title)
+                pred_title = base_title
                 pred_status = extract_status(subject, body)
                 pred_confidence = None
                 dstep("company", f"Rules: {pred_company!r}", "success" if pred_company and pred_company != "Unknown" else "warn")
@@ -337,22 +337,7 @@ def run_evaluation(
                     if before != len(candidates):
                         dstep("grouping", f"Rule A (title filter): {before - len(candidates)} removed, {len(candidates)} remain", "info")
 
-                # Rule B: Time gap — two "已申请" emails > 3 days apart = new cycle
-                email_dt = cached.email_date
-                if pred_status == "已申请" and email_dt and candidates:
-                    before = len(candidates)
-                    def _within_window(gid: int) -> bool:
-                        prev = app_group_info[gid].get("latest_email_date")
-                        if not prev:
-                            return True
-                        ed = email_dt.replace(tzinfo=None) if email_dt.tzinfo else email_dt
-                        pd_ = prev.replace(tzinfo=None) if prev.tzinfo else prev
-                        return abs((ed - pd_).days) <= _MAX_SAME_CYCLE_DAYS
-                    candidates = [gid for gid in candidates if _within_window(gid)]
-                    if before != len(candidates):
-                        dstep("grouping", f"Rule B (time gap): {before - len(candidates)} removed, {len(candidates)} remain", "info")
-
-                # Rule C: Re-application after rejection/interview
+                # Rule B: Re-application after rejection/interview
                 if pred_status == "已申请" and candidates:
                     before = len(candidates)
                     candidates = [
@@ -360,7 +345,7 @@ def run_evaluation(
                         if app_group_info[gid].get("status") not in _PROD_PROGRESSED
                     ]
                     if before != len(candidates):
-                        dstep("grouping", f"Rule C (re-application): {before - len(candidates)} removed, {len(candidates)} remain", "info")
+                        dstep("grouping", f"Rule B (re-application): {before - len(candidates)} removed, {len(candidates)} remain", "info")
 
                 if candidates:
                     pred_group_id = candidates[0]
@@ -378,6 +363,7 @@ def run_evaluation(
                         app_group_info[pred_group_id]["status"] = pred_status
                     if cached.email_date:
                         app_group_info[pred_group_id]["latest_email_date"] = cached.email_date
+                    app_group_info[pred_group_id]["latest_email_subject"] = subject
                 else:
                     # No surviving candidate — try fuzzy rescue before creating new group
                     fuzzy_rescued = False
@@ -397,6 +383,13 @@ def run_evaluation(
                                   "info")
                             for gid in fuzzy_matches[:3]:
                                 try:
+                                    candidate_last_dt = app_group_info[gid].get("latest_email_date")
+                                    if cached.email_date and candidate_last_dt:
+                                        cur_dt = cached.email_date.replace(tzinfo=None) if cached.email_date.tzinfo else cached.email_date
+                                        prev_dt = candidate_last_dt.replace(tzinfo=None) if candidate_last_dt.tzinfo else candidate_last_dt
+                                        days_since_last = abs((cur_dt - prev_dt).days)
+                                    else:
+                                        days_since_last = None
                                     confirm = llm_provider.confirm_same_application(
                                         email_subject=subject,
                                         email_sender=sender,
@@ -405,6 +398,17 @@ def run_evaluation(
                                         app_job_title=app_group_info[gid].get("job_title") or "",
                                         app_status=app_group_info[gid].get("status") or "",
                                         app_last_email_subject="",
+                                        new_email_date=cached.email_date.isoformat(sep=" ", timespec="seconds") if cached.email_date else "",
+                                        app_created_at="",
+                                        app_last_email_date=candidate_last_dt.isoformat(sep=" ", timespec="seconds") if candidate_last_dt else "",
+                                        days_since_last_email=days_since_last,
+                                        recent_events=[
+                                            {
+                                                "date": candidate_last_dt.isoformat(sep=" ", timespec="seconds") if candidate_last_dt else "",
+                                                "status": app_group_info[gid].get("status", "") or "",
+                                                "subject": app_group_info[gid].get("latest_email_subject", "") or "",
+                                            }
+                                        ],
                                     )
                                     if confirm.is_same_application:
                                         pred_group_id = gid
@@ -421,6 +425,7 @@ def run_evaluation(
                                             app_group_info[gid]["status"] = pred_status
                                         if cached.email_date:
                                             app_group_info[gid]["latest_email_date"] = cached.email_date
+                                        app_group_info[gid]["latest_email_subject"] = subject
                                         fuzzy_rescued = True
                                         break
                                     else:
@@ -461,6 +466,7 @@ def run_evaluation(
                             "job_title":    pred_title,
                             "status":       pred_status,
                             "latest_email_date": cached.email_date,
+                            "latest_email_subject": subject,
                         }
             else:
                 dstep("grouping", "Skipped (company normalization returned empty)", "warn")
