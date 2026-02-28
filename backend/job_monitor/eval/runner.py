@@ -131,16 +131,13 @@ def run_evaluation(
     results: list[EvalRunResult] = []
 
     # ── Grouping state — mirrors production Application table ─────────────
-    # app_group_info: group_id → {company_norm, job_title, status, latest_email_date}
-    # Replaces the old (company_stripped, title_norm) dedup dict so Stage 4
-    # uses the exact same Rules A/B/C as resolve_by_company() in production.
-    from difflib import SequenceMatcher as _SM
+    # app_group_info: group_id → {company_norm, company_orig, job_title, req_id, status, latest_email_date}
+    # Stage 4 calls the same shared company-linking core used by production resolver.
     from job_monitor.linking.resolver import (
+        CompanyLinkCandidate as _CompanyLinkCandidate,
         normalize_company as _prod_normalize_company,
-        titles_similar as _prod_titles_similar,
-        _PROGRESSED_STATUSES as _PROD_PROGRESSED,
+        resolve_by_company_candidates as _resolve_company_link_shared,
     )
-    _FUZZY_THRESHOLD = 0.75
 
     app_group_info: dict[int, dict] = {}  # group_id → metadata
     total = len(cached_emails)
@@ -307,12 +304,7 @@ def run_evaluation(
                 dstep("status",  f"Rules: {pred_status!r}", "success")
 
         # Stage 4: Grouping
-        # Logic:
-        #  • "Applied" emails → create/join group by (company_norm_stripped, title_norm)
-        #  • Follow-up emails (interview/offer/rejection) → first try to find an
-        #    existing upstream group; only create a new one if nothing matches.
-        #  • Company normalization strips legal/descriptive suffixes so that
-        #    "Zoom", "Zoom Communications", "Your Zoom" all map to the same key.
+        # Uses the shared production company-link resolver core.
         dstep("grouping", "═══ Stage 4: Grouping ═══")
         pred_group_id = None
         if pred_is_job and pred_company:
@@ -320,154 +312,121 @@ def run_evaluation(
             dstep("grouping", f"Normalized company: {company_norm_prod!r}  (raw: {pred_company!r})")
 
             if company_norm_prod:
-                # ── Candidate search (same as production resolve_by_company) ──
-                candidates: list[int] = [
-                    gid for gid, info in app_group_info.items()
-                    if info["company_norm"] == company_norm_prod
+                same_company_count = sum(
+                    1 for info in app_group_info.values()
+                    if info.get("company_norm") == company_norm_prod
+                )
+                dstep("grouping", f"{same_company_count} candidate group(s) with same company norm")
+
+                group_candidates = [
+                    _CompanyLinkCandidate(
+                        id=gid,
+                        company=info.get("company_orig") or "",
+                        normalized_company=info.get("company_norm"),
+                        job_title=info.get("job_title"),
+                        req_id=info.get("req_id"),
+                        status=info.get("status"),
+                        last_email_subject=info.get("latest_email_subject"),
+                    )
+                    for gid, info in app_group_info.items()
                 ]
-                dstep("grouping", f"{len(candidates)} candidate group(s) with same company norm")
 
-                # Rule A: Title similarity (Jaccard ≥ 0.9, production threshold)
-                if pred_title and candidates:
-                    before = len(candidates)
-                    candidates = [
-                        gid for gid in candidates
-                        if _prod_titles_similar(pred_title, app_group_info[gid]["job_title"])
-                    ]
-                    if before != len(candidates):
-                        dstep("grouping", f"Rule A (title filter): {before - len(candidates)} removed, {len(candidates)} remain", "info")
+                def _fmt_dt(dt: datetime | None) -> str:
+                    if not dt:
+                        return ""
+                    return dt.isoformat(sep=" ", timespec="seconds")
 
-                # Rule B: Re-application after rejection/interview
-                if pred_status == "已申请" and candidates:
-                    before = len(candidates)
-                    candidates = [
-                        gid for gid in candidates
-                        if app_group_info[gid].get("status") not in _PROD_PROGRESSED
-                    ]
-                    if before != len(candidates):
-                        dstep("grouping", f"Rule B (re-application): {before - len(candidates)} removed, {len(candidates)} remain", "info")
+                def _timeline_provider(candidate: _CompanyLinkCandidate) -> dict:
+                    info = app_group_info.get(candidate.id, {})
+                    candidate_last_dt = info.get("latest_email_date")
+                    if cached.email_date and candidate_last_dt:
+                        cur_dt = cached.email_date.replace(tzinfo=None) if cached.email_date.tzinfo else cached.email_date
+                        prev_dt = candidate_last_dt.replace(tzinfo=None) if candidate_last_dt.tzinfo else candidate_last_dt
+                        days_since_last = abs((cur_dt - prev_dt).days)
+                    else:
+                        days_since_last = None
+                    return {
+                        "new_email_date": _fmt_dt(cached.email_date),
+                        "app_created_at": "",
+                        "app_last_email_date": _fmt_dt(candidate_last_dt),
+                        "days_since_last_email": days_since_last,
+                        "recent_events": [
+                            {
+                                "date": _fmt_dt(candidate_last_dt),
+                                "status": info.get("status", "") or "",
+                                "subject": info.get("latest_email_subject", "") or "",
+                            }
+                        ],
+                    }
 
-                if candidates:
-                    pred_group_id = candidates[0]
-                    # Use the group's canonical company/title as the prediction.
-                    # The follow-up email may have extracted a slightly different name
-                    # ("Your Zoom" vs "Zoom Communications") — the prediction should
-                    # always reflect the group's established canonical name.
+                shared_result = _resolve_company_link_shared(
+                    company=pred_company,
+                    candidates=group_candidates,
+                    extracted_status=pred_status,
+                    job_title=pred_title,
+                    req_id=pred_req_id,
+                    llm_provider=llm_provider,
+                    email_subject=subject,
+                    email_sender=sender,
+                    email_body=body,
+                    timeline_provider=_timeline_provider,
+                )
+
+                if shared_result.is_linked and shared_result.application_id in app_group_info:
+                    pred_group_id = shared_result.application_id
                     pred_company = app_group_info[pred_group_id].get("company_orig", pred_company)
-                    pred_title   = app_group_info[pred_group_id].get("job_title",    pred_title)
-                    dstep("grouping",
-                          f"Linked to existing group #{pred_group_id} "
-                          f"(canonical: {pred_company!r} / {pred_title!r})", "success")
-                    # Update group state so subsequent emails see the latest status/date
+                    pred_title = app_group_info[pred_group_id].get("job_title", pred_title)
+                    dstep(
+                        "grouping",
+                        f"Linked to existing group #{pred_group_id} via {shared_result.link_method} "
+                        f"(canonical: {pred_company!r} / {pred_title!r})",
+                        "success",
+                    )
+
+                    # Keep eval state aligned with production row update behavior.
+                    if pred_company:
+                        app_group_info[pred_group_id]["company_orig"] = pred_company
+                    if pred_title:
+                        app_group_info[pred_group_id]["job_title"] = pred_title
+                    if pred_req_id:
+                        app_group_info[pred_group_id]["req_id"] = pred_req_id
                     if pred_status:
                         app_group_info[pred_group_id]["status"] = pred_status
                     if cached.email_date:
                         app_group_info[pred_group_id]["latest_email_date"] = cached.email_date
                     app_group_info[pred_group_id]["latest_email_subject"] = subject
                 else:
-                    # No surviving candidate — try fuzzy rescue before creating new group
-                    fuzzy_rescued = False
-                    if llm_provider is not None and company_norm_prod:
-                        # Find groups with similar company norms (fuzzy match).
-                        # Includes exact company-norm matches too — they may have been
-                        # eliminated by Rule A (title mismatch) without LLM confirmation,
-                        # so the LLM should still get a chance to decide.
-                        fuzzy_matches = [
-                            gid for gid, info in app_group_info.items()
-                            if info["company_norm"]
-                            and _SM(None, company_norm_prod, info["company_norm"]).ratio() >= _FUZZY_THRESHOLD
-                        ]
-                        if fuzzy_matches:
-                            dstep("grouping",
-                                  f"Fuzzy rescue: {len(fuzzy_matches)} candidate(s) with similar company norm",
-                                  "info")
-                            for gid in fuzzy_matches[:3]:
-                                try:
-                                    candidate_last_dt = app_group_info[gid].get("latest_email_date")
-                                    if cached.email_date and candidate_last_dt:
-                                        cur_dt = cached.email_date.replace(tzinfo=None) if cached.email_date.tzinfo else cached.email_date
-                                        prev_dt = candidate_last_dt.replace(tzinfo=None) if candidate_last_dt.tzinfo else candidate_last_dt
-                                        days_since_last = abs((cur_dt - prev_dt).days)
-                                    else:
-                                        days_since_last = None
-                                    confirm = llm_provider.confirm_same_application(
-                                        email_subject=subject,
-                                        email_sender=sender,
-                                        email_body=body,
-                                        app_company=app_group_info[gid].get("company_orig", ""),
-                                        app_job_title=app_group_info[gid].get("job_title") or "",
-                                        app_status=app_group_info[gid].get("status") or "",
-                                        app_last_email_subject="",
-                                        new_email_date=cached.email_date.isoformat(sep=" ", timespec="seconds") if cached.email_date else "",
-                                        app_created_at="",
-                                        app_last_email_date=candidate_last_dt.isoformat(sep=" ", timespec="seconds") if candidate_last_dt else "",
-                                        days_since_last_email=days_since_last,
-                                        recent_events=[
-                                            {
-                                                "date": candidate_last_dt.isoformat(sep=" ", timespec="seconds") if candidate_last_dt else "",
-                                                "status": app_group_info[gid].get("status", "") or "",
-                                                "subject": app_group_info[gid].get("latest_email_subject", "") or "",
-                                            }
-                                        ],
-                                    )
-                                    if confirm.is_same_application:
-                                        pred_group_id = gid
-                                        pred_company = app_group_info[gid].get("company_orig", pred_company)
-                                        pred_title   = app_group_info[gid].get("job_title",    pred_title)
-                                        dstep("grouping",
-                                              f"Fuzzy rescue linked to group #{gid} "
-                                              f"(canonical: {pred_company!r} / {pred_title!r})",
-                                              "success")
-                                        eval_run.total_prompt_tokens += confirm.prompt_tokens
-                                        eval_run.total_completion_tokens += confirm.completion_tokens
-                                        eval_run.total_estimated_cost += confirm.estimated_cost_usd
-                                        if pred_status:
-                                            app_group_info[gid]["status"] = pred_status
-                                        if cached.email_date:
-                                            app_group_info[gid]["latest_email_date"] = cached.email_date
-                                        app_group_info[gid]["latest_email_subject"] = subject
-                                        fuzzy_rescued = True
-                                        break
-                                    else:
-                                        dstep("grouping",
-                                              f"Fuzzy rescue LLM rejected group #{gid}", "info")
-                                except Exception as exc:
-                                    dstep("grouping",
-                                          f"Fuzzy rescue LLM error for group #{gid}: {exc}", "warn")
-
-                    if not fuzzy_rescued:
-                        # Create new group — guard against duplicate (company_norm, job_title_norm)
-                        # which can happen when two emails extract slightly different titles that
-                        # both normalize to the same key but fail Rule A against each other.
-                        title_norm_for_key = (pred_title or "").strip().lower()
-                        existing_group = session.query(EvalPredictedGroup).filter(
-                            EvalPredictedGroup.eval_run_id == eval_run.id,
-                            EvalPredictedGroup.company_norm == company_norm_prod,
-                            EvalPredictedGroup.job_title_norm == title_norm_for_key,
-                        ).first()
-                        if existing_group:
-                            pred_group_id = existing_group.id
-                            dstep("grouping", f"Reused existing group #{pred_group_id} (same norm key)", "info")
-                        else:
-                            pred_group = EvalPredictedGroup(
-                                eval_run_id=eval_run.id,
-                                company=pred_company,
-                                job_title=pred_title,
-                                company_norm=company_norm_prod,
-                                job_title_norm=title_norm_for_key,
-                            )
-                            session.add(pred_group)
-                            session.flush()
-                            pred_group_id = pred_group.id
-                            dstep("grouping", f"New predicted group #{pred_group_id}", "info")
-                        app_group_info[pred_group_id] = {
-                            "company_norm": company_norm_prod,
-                            "company_orig": pred_company,   # canonical name from first email
-                            "job_title":    pred_title,
-                            "status":       pred_status,
-                            "latest_email_date": cached.email_date,
-                            "latest_email_subject": subject,
-                        }
+                    # Shared resolver declined linking — create/reuse an eval predicted group.
+                    title_norm_for_key = (pred_title or "").strip().lower()
+                    existing_group = session.query(EvalPredictedGroup).filter(
+                        EvalPredictedGroup.eval_run_id == eval_run.id,
+                        EvalPredictedGroup.company_norm == company_norm_prod,
+                        EvalPredictedGroup.job_title_norm == title_norm_for_key,
+                    ).first()
+                    if existing_group:
+                        pred_group_id = existing_group.id
+                        dstep("grouping", f"Reused existing group #{pred_group_id} (same norm key)", "info")
+                    else:
+                        pred_group = EvalPredictedGroup(
+                            eval_run_id=eval_run.id,
+                            company=pred_company,
+                            job_title=pred_title,
+                            company_norm=company_norm_prod,
+                            job_title_norm=title_norm_for_key,
+                        )
+                        session.add(pred_group)
+                        session.flush()
+                        pred_group_id = pred_group.id
+                        dstep("grouping", f"New predicted group #{pred_group_id}", "info")
+                    app_group_info[pred_group_id] = {
+                        "company_norm": company_norm_prod,
+                        "company_orig": pred_company,
+                        "job_title": pred_title,
+                        "req_id": pred_req_id,
+                        "status": pred_status,
+                        "latest_email_date": cached.email_date,
+                        "latest_email_subject": subject,
+                    }
             else:
                 dstep("grouping", "Skipped (company normalization returned empty)", "warn")
         else:
