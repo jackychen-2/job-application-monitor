@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
+import { format } from "date-fns";
+import { DayPicker } from "react-day-picker";
+import type { DateRange } from "react-day-picker";
+import "react-day-picker/style.css";
 import {
   getCacheStats,
   listEvalRuns,
@@ -24,9 +28,10 @@ export default function EvalDashboard() {
   const [downloading, setDownloading] = useState(false);
   const [downloadResult, setDownloadResult] = useState<CacheDownloadResult | null>(null);
   const [runningEval, setRunningEval] = useState(false);
-  const [sinceDate, setSinceDate] = useState("");
-  const [beforeDate, setBeforeDate] = useState("");
-  const [maxCount, setMaxCount] = useState(500);
+  const [maxCount, setMaxCount] = useState<string>("500");
+  const [downloadDateRange, setDownloadDateRange] = useState<DateRange | undefined>(undefined);
+  const [showDownloadCalendar, setShowDownloadCalendar] = useState(false);
+  const downloadCalendarRef = useRef<HTMLDivElement>(null);
 
   // Eval run options
   const [maxEmails, setMaxEmails] = useState<number>(0); // 0 = all
@@ -72,6 +77,17 @@ export default function EvalDashboard() {
     return () => { esRef.current?.close(); };
   }, []);
 
+  // Close download calendar when clicking outside
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (downloadCalendarRef.current && !downloadCalendarRef.current.contains(e.target as Node)) {
+        setShowDownloadCalendar(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
   // ── Fetch emails for selector ─────────────────────────
   const fetchSelectorEmails = useCallback(async () => {
     setSelectorLoading(true);
@@ -98,9 +114,9 @@ export default function EvalDashboard() {
     setDownloadResult(null);
     try {
       const result = await downloadEmails({
-        since_date: sinceDate || undefined,
-        before_date: beforeDate || undefined,
-        max_count: maxCount,
+        since_date: downloadDateRange?.from ? format(downloadDateRange.from, "yyyy-MM-dd") : undefined,
+        before_date: downloadDateRange?.to ? format(downloadDateRange.to, "yyyy-MM-dd") : undefined,
+        max_count: parseInt(maxCount) || 500,
       });
       setDownloadResult(result);
       refresh();
@@ -139,7 +155,12 @@ export default function EvalDashboard() {
           esRef.current = null;
           refresh();
         } else if (msg.type === "cancelled") {
-          setEvalLogs(prev => [...prev, { message: "⚠ Evaluation cancelled.", level: "error" }]);
+          setEvalLogs(prev => [...prev, {
+            message: msg.run_id
+              ? `⚠ Evaluation cancelled — partial results saved as Run #${msg.run_id}.`
+              : "⚠ Evaluation cancelled.",
+            level: "info"
+          }]);
           setRunningEval(false);
           es.close();
           esRef.current = null;
@@ -278,19 +299,64 @@ export default function EvalDashboard() {
       <div className="bg-white rounded-lg shadow p-6">
         <h2 className="text-lg font-semibold mb-4">Download Emails to Cache</h2>
         <div className="flex flex-wrap gap-3 items-end">
+          {/* Date range picker */}
           <div>
-            <label className="block text-xs text-gray-500 mb-1">Since Date</label>
-            <input type="date" value={sinceDate} onChange={e => setSinceDate(e.target.value)}
-              className="border rounded px-3 py-2 text-sm" />
+            <label className="block text-xs text-gray-500 mb-1">Date Range</label>
+            <div className="relative" ref={downloadCalendarRef}>
+              <button
+                onClick={() => setShowDownloadCalendar(!showDownloadCalendar)}
+                className="flex items-center gap-1.5 px-3 py-2 text-sm border rounded bg-white text-gray-600 hover:bg-gray-50"
+              >
+                <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+                <span>{downloadDateRange?.from ? format(downloadDateRange.from, "MMM dd, yyyy") : "Start date"}</span>
+                <span className="text-gray-400">→</span>
+                <span>{downloadDateRange?.to ? format(downloadDateRange.to, "MMM dd, yyyy") : "End date"}</span>
+              </button>
+
+              {showDownloadCalendar && (
+                <div className="absolute left-0 top-full mt-1 z-50 bg-white rounded-lg shadow-lg border border-gray-200 p-3">
+                  <div className="flex items-center justify-between mb-2 text-xs">
+                    <span className="text-gray-500">
+                      {downloadDateRange?.from ? format(downloadDateRange.from, "MMM dd, yyyy") : "Start date"}
+                      {" → "}
+                      {downloadDateRange?.to ? format(downloadDateRange.to, "MMM dd, yyyy") : "End date"}
+                    </span>
+                    <button
+                      onClick={() => setDownloadDateRange(undefined)}
+                      className="text-xs text-red-500 hover:text-red-700 ml-4"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                  <DayPicker
+                    mode="range"
+                    selected={downloadDateRange}
+                    onSelect={setDownloadDateRange}
+                    captionLayout="dropdown"
+                    fromYear={2020}
+                    toYear={new Date().getFullYear()}
+                    disabled={{ after: new Date() }}
+                    numberOfMonths={1}
+                    showOutsideDays
+                  />
+                  <div className="flex justify-end mt-2 pt-2 border-t border-gray-100">
+                    <button
+                      onClick={() => setShowDownloadCalendar(false)}
+                      className="px-3 py-1 text-xs font-medium text-white bg-indigo-600 rounded hover:bg-indigo-700"
+                    >
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Before Date</label>
-            <input type="date" value={beforeDate} onChange={e => setBeforeDate(e.target.value)}
-              className="border rounded px-3 py-2 text-sm" />
-          </div>
+
           <div>
             <label className="block text-xs text-gray-500 mb-1">Max Count</label>
-            <input type="number" value={maxCount} onChange={e => setMaxCount(Number(e.target.value))}
+            <input type="number" value={maxCount} onChange={e => setMaxCount(e.target.value)}
               className="border rounded px-3 py-2 text-sm w-24" min={1} max={5000} />
           </div>
           <button onClick={handleDownload} disabled={downloading}

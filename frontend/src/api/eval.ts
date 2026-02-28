@@ -8,6 +8,7 @@ import type {
   CacheDownloadRequest,
   CacheDownloadResult,
   CacheStats,
+  EmailPredictionRun,
   CorrectionEntryInput,
   DropdownOptions,
   EvalApplicationGroup,
@@ -64,8 +65,13 @@ export function listCachedEmails(params: {
   return request(`/cache/emails?${qs}`);
 }
 
-export function getCachedEmail(id: number): Promise<CachedEmailDetail> {
-  return request(`/cache/emails/${id}`);
+export function getCachedEmail(id: number, runId?: number): Promise<CachedEmailDetail> {
+  const qs = runId ? `?run_id=${runId}` : "";
+  return request(`/cache/emails/${id}${qs}`);
+}
+
+export function getEmailPredictionRuns(id: number): Promise<EmailPredictionRun[]> {
+  return request(`/cache/emails/${id}/prediction-runs`);
 }
 
 // ── Labels ───────────────────────────────────────────────
@@ -178,6 +184,10 @@ export function getEvalRunResults(id: number, errorsOnly?: boolean): Promise<Eva
 
 export function deleteEvalRun(id: number): Promise<void> {
   return request(`/runs/${id}`, { method: "DELETE" });
+}
+
+export function refreshEvalRunReport(id: number): Promise<EvalRunDetail> {
+  return request(`/runs/${id}/refresh-report`, { method: "POST" });
 }
 
 export function cancelEvalRun(): Promise<{ cancelled: boolean; running: boolean }> {

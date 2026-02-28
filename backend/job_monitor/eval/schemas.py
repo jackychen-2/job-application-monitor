@@ -55,8 +55,10 @@ class CachedEmailDetailOut(CachedEmailOut):
     """Full detail including pipeline prediction from most recent eval run."""
     # Pipeline predictions (from latest eval run, if any)
     predicted_is_job_related: Optional[bool] = None
+    predicted_email_category: Optional[str] = None
     predicted_company: Optional[str] = None
     predicted_job_title: Optional[str] = None
+    predicted_req_id: Optional[str] = None
     predicted_status: Optional[str] = None
     predicted_application_group: Optional[int] = None
     predicted_application_group_display: Optional[str] = None  # "Company — Job Title (date)"
@@ -69,6 +71,14 @@ class CachedEmailListOut(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class EmailPredictionRunOut(BaseModel):
+    """A historical eval run that contains predictions for a specific cached email."""
+    run_id: int
+    run_name: Optional[str] = None
+    started_at: datetime
+    completed_at: Optional[datetime] = None
 
 
 # ── Labels ────────────────────────────────────────────────
@@ -93,6 +103,11 @@ CORRECTION_ERROR_TYPES: dict[str, list[dict]] = {
         {"key": "no_title_signal",          "label": "No explicit title",            "desc": "Email never states the job title explicitly"},
         {"key": "wrong_pattern_phase",      "label": "Wrong extraction phase",       "desc": "Title came from a phase/pattern that was not the best match"},
     ],
+    "req_id": [
+        {"key": "missing_req_id",           "label": "Missing requisition ID",       "desc": "Email has an ID but extraction missed it"},
+        {"key": "wrong_req_id",             "label": "Wrong requisition ID",         "desc": "Extracted requisition ID does not match email evidence"},
+        {"key": "no_req_id_signal",         "label": "No requisition ID signal",     "desc": "Email does not include a clear requisition ID"},
+    ],
     "status": [
         {"key": "soft_rejection_missed",    "label": "Soft rejection not detected",  "desc": "Polite 'keep your resume on file' language was not caught"},
         {"key": "on_hold_not_rejection",    "label": "'On hold' = effective rejection","desc": "Position put on hold, pipeline did not treat it as a rejection"},
@@ -102,8 +117,9 @@ CORRECTION_ERROR_TYPES: dict[str, list[dict]] = {
     "classification": [
         {"key": "false_pos_newsletter",     "label": "Newsletter / job alert",       "desc": "Email is a digest or newsletter, not an application confirmation"},
         {"key": "false_pos_verification",   "label": "Security / verification email","desc": "OTP, password reset, or identity verification"},
-        {"key": "false_pos_recruiter",      "label": "Recruiter cold outreach",      "desc": "Recruiter inquiry — no application was submitted"},
+        {"key": "false_pos_recruiter",      "label": "Recruiter cold outreach",      "desc": "Recruiter reach out — no application was submitted (should be 'not_job_related' with status 'Recruiter Reach-out')"},
         {"key": "false_neg_no_keywords",    "label": "Job email missing keywords",   "desc": "Genuine job email but lacked any signal keywords"},
+        {"key": "recruiter_misclassified",  "label": "Recruiter reach out missed",   "desc": "Pipeline classified as job_application or not_job_related, but this is a recruiter reach out"},
     ],
     "application_group": [
         {"key": "same_app_split",           "label": "Same application split",       "desc": "Emails from one application were split into multiple predicted groups"},
@@ -119,7 +135,7 @@ CORRECTION_ERROR_TYPES: dict[str, list[dict]] = {
 
 class CorrectionEntryIn(BaseModel):
     """One human-annotated correction for a single predicted field."""
-    field: str                          # "company" | "job_title" | "status" | "classification" | "application_group"
+    field: str                          # "company" | "job_title" | "req_id" | "status" | "classification" | "application_group"
     predicted: Optional[str] = None     # raw predicted value (string representation)
     corrected: Optional[str] = None     # human-corrected value
     error_type: Optional[str] = None    # key from CORRECTION_ERROR_TYPES taxonomy
@@ -129,8 +145,11 @@ class CorrectionEntryIn(BaseModel):
 
 class EvalLabelIn(BaseModel):
     is_job_related: Optional[bool] = None
+    # Two-way category: "job_application" | "not_job_related"
+    email_category: Optional[str] = None
     correct_company: Optional[str] = None
     correct_job_title: Optional[str] = None
+    correct_req_id: Optional[str] = None
     correct_status: Optional[str] = None
     correct_recruiter_name: Optional[str] = None
     correct_date_applied: Optional[str] = None
@@ -147,8 +166,10 @@ class EvalLabelOut(BaseModel):
     id: int
     cached_email_id: int
     is_job_related: Optional[bool] = None
+    email_category: Optional[str] = None
     correct_company: Optional[str] = None
     correct_job_title: Optional[str] = None
+    correct_req_id: Optional[str] = None
     correct_status: Optional[str] = None
     correct_recruiter_name: Optional[str] = None
     correct_date_applied: Optional[str] = None
@@ -250,8 +271,10 @@ class EvalRunResultOut(BaseModel):
     id: int
     cached_email_id: int
     predicted_is_job_related: bool
+    predicted_email_category: Optional[str] = None
     predicted_company: Optional[str] = None
     predicted_job_title: Optional[str] = None
+    predicted_req_id: Optional[str] = None
     predicted_status: Optional[str] = None
     predicted_application_group_id: Optional[int] = None
     predicted_group: Optional[EvalPredictedGroupOut] = None
@@ -260,6 +283,7 @@ class EvalRunResultOut(BaseModel):
     company_correct: Optional[bool] = None
     company_partial: Optional[bool] = None
     job_title_correct: Optional[bool] = None
+    req_id_correct: Optional[bool] = None
     status_correct: Optional[bool] = None
     grouping_correct: Optional[bool] = None
     llm_used: bool
@@ -275,6 +299,7 @@ class EvalRunResultOut(BaseModel):
     label_is_job_related: Optional[bool] = None
     label_company: Optional[str] = None
     label_job_title: Optional[str] = None
+    label_req_id: Optional[str] = None
     label_status: Optional[str] = None
     label_review_status: Optional[str] = None  # unlabeled | labeled | skipped | uncertain
     decision_log_json: Optional[str] = None    # step-by-step log from the actual eval run

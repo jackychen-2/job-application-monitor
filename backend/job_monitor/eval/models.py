@@ -148,10 +148,13 @@ class EvalLabel(Base):
 
     # Classification
     is_job_related: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Two-way category: "job_application" | "not_job_related"
+    email_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     # Field extraction ground truth
     correct_company: Mapped[str | None] = mapped_column(String(200), nullable=True)
     correct_job_title: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    correct_req_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     correct_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
     correct_recruiter_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     correct_date_applied: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -248,8 +251,11 @@ class EvalRunResult(Base):
 
     # Pipeline outputs
     predicted_is_job_related: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Two-way predicted category: "job_application" | "not_job_related"
+    predicted_email_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
     predicted_company: Mapped[str | None] = mapped_column(String(200), nullable=True)
     predicted_job_title: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    predicted_req_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     predicted_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
     predicted_application_group_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("eval_predicted_groups.id", ondelete="SET NULL"), nullable=True
@@ -261,6 +267,7 @@ class EvalRunResult(Base):
     company_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     company_partial: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     job_title_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    req_id_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     status_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     grouping_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 

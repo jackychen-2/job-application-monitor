@@ -159,18 +159,23 @@ def create_application(
     # Check for duplicates
     existing = (
         db.query(Application)
-        .filter(Application.company == body.company, Application.job_title == body.job_title)
+        .filter(
+            Application.company == body.company,
+            Application.job_title == body.job_title,
+            Application.req_id == body.req_id,
+        )
         .first()
     )
     if existing:
         raise HTTPException(
             status_code=409,
-            detail=f"Application already exists for {body.company} - {body.job_title}",
+            detail=f"Application already exists for {body.company} - {body.job_title} ({body.req_id or 'no req'})",
         )
 
     app = Application(
         company=body.company,
         job_title=body.job_title,
+        req_id=body.req_id,
         status=body.status,
         source=body.source,
         notes=body.notes,

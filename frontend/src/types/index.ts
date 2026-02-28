@@ -4,6 +4,7 @@ export interface Application {
   id: number;
   company: string;
   job_title: string | null;
+  req_id: string | null;
   email_subject: string | null;
   email_sender: string | null;
   email_date: string | null;
@@ -61,6 +62,7 @@ export interface ApplicationListResponse {
 export interface ApplicationCreate {
   company: string;
   job_title?: string;
+  req_id?: string;
   status?: string;
   notes?: string;
   source?: string;
@@ -69,6 +71,7 @@ export interface ApplicationCreate {
 export interface ApplicationUpdate {
   company?: string;
   job_title?: string;
+  req_id?: string;
   status?: string;
   notes?: string;
 }
@@ -131,14 +134,17 @@ export interface FlowData {
 }
 
 /** Status value constants */
-export const STATUSES = ["已申请", "面试", "Offer", "拒绝", "Unknown"] as const;
+export const STATUSES = ["Recruiter Reach-out", "已申请", "OA", "面试", "Offer", "Onboarding", "拒绝", "Unknown"] as const;
 export type Status = (typeof STATUSES)[number];
 
 /** Status color mapping */
 export const STATUS_COLORS: Record<string, string> = {
+  "Recruiter Reach-out": "bg-orange-100 text-orange-700",
   已申请: "bg-gray-100 text-gray-700",
+  OA: "bg-cyan-100 text-cyan-700",
   面试: "bg-blue-100 text-blue-700",
   Offer: "bg-green-100 text-green-700",
+  Onboarding: "bg-teal-100 text-teal-700",
   拒绝: "bg-red-100 text-red-700",
   Unknown: "bg-yellow-100 text-yellow-700",
 };

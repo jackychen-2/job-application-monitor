@@ -6,13 +6,16 @@ interface Props {
 }
 
 const STAGE_ORDER: Record<string, number> = {
-  已申请: 0, 面试: 1, Offer: 2, 拒绝: 3, Unknown: 4,
+  "Recruiter Reach-out": -1, 已申请: 0, OA: 1, 面试: 2, Offer: 3, Onboarding: 4, 拒绝: 5, Unknown: 6,
 };
 
 const COLORS: Record<string, { bar: string; flow: string }> = {
+  "Recruiter Reach-out": { bar: "#ea580c", flow: "#fed7aa" },
   已申请:      { bar: "#a8a29e", flow: "#d6d3d1" },
+  OA:         { bar: "#0891b2", flow: "#a5f3fc" },
   面试:        { bar: "#4a6fa5", flow: "#b4c0db" },
   Offer:       { bar: "#3d8b6e", flow: "#a3d4c7" },
+  Onboarding:  { bar: "#0f766e", flow: "#99f6e4" },
   拒绝:        { bar: "#c77d4f", flow: "#ecc9b0" },
   "No Offer":  { bar: "#d4735e", flow: "#f0bfb0" },
   Unknown:     { bar: "#b5a339", flow: "#e0d99e" },
@@ -161,7 +164,33 @@ export default function SankeyFlow({ flowData, loading }: Props) {
     });
   }
 
-  // 3. Rejected (adjusted: total 拒绝 - those shown as "No Offer" in sub-branches)
+  // 3. OA (if has current count but not covered by transitions)
+  const oaInTree = rootChildren.find((c) => c.label === "OA");
+  if (!oaInTree && (cur["OA"] || 0) > 0) {
+    const c = col("OA");
+    rootChildren.push({
+      id: "oa-direct",
+      label: "OA",
+      value: cur["OA"] || 0,
+      barColor: c.bar, flowColor: c.flow,
+      children: [],
+    });
+  }
+
+  // 4. Onboarding (if has current count but not covered by transitions)
+  const onboardingInTree = rootChildren.find((c) => c.label === "Onboarding");
+  if (!onboardingInTree && (cur["Onboarding"] || 0) > 0) {
+    const c = col("Onboarding");
+    rootChildren.push({
+      id: "onboarding-direct",
+      label: "Onboarding",
+      value: cur["Onboarding"] || 0,
+      barColor: c.bar, flowColor: c.flow,
+      children: [],
+    });
+  }
+
+  // 5. Rejected (adjusted: total 拒绝 - those shown as "No Offer" in sub-branches)
   const downstreamRejects = countDownstreamRejections("已申请", new Set());
   const directRejects = (cur["拒绝"] || 0) - downstreamRejects;
   if (directRejects > 0) {
@@ -175,7 +204,19 @@ export default function SankeyFlow({ flowData, loading }: Props) {
     });
   }
 
-  // 4. Still in 已申请
+  // 6. Still in recruiter reach-out
+  if ((cur["Recruiter Reach-out"] || 0) > 0) {
+    const c = col("Recruiter Reach-out");
+    rootChildren.push({
+      id: "recruiter-remaining",
+      label: "Recruiter Reach-out",
+      value: cur["Recruiter Reach-out"] || 0,
+      barColor: c.bar, flowColor: c.flow,
+      children: [],
+    });
+  }
+
+  // 7. Still in 已申请
   if ((cur["已申请"] || 0) > 0) {
     const c = col("已申请");
     rootChildren.push({

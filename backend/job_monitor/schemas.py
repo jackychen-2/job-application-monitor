@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 class ApplicationBase(BaseModel):
     company: str = Field(..., min_length=1, max_length=200)
     job_title: Optional[str] = Field(None, max_length=300)
+    req_id: Optional[str] = Field(None, max_length=80)
     status: str = Field("已申请", max_length=50)
     notes: Optional[str] = None
 
@@ -29,6 +30,7 @@ class ApplicationUpdate(BaseModel):
 
     company: Optional[str] = Field(None, min_length=1, max_length=200)
     job_title: Optional[str] = Field(None, max_length=300)
+    req_id: Optional[str] = Field(None, max_length=80)
     status: Optional[str] = Field(None, max_length=50)
     notes: Optional[str] = None
 
@@ -85,6 +87,7 @@ class ApplicationOut(BaseModel):
     id: int
     company: str
     job_title: Optional[str]
+    req_id: Optional[str]
     email_subject: Optional[str]
     email_sender: Optional[str]
     email_date: Optional[datetime]

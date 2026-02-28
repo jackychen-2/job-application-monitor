@@ -15,12 +15,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from typing import Optional, List
 
 import structlog
 from sqlalchemy.orm import Session
 
-from job_monitor.models import ProcessedEmail, Application
+from job_monitor.extraction.rules import normalize_req_id
+from job_monitor.models import ProcessedEmail, Application, StatusHistory
 
 logger = structlog.get_logger(__name__)
 
@@ -72,7 +74,10 @@ def normalize_company(name: str | None) -> str | None:
     if not name:
         return None
 
-    name = name.lower().strip()
+    # Normalise all Unicode whitespace (non-breaking space, thin space, etc.)
+    # to plain ASCII space BEFORE suffix matching, otherwise suffixes like
+    # " inc." won't be detected when the space is U+00A0.
+    name = re.sub(r"\s+", " ", name).lower().strip()
 
     # ── Step 1: Strip legal entity suffixes (end of string) ──────────────
     legal_suffixes = [
@@ -123,10 +128,165 @@ def normalize_company(name: str | None) -> str | None:
             name = name[len(prefix):].strip()
             break
 
-    # Remove extra whitespace
-    name = re.sub(r"\s+", " ", name).strip()
+    return name.strip() if name.strip() else None
 
-    return name if name else None
+
+# ---------------------------------------------------------------------------
+# Fuzzy company candidate search
+# ---------------------------------------------------------------------------
+
+def _find_fuzzy_company_candidates(
+    session: Session,
+    normalized: str,
+    threshold: float = 0.75,
+) -> list:
+    """Find Application records with a similar normalized company name.
+
+    Uses SequenceMatcher ratio to catch minor variations, e.g.:
+      "zoom" vs "zoom communications"  → 0.80 ✓
+      "tesla" vs "tesla motors"         → 0.83 ✓
+      "google" vs "amazon"              → 0.31 ✗
+
+    Returns applications sorted by similarity descending, then most-recent first.
+    Only used as a fallback rescue when the exact-match query returns zero results.
+    """
+    if not normalized:
+        return []
+
+    all_apps = session.query(Application).all()
+    scored: list[tuple[float, Application]] = []
+    for app in all_apps:
+        existing_norm = app.normalized_company or ""
+        if not existing_norm:
+            continue
+        sim = SequenceMatcher(None, normalized, existing_norm).ratio()
+        if sim >= threshold:
+            scored.append((sim, app))
+
+    # Sort: highest similarity first, then most-recently created
+    scored.sort(key=lambda x: (-x[0], -(x[1].id)))
+    return [app for _, app in scored]
+
+
+def _to_naive(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=None) if getattr(dt, "tzinfo", None) else dt
+
+
+def _fmt_dt(dt: datetime | None) -> str:
+    if dt is None:
+        return ""
+    return dt.isoformat(sep=" ", timespec="seconds")
+
+
+def _build_timeline_summary(
+    session: Session,
+    app: Application,
+    new_email_date: datetime | None,
+    max_events: int = 5,
+) -> dict:
+    """Build compact timeline context for LLM link confirmation."""
+    new_dt = _to_naive(new_email_date)
+    app_created = _to_naive(app.created_at)
+    app_last_email = _to_naive(app.email_date)
+    days_since_last_email: int | None = None
+    if new_dt and app_last_email:
+        days_since_last_email = abs((new_dt - app_last_email).days)
+
+    # Pull recent email and status events; merge by timestamp desc.
+    email_rows = (
+        session.query(ProcessedEmail.email_date, ProcessedEmail.subject)
+        .filter(ProcessedEmail.application_id == app.id)
+        .order_by(ProcessedEmail.email_date.desc().nullslast(), ProcessedEmail.processed_at.desc())
+        .limit(max_events)
+        .all()
+    )
+    status_rows = (
+        session.query(StatusHistory.changed_at, StatusHistory.new_status)
+        .filter(StatusHistory.application_id == app.id)
+        .order_by(StatusHistory.changed_at.desc())
+        .limit(max_events)
+        .all()
+    )
+
+    merged: list[tuple[datetime, dict[str, str]]] = []
+    for email_dt, subject in email_rows:
+        sort_dt = _to_naive(email_dt) or datetime.min
+        merged.append(
+            (
+                sort_dt,
+                {
+                    "date": _fmt_dt(_to_naive(email_dt)),
+                    "status": "",
+                    "subject": (subject or "")[:180],
+                },
+            )
+        )
+    for changed_at, new_status in status_rows:
+        sort_dt = _to_naive(changed_at) or datetime.min
+        merged.append(
+            (
+                sort_dt,
+                {
+                    "date": _fmt_dt(_to_naive(changed_at)),
+                    "status": (new_status or "")[:80],
+                    "subject": "",
+                },
+            )
+        )
+
+    merged.sort(key=lambda x: x[0], reverse=True)
+    recent_events = [event for _, event in merged[:max_events]]
+
+    return {
+        "new_email_date": _fmt_dt(new_dt),
+        "app_created_at": _fmt_dt(app_created),
+        "app_last_email_date": _fmt_dt(app_last_email),
+        "days_since_last_email": days_since_last_email,
+        "recent_events": recent_events,
+    }
+
+
+def _confirm_same_application_with_timeline(
+    llm_provider: object,
+    *,
+    email_subject: str,
+    email_sender: str,
+    email_body: str,
+    app_company: str,
+    app_job_title: str,
+    app_status: str,
+    app_last_email_subject: str,
+    timeline: dict,
+):
+    """Call provider.confirm_same_application with timeline fields (compat fallback)."""
+    try:
+        return llm_provider.confirm_same_application(  # type: ignore[attr-defined]
+            email_subject=email_subject,
+            email_sender=email_sender,
+            email_body=email_body,
+            app_company=app_company,
+            app_job_title=app_job_title,
+            app_status=app_status,
+            app_last_email_subject=app_last_email_subject,
+            new_email_date=timeline["new_email_date"],
+            app_created_at=timeline["app_created_at"],
+            app_last_email_date=timeline["app_last_email_date"],
+            days_since_last_email=timeline["days_since_last_email"],
+            recent_events=timeline["recent_events"],
+        )
+    except TypeError:
+        # Backward-compat with providers using the old signature.
+        return llm_provider.confirm_same_application(  # type: ignore[attr-defined]
+            email_subject=email_subject,
+            email_sender=email_sender,
+            email_body=email_body,
+            app_company=app_company,
+            app_job_title=app_job_title,
+            app_status=app_status,
+            app_last_email_subject=app_last_email_subject,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +399,7 @@ def resolve_by_thread_id(
 # Statuses that indicate an application has progressed beyond initial submission.
 # If an existing app is in one of these AND the new email is a fresh application
 # confirmation (已申请), treat it as a re-application → skip that candidate.
-_PROGRESSED_STATUSES = {"拒绝", "面试"}
+_PROGRESSED_STATUSES = {"OA", "面试", "Offer", "Onboarding", "拒绝"}
 
 # Title normalization synonyms
 _TITLE_SYNONYMS = {
@@ -256,6 +416,9 @@ def _normalize_title(title: str) -> str:
     """Normalize a job title for comparison."""
     t = title.lower().strip()
     t = re.sub(r"[,\-–—/|()[\]{}]", " ", t)
+    # Remove requisition-id-like tokens so title matching is stable
+    # even when one side includes IDs and the other does not.
+    t = re.sub(r"\b(?:r-?\d{5,}|jr\d{5,}|\d{4}-\d{3,6}|\d{5,8})\b", " ", t, flags=re.IGNORECASE)
     t = re.sub(r"\s+", " ", t).strip()
     words = t.split()
     words = [_TITLE_SYNONYMS.get(w, w) for w in words]
@@ -300,11 +463,22 @@ def titles_similar(title_a: str | None, title_b: str | None, threshold: float = 
     return jaccard >= threshold
 
 
+def titles_equal_strict(title_a: str | None, title_b: str | None) -> bool:
+    """Strict title equality for direct-link gating.
+
+    Requires both titles to be present and normalized forms to match exactly.
+    """
+    if not title_a or not title_b:
+        return False
+    return _normalize_title(title_a) == _normalize_title(title_b)
+
+
 def resolve_by_company(
     session: Session,
     company: str | None,
     extracted_status: str | None = None,
     job_title: str | None = None,
+    req_id: str | None = None,
     email_date: Optional["datetime"] = None,
     llm_provider: Optional[object] = None,
     email_subject: str = "",
@@ -313,21 +487,22 @@ def resolve_by_company(
 ) -> LinkResult:
     """Attempt to link a new email to an existing Application by company name.
 
-    This is the fallback when thread ID linking fails. Uses three filtering
-    rules to avoid incorrect merges:
+    This is the fallback when thread ID linking fails. Uses deterministic
+    pre-filters plus LLM confirmation to avoid incorrect merges:
 
-    Rule A (Title mismatch): If both have job titles and they're clearly
-        different (Jaccard < 0.9), skip that candidate.
-    Rule B (Time gap): If new email is 已申请 and titles match but the time
-        gap exceeds 3 days from the app's last email, skip (different cycle).
-    Rule C (Re-application): If existing app is in a progressed status
-        (拒绝/面试) and the new email is 已申请, skip that candidate.
+    Rule 0 (Req ID): Prefer exact req_id match when available.
+    Rule 1 (Re-application): If existing app is in a progressed status
+        (OA/面试/Offer/Onboarding/拒绝) and the new email is 已申请, skip that candidate.
+
+    After rule filtering, LLM confirmation is preferred when LLM is available:
+    every remaining exact-company candidate is checked with confirm_same_application().
 
     Args:
         session: Database session.
         company: Company name extracted from the email.
-        extracted_status: Status extracted from the new email (已申请/面试/Offer/拒绝).
+        extracted_status: Status extracted from the new email (已申请/OA/面试/Offer/Onboarding/拒绝).
         job_title: Job title extracted from the new email.
+        req_id: Requisition ID extracted from the new email.
         email_date: Date of the new email (from email header).
 
     Returns:
@@ -375,50 +550,82 @@ def resolve_by_company(
     # ── Filter candidates ─────────────────────────────────
     candidates = list(all_apps)
 
-    # Rule A: Title mismatch (strict — only near-identical titles match)
-    if job_title:
-        before = len(candidates)
-        candidates = [
-            app for app in candidates
-            if titles_similar(job_title, app.job_title)
-        ]
-        filtered = before - len(candidates)
-        if filtered > 0:
+    # Rule 0: Req ID exact match when available.
+    # Direct link is allowed only when BOTH req_id and title match (company is already pre-filtered).
+    # If req_id matches but title is missing/mismatched, defer to LLM confirmation instead of direct linking.
+    # If no exact req_id match exists, fall back to legacy rows with missing req_id.
+    incoming_req = normalize_req_id(req_id or "")
+    if incoming_req:
+        exact_req = [app for app in candidates if normalize_req_id(app.req_id or "") == incoming_req]
+        if exact_req:
+            if job_title:
+                title_matched_exact = [
+                    app for app in exact_req
+                    if titles_equal_strict(job_title, app.job_title)
+                ]
+                if title_matched_exact:
+                    chosen = title_matched_exact[0]
+                    logger.info(
+                        "linked_by_company_req_id_title_strict",
+                        company=company,
+                        req_id=incoming_req,
+                        job_title=job_title,
+                        application_id=chosen.id,
+                    )
+                    return LinkResult(
+                        application_id=chosen.id,
+                        confidence=0.98,
+                        link_method="company_req_id",
+                    )
+                logger.info(
+                    "company_link_req_id_match_but_title_mismatch_defer_llm",
+                    company=company,
+                    req_id=incoming_req,
+                    job_title=job_title,
+                    candidate_count=len(exact_req),
+                )
+                candidates = exact_req
+            else:
+                logger.info(
+                    "company_link_req_id_match_but_title_missing_defer_llm",
+                    company=company,
+                    req_id=incoming_req,
+                    candidate_count=len(exact_req),
+                )
+                candidates = exact_req
+        else:
+            legacy_no_req = [app for app in candidates if not normalize_req_id(app.req_id or "")]
+            if job_title:
+                title_matched = [
+                    app for app in legacy_no_req
+                    if titles_similar(job_title, app.job_title)
+                ]
+                if title_matched:
+                    candidates = title_matched
+                    logger.info(
+                        "company_link_req_fallback_title_matched",
+                        company=company,
+                        job_title=job_title,
+                        remaining=len(candidates),
+                    )
+                else:
+                    candidates = legacy_no_req
+            else:
+                candidates = legacy_no_req
+    elif job_title:
+        # No req_id in incoming email: prioritize same-title candidates for LLM confirmation.
+        title_matched = [app for app in candidates if titles_similar(job_title, app.job_title)]
+        if title_matched:
+            candidates = title_matched
             logger.info(
-                "company_link_title_filtered",
+                "company_link_no_req_title_matched",
                 company=company,
-                new_title=job_title,
-                filtered_count=filtered,
+                job_title=job_title,
                 remaining=len(candidates),
             )
 
-    # Rule B: Time gap (only for 已申请 — two application confirmations
-    # to the same company > 3 days apart = different application cycle)
-    _MAX_SAME_CYCLE_DAYS = 3
-    if extracted_status == "已申请" and email_date and candidates:
-        def _within_time_window(app: Application) -> bool:
-            if not app.email_date:
-                return True  # No date to compare, keep candidate
-            # Normalize both to naive for comparison
-            ed = email_date.replace(tzinfo=None) if hasattr(email_date, 'tzinfo') and email_date.tzinfo else email_date
-            ad = app.email_date.replace(tzinfo=None) if hasattr(app.email_date, 'tzinfo') and app.email_date.tzinfo else app.email_date
-            gap = abs((ed - ad).days)
-            return gap <= _MAX_SAME_CYCLE_DAYS
-
-        before = len(candidates)
-        candidates = [app for app in candidates if _within_time_window(app)]
-        filtered = before - len(candidates)
-        if filtered > 0:
-            logger.info(
-                "company_link_time_filtered",
-                company=company,
-                max_days=_MAX_SAME_CYCLE_DAYS,
-                filtered_count=filtered,
-                remaining=len(candidates),
-            )
-
-    # Rule C: Re-application after rejection/interview
-    # If existing app has progressed (拒绝/面试) and new email is a fresh
+    # Rule 1: Re-application after rejection/interview
+    # If existing app has progressed (OA/面试/Offer/Onboarding/拒绝) and new email is a fresh
     # application confirmation (已申请), treat as re-application.
     if extracted_status == "已申请" and candidates:
         before = len(candidates)
@@ -435,7 +642,7 @@ def resolve_by_company(
                 remaining=len(candidates),
             )
 
-    # ── Decision: Rules A/B/C all passed → LLM confirms ──
+    # ── Decision: rule-filtered candidates → LLM confirms ──
     if not candidates:
         logger.info(
             "company_link_all_filtered",
@@ -444,6 +651,65 @@ def resolve_by_company(
             extracted_status=extracted_status,
             job_title=job_title,
         )
+
+        # ── Rescue pass: fuzzy company match + LLM confirmation ──────────
+        # When rules filter everything out (often due to minor company name
+        # variations like "Zoom" vs "Zoom Communications"), try a broader
+        # fuzzy search and let the LLM decide before creating a new group.
+        if llm_provider is not None and hasattr(llm_provider, "confirm_same_application"):
+            fuzzy_candidates = _find_fuzzy_company_candidates(session, normalized, threshold=0.75)
+            if fuzzy_candidates:
+                logger.info(
+                    "company_link_fuzzy_rescue_attempt",
+                    company=company,
+                    normalized=normalized,
+                    fuzzy_candidate_count=len(fuzzy_candidates),
+                )
+                for candidate in fuzzy_candidates[:3]:  # Check top 3 most similar
+                    try:
+                        timeline = _build_timeline_summary(session, candidate, email_date)
+                        confirm_result = _confirm_same_application_with_timeline(
+                            llm_provider,
+                            email_subject=email_subject,
+                            email_sender=email_sender,
+                            email_body=email_body,
+                            app_company=candidate.company,
+                            app_job_title=candidate.job_title or "",
+                            app_status=candidate.status,
+                            app_last_email_subject=candidate.email_subject or "",
+                            timeline=timeline,
+                        )
+                        if confirm_result.is_same_application:
+                            logger.info(
+                                "linked_by_fuzzy_llm_rescue",
+                                company=company,
+                                matched_company=candidate.company,
+                                normalized_incoming=normalized,
+                                normalized_matched=candidate.normalized_company,
+                                application_id=candidate.id,
+                                prompt_tokens=confirm_result.prompt_tokens,
+                            )
+                            return LinkResult(
+                                application_id=candidate.id,
+                                confidence=0.75,
+                                link_method="company_fuzzy",
+                            )
+                        else:
+                            logger.info(
+                                "fuzzy_rescue_llm_rejected",
+                                company=company,
+                                matched_company=candidate.company,
+                                application_id=candidate.id,
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "fuzzy_rescue_llm_error",
+                            company=company,
+                            application_id=candidate.id,
+                            error=str(exc),
+                        )
+                        continue
+
         return LinkResult(
             application_id=None,
             confidence=0.0,
@@ -455,7 +721,9 @@ def resolve_by_company(
     if llm_provider is not None and hasattr(llm_provider, "confirm_same_application"):
         for candidate in candidates:
             try:
-                confirm_result = llm_provider.confirm_same_application(
+                timeline = _build_timeline_summary(session, candidate, email_date)
+                confirm_result = _confirm_same_application_with_timeline(
+                    llm_provider,
                     email_subject=email_subject,
                     email_sender=email_sender,
                     email_body=email_body,
@@ -463,6 +731,7 @@ def resolve_by_company(
                     app_job_title=candidate.job_title or "",
                     app_status=candidate.status,
                     app_last_email_subject=candidate.email_subject or "",
+                    timeline=timeline,
                 )
                 if confirm_result.is_same_application:
                     logger.info(

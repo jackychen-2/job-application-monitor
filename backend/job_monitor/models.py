@@ -30,13 +30,14 @@ class Application(Base):
 
     __tablename__ = "applications"
     __table_args__ = (
-        UniqueConstraint("company", "job_title", name="uq_company_job_title"),
+        UniqueConstraint("company", "job_title", "req_id", name="uq_company_job_title_req_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     company: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     normalized_company: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
     job_title: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    req_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     email_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
     email_sender: Mapped[str | None] = mapped_column(String(300), nullable=True)
     email_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -59,7 +60,10 @@ class Application(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<Application id={self.id} company={self.company!r} title={self.job_title!r} status={self.status!r}>"
+        return (
+            f"<Application id={self.id} company={self.company!r} "
+            f"title={self.job_title!r} req_id={self.req_id!r} status={self.status!r}>"
+        )
 
 
 class StatusHistory(Base):

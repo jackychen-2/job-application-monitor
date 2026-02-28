@@ -32,7 +32,14 @@ from job_monitor.extraction.llm import (
     create_llm_provider,
     extract_with_timeout,
 )
-from job_monitor.extraction.rules import extract_company, extract_job_title, extract_status
+from job_monitor.extraction.rules import (
+    extract_company,
+    extract_job_req_id,
+    extract_job_title,
+    extract_status,
+    normalize_req_id,
+    split_title_and_req_id,
+)
 from job_monitor.linking.resolver import (
     is_message_already_processed,
     normalize_company,
@@ -55,15 +62,17 @@ def _validate_job_title(title: str) -> str:
         return ""
     if len(cleaned) < 3:
         return ""
-    # Max length: real job titles are rarely > 80 chars
-    if len(cleaned) > 80:
+    # Max length: allow up to 200 chars to accommodate titles with team qualifiers and job IDs
+    if len(cleaned) > 200:
         return ""
     if cleaned.lower() in _INVALID_TITLES:
         return ""
-    # Reject sentence-like patterns (contains periods followed by spaces, or starts with lowercase)
-    if ". " in cleaned or cleaned[0].islower():
+    # Reject values that start with lowercase (likely a sentence fragment, not a title)
+    if cleaned[0].islower():
         return ""
     return cleaned
+
+
 from job_monitor.models import Application, ProcessedEmail, ScanState, StatusHistory
 
 logger = structlog.get_logger(__name__)
@@ -93,6 +102,7 @@ def _get_or_create_application(
     session: Session,
     company: str,
     job_title: str,
+    req_id: str,
     email_subject: str,
     email_sender: str,
     email_date: Optional[datetime],
@@ -102,20 +112,41 @@ def _get_or_create_application(
     """Find an existing application or create a new one.
 
     Returns (application, created) where created=True for new rows.
-    Deduplicates by normalized_company + job_title (treats empty titles as equivalent).
+    Deduplicates by normalized_company + job_title + req_id.
     Updates existing record if data has changed.
     """
     # Use normalized_company for matching to handle variations like "Qventus, Inc" vs "Qventus"
     normalized = normalize_company(company)
     
-    # Try to find existing (normalized_company + job_title match)
-    # Handle NULL/empty job_title: treat all empty titles for same company as one
-    if job_title:
+    # Try to find existing (normalized_company + job_title + req_id match)
+    # Handle NULL/empty title and req_id as equivalent buckets.
+    if job_title and req_id:
         existing = (
             session.query(Application)
             .filter(
                 Application.normalized_company == normalized,
                 Application.job_title == job_title,
+                Application.req_id == req_id,
+            )
+            .first()
+        )
+    elif job_title:
+        existing = (
+            session.query(Application)
+            .filter(
+                Application.normalized_company == normalized,
+                Application.job_title == job_title,
+                (Application.req_id == None) | (Application.req_id == ""),  # noqa: E711
+            )
+            .first()
+        )
+    elif req_id:
+        existing = (
+            session.query(Application)
+            .filter(
+                Application.normalized_company == normalized,
+                (Application.job_title == None) | (Application.job_title == ""),  # noqa: E711
+                Application.req_id == req_id,
             )
             .first()
         )
@@ -125,6 +156,7 @@ def _get_or_create_application(
             .filter(
                 Application.normalized_company == normalized,
                 (Application.job_title == None) | (Application.job_title == ""),  # noqa: E711
+                (Application.req_id == None) | (Application.req_id == ""),  # noqa: E711
             )
             .first()
         )
@@ -135,6 +167,8 @@ def _get_or_create_application(
             existing.normalized_company = normalized
         if job_title and existing.job_title != job_title:
             existing.job_title = job_title
+        if req_id and existing.req_id != req_id:
+            existing.req_id = req_id
         # Always update to most recent email info
         _ed = email_date.replace(tzinfo=None) if email_date and hasattr(email_date, 'tzinfo') and email_date.tzinfo else email_date
         _ad = existing.email_date.replace(tzinfo=None) if existing.email_date and hasattr(existing.email_date, 'tzinfo') and existing.email_date.tzinfo else existing.email_date
@@ -143,13 +177,20 @@ def _get_or_create_application(
             existing.email_subject = email_subject
             existing.email_sender = email_sender
         existing.updated_at = datetime.utcnow()
-        logger.info("application_merged", app_id=existing.id, company=company, job_title=job_title)
+        logger.info(
+            "application_merged",
+            app_id=existing.id,
+            company=company,
+            job_title=job_title,
+            req_id=req_id,
+        )
         return existing, False
 
     app = Application(
         company=company,
         normalized_company=normalize_company(company),
         job_title=job_title,
+        req_id=req_id,
         email_subject=email_subject,
         email_sender=email_sender,
         email_date=email_date,
@@ -356,6 +397,10 @@ def _process_single_email(
 
     llm_result: Optional[LLMExtractionResult] = None
     llm_used = False
+    is_trackable_job = False
+    is_recruiter_reach_out = False
+    is_onboarding = False
+    is_oa = False
 
     # ── Step 2: LLM classification + extraction ──────────
     if llm_provider is not None:
@@ -374,8 +419,34 @@ def _process_single_email(
 
     # ── Step 3: Determine if job-related ──────────────────
     if llm_result is not None:
-        if not llm_result.is_job_application:
-            logger.info("email_skipped_llm", uid=uid)
+        pred_is_job = llm_result.is_job_application
+        normalized_status = (llm_result.status or "").strip().lower().replace("_", " ")
+        is_recruiter_reach_out = normalized_status in {
+            "recruiter reach-out",
+            "recruiter reach out",
+        }
+        is_onboarding = normalized_status in {
+            "onboarding",
+            "background check",
+            "background screening",
+        }
+        is_oa = normalized_status in {
+            "oa",
+            "online assessment",
+            "online assessemnt",
+            "online test",
+            "coding challenge",
+            "assessment",
+            "take-home",
+            "take home",
+            "hackerrank",
+            "codesignal",
+            "codility",
+        }
+        is_trackable_job = pred_is_job or is_recruiter_reach_out or is_onboarding or is_oa
+
+        if not is_trackable_job:
+            logger.info("email_skipped_llm", uid=uid, email_category=llm_result.email_category)
             _cleanup_orphaned_app(session, previous_app_id, exclude_uid=uid, summary=summary)
             _record_processed(
                 session, uid, config, parsed, is_job=False, app_id=None, llm_used=True,
@@ -383,7 +454,8 @@ def _process_single_email(
             )
             return
     else:
-        if not is_job_related(subject, sender):
+        is_trackable_job = is_job_related(subject, sender)
+        if not is_trackable_job:
             if llm_used:
                 logger.info("email_skipped_rules_fallback", uid=uid)
             else:
@@ -395,30 +467,50 @@ def _process_single_email(
             return
 
     # ── Step 4: Extract fields ────────────────────────────
-    if llm_result is not None and llm_result.is_job_application:
-        company = llm_result.company or extract_company(subject, sender)
-        job_title = _validate_job_title(llm_result.job_title) or _validate_job_title(extract_job_title(subject, body))
-        # 如果 LLM 返回空或 "Unknown"，使用规则提取
-        llm_status = llm_result.status
-        if llm_status and llm_status.lower() != "unknown":
-            status = llm_status
+    if llm_result is not None and is_trackable_job:
+        company = (llm_result.company or "").strip()
+        raw_title = _validate_job_title(llm_result.base_title or llm_result.job_title)
+        base_title, req_from_title = split_title_and_req_id(raw_title)
+        req_id = normalize_req_id(llm_result.req_id) or normalize_req_id(req_from_title)
+        llm_full_title = _validate_job_title(llm_result.title_with_req_id)
+        if not base_title:
+            full_base, req_from_full = split_title_and_req_id(llm_full_title)
+            if full_base:
+                base_title = full_base
+            if not req_id:
+                req_id = normalize_req_id(req_from_full)
+        job_title = base_title or llm_full_title
+        if is_recruiter_reach_out:
+            status = "Recruiter Reach-out"
+        elif is_oa:
+            status = "OA"
+        elif is_onboarding:
+            status = "Onboarding"
         else:
-            status = extract_status(subject, body)
+            # Keep LLM status as source of truth when LLM path is used.
+            llm_status = llm_result.status
+            if llm_status and llm_status.lower() != "unknown":
+                status = llm_status
+            else:
+                status = "Unknown"
     else:
         company = extract_company(subject, sender)
-        job_title = _validate_job_title(extract_job_title(subject, body))
+        base_title = _validate_job_title(extract_job_title(subject, body))
+        req_id = extract_job_req_id(subject, body, base_title)
+        job_title = base_title
         status = extract_status(subject, body)
 
     if not company:
         company = "Unknown"
 
     # ── Step 4.5: Company-based linking (fallback) ────────
-    # If thread linking didn't find a match, try company name
+    # If thread linking didn't find a match, try company name.
     if linked_app_id is None and company != "Unknown":
         company_link = resolve_by_company(
             session, company,
             extracted_status=status,
             job_title=job_title,
+            req_id=req_id,
             email_date=email_date,
             llm_provider=llm_provider,
             email_subject=subject,
@@ -441,6 +533,7 @@ def _process_single_email(
                 session,
                 company=company,
                 job_title=job_title,
+                req_id=req_id,
                 email_subject=subject,
                 email_sender=sender,
                 email_date=email_date,
@@ -459,6 +552,9 @@ def _process_single_email(
                 changed = True
             if job_title and app.job_title != job_title:
                 app.job_title = job_title
+                changed = True
+            if req_id and app.req_id != req_id:
+                app.req_id = req_id
                 changed = True
             if email_date:
                 # Normalize both datetimes to naive UTC for comparison
@@ -480,6 +576,7 @@ def _process_single_email(
             session,
             company=company,
             job_title=job_title,
+            req_id=req_id,
             email_subject=subject,
             email_sender=sender,
             email_date=email_date,
@@ -503,7 +600,7 @@ def _process_single_email(
     # ── Step 7: Record processed email ────────────────────
     _record_processed(
         session, uid, config, parsed,
-        is_job=True, app_id=app.id, llm_used=llm_used, llm_result=llm_result,
+        is_job=is_trackable_job, app_id=app.id, llm_used=llm_used, llm_result=llm_result,
         link_method=link_method, needs_review=needs_review,
     )
 

@@ -6,9 +6,12 @@ interface Props {
 }
 
 const COLORS: Record<string, string> = {
+  "Recruiter Reach-out": "#f97316",
   已申请: "#6b7280",
+  OA: "#06b6d4",
   面试: "#3b82f6",
   Offer: "#22c55e",
+  Onboarding: "#14b8a6",
   拒绝: "#ef4444",
   Unknown: "#eab308",
 };

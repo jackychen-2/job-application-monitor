@@ -7,9 +7,12 @@ interface Props {
 
 const CARDS = [
   { key: "total", label: "Total", color: "bg-indigo-500" },
+  { key: "Recruiter Reach-out", label: "Recruiter", color: "bg-orange-500" },
   { key: "已申请", label: "已申请", color: "bg-gray-500" },
+  { key: "OA", label: "OA", color: "bg-cyan-500" },
   { key: "面试", label: "面试", color: "bg-blue-500" },
   { key: "Offer", label: "Offer", color: "bg-green-500" },
+  { key: "Onboarding", label: "Onboarding", color: "bg-teal-500" },
   { key: "拒绝", label: "拒绝", color: "bg-red-500" },
 ] as const;
 
@@ -22,7 +25,7 @@ export default function StatsCards({ stats, loading }: Props) {
   };
 
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-8 gap-4">
       {CARDS.map(({ key, label, color }) => (
         <div
           key={key}
