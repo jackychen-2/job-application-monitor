@@ -82,9 +82,14 @@ export default function ReviewEmail() {
   const emailId = Number(id);
 
   // run_id scopes navigation and back-link to a specific eval run
-  const runId = searchParams.get("run_id") ? Number(searchParams.get("run_id")) : undefined;
+  const runIdRaw = searchParams.get("run_id");
+  const runIdParsed = runIdRaw != null ? Number(runIdRaw) : NaN;
+  const runId = Number.isFinite(runIdParsed) ? runIdParsed : undefined;
   const [predictionRunIdOverride, setPredictionRunIdOverride] = useState<number | undefined>(undefined);
   const predictionRunId = predictionRunIdOverride ?? runId;
+  // Groups/labels should follow explicit review run when present; otherwise
+  // follow the active prediction run to avoid cross-run mixed dropdown options.
+  const groupScopeRunId = runId ?? predictionRunId;
 
   // Navigate to another email, preserving run_id context
   const navTo = (targetId: number) => {
@@ -132,6 +137,8 @@ export default function ReviewEmail() {
   const [predictionRunsLoading, setPredictionRunsLoading] = useState(false);
   const [rerunLoading, setRerunLoading] = useState(false);
   const [rerunStatus, setRerunStatus] = useState<string | null>(null);
+  // Force-refresh key for in-place repredict updates where run_id doesn't change.
+  const [predictionRefreshKey, setPredictionRefreshKey] = useState(0);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const rerunEsRef = useRef<EventSource | null>(null);
 
@@ -192,9 +199,13 @@ export default function ReviewEmail() {
   useEffect(() => {
     if (!emailId) return;
     let cancelled = false;
-    getCachedEmail(emailId, predictionRunId).then(e => { if (!cancelled) setEmail(e); });
+    getCachedEmail(emailId, predictionRunId).then(e => {
+      if (cancelled) return;
+      if (e.id !== emailId) return;
+      setEmail(e);
+    });
     return () => { cancelled = true; };
-  }, [emailId, predictionRunId]);
+  }, [emailId, predictionRunId, predictionRefreshKey]);
 
   // Load historical runs that contain this email's predictions.
   useEffect(() => {
@@ -202,17 +213,31 @@ export default function ReviewEmail() {
     let cancelled = false;
     setPredictionRunsLoading(true);
     getEmailPredictionRuns(emailId)
-      .then(runs => { if (!cancelled) setPredictionRuns(runs); })
+      .then(runs => {
+        if (cancelled) return;
+        setPredictionRuns(runs);
+        // No review run in URL: default to latest run for this email so group
+        // dropdowns stay run-scoped instead of mixing all historical runs.
+        if (runId == null && predictionRunIdOverride == null && runs.length > 0) {
+          setPredictionRunIdOverride(runs[0].run_id);
+        }
+      })
       .catch(() => { if (!cancelled) setPredictionRuns([]); })
       .finally(() => { if (!cancelled) setPredictionRunsLoading(false); });
     return () => { cancelled = true; };
-  }, [emailId]);
+  }, [emailId, runId, predictionRunIdOverride]);
 
   const handleRerunEval = useCallback(() => {
     if (rerunLoading) return;
+    const rerunTargetRunId = runId ?? predictionRunId;
 
     rerunEsRef.current?.close();
-    const es = streamEvalRun(`review-email-${emailId}`, undefined, [emailId]);
+    const es = streamEvalRun(
+      `review-email-${emailId}`,
+      undefined,
+      [emailId],
+      rerunTargetRunId,
+    );
     rerunEsRef.current = es;
 
     setRerunLoading(true);
@@ -247,7 +272,15 @@ export default function ReviewEmail() {
         const newRunId = Number(msg.run_id);
         if (Number.isFinite(newRunId)) {
           setPredictionRunIdOverride(newRunId);
-          setRerunStatus(`Repredict complete. Showing Run #${newRunId}.`);
+          // In-place mode keeps the same run_id; force refresh so UI picks latest
+          // EvalRunResult version (highest id) for this email.
+          setPredictionRefreshKey(k => k + 1);
+          const inPlaceUpdate = rerunTargetRunId != null && newRunId === rerunTargetRunId;
+          setRerunStatus(
+            inPlaceUpdate
+              ? `Repredict complete. Updated Run #${newRunId} (new version).`
+              : `Repredict complete. Showing Run #${newRunId}.`
+          );
         } else {
           setRerunStatus(msg.type === "cancelled" ? "Repredict cancelled." : "Repredict complete.");
         }
@@ -268,7 +301,7 @@ export default function ReviewEmail() {
       setRerunStatus("Connection lost while repredicting.");
       closeStream();
     };
-  }, [emailId, rerunLoading]);
+  }, [emailId, rerunLoading, runId, predictionRunId]);
 
   // Load labels scoped by URL run_id context.
   useEffect(() => {
@@ -276,6 +309,7 @@ export default function ReviewEmail() {
     let cancelled = false;
     getLabel(emailId, runId).then(l => {
       if (cancelled) return;
+      if (l && l.cached_email_id !== emailId) return;
       setSavedLabelData(l);
       setLabelFetched(true);
     });
@@ -290,13 +324,25 @@ export default function ReviewEmail() {
       setLabeledCount(res.items.filter(e => e.review_status === "labeled").length);
     });
 
-  // Load dropdown options, groups (scoped to current run), and nav
-  // Re-runs when runId changes so the dropdown only shows current run's groups
+  // Load dropdown options, groups (scoped to active run context), and nav
+  // Re-runs when scope changes so the dropdown doesn't mix historical runs.
   useEffect(() => {
-    getDropdownOptions().then(setOptions);
-    listGroups(runId).then(setGroups);
+    let cancelled = false;
+    getDropdownOptions().then((opts) => { if (!cancelled) setOptions(opts); });
+    if (groupScopeRunId != null) {
+      listGroups(groupScopeRunId)
+        .then((gs) => { if (!cancelled) setGroups(gs); })
+        .catch(() => { if (!cancelled) setGroups([]); });
+    } else {
+      // Avoid loading unscoped global groups (causes cross-run leakage in dropdown).
+      setGroups([]);
+    }
     loadNav();
-  }, [runId]); // eslint-disable-line react-hooks/exhaustive-deps
+    return () => { cancelled = true; };
+  }, [runId, groupScopeRunId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Defensive filter: even if stale responses arrive, never render cross-run groups.
+  const scopedGroups = groups.filter(g => groupScopeRunId != null && g.eval_run_id === groupScopeRunId);
 
   // Pre-populate labels from predictions, merging with any saved label.
   // Runs when email, groups, or savedLabelData changes (all three may arrive
@@ -307,6 +353,8 @@ export default function ReviewEmail() {
   useEffect(() => {
     if (!email || !labelFetched) return;
     if (labelInitializedRef.current) return;
+    if (email.id !== emailId) return;
+    if (savedLabelData && savedLabelData.cached_email_id !== emailId) return;
 
     const splitPred = splitTitleAndReqId(email.predicted_job_title);
     const predictedTitle = splitPred.baseTitle || (email.predicted_job_title || "");
@@ -315,10 +363,10 @@ export default function ReviewEmail() {
     // Try to find an EvalApplicationGroup that matches the predicted company+title.
     // Eval groups are title-scoped today; req_id is labeled separately.
     let guessedGroupId: number | undefined;
-    if (email.predicted_company && groups.length > 0) {
+    if (email.predicted_company && scopedGroups.length > 0) {
       const predComp = email.predicted_company.toLowerCase().trim();
       const predTitle = predictedTitle.toLowerCase().trim();
-      const match = groups.find(
+      const match = scopedGroups.find(
         g =>
           (g.company || "").toLowerCase().trim() === predComp &&
           (g.job_title || "").toLowerCase().trim() === predTitle
@@ -355,7 +403,7 @@ export default function ReviewEmail() {
     });
     labelInitializedRef.current = true;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [email, groups, savedLabelData, labelFetched]);
+  }, [email, scopedGroups, savedLabelData, labelFetched]);
 
   const currentIdx = navIds.indexOf(emailId);
   const prevId = currentIdx > 0 ? navIds[currentIdx - 1] : null;
@@ -428,7 +476,7 @@ export default function ReviewEmail() {
     if (!email) return false;
     const splitPred = splitTitleAndReqId(email.predicted_job_title);
     const predictedTitle = splitPred.baseTitle || (email.predicted_job_title || "");
-    const selectedGroup = groups.find(g => g.id === gt);
+    const selectedGroup = scopedGroups.find(g => g.id === gt);
     if (!selectedGroup) return true; // GT group exists but hasn't loaded yet → treat as mismatch
     const predCompany = normalizeForCompare(email.predicted_company);
     const predTitle = normalizeForCompare(predictedTitle);
@@ -857,7 +905,7 @@ export default function ReviewEmail() {
                 <span>
                   {label.correct_application_group_id 
                     ? (() => {
-                        const app = groups.find(a => a.id === label.correct_application_group_id);
+                        const app = scopedGroups.find(a => a.id === label.correct_application_group_id);
                         return app ? `${app.company} — ${app.job_title}` : `Application #${label.correct_application_group_id}`;
                       })()
                     : "— Select Application —"}
@@ -886,7 +934,7 @@ export default function ReviewEmail() {
                       </div>
                     )}
                     {(() => {
-                      const emptyCount = groups.filter(g => g.email_count === 0 && !appSearch).length;
+                      const emptyCount = scopedGroups.filter(g => g.email_count === 0 && !appSearch).length;
                       return emptyCount > 0 && !showEmptyGroups && !appSearch ? (
                         <div
                           className="px-3 py-1.5 text-xs text-gray-400 cursor-pointer hover:text-gray-600 border-b"
@@ -896,7 +944,7 @@ export default function ReviewEmail() {
                         </div>
                       ) : null;
                     })()}
-                    {[...groups]
+                    {[...scopedGroups]
                       .sort((a, b) => b.email_count - a.email_count)
                       .filter(g => {
                         if (appSearch) {
@@ -979,7 +1027,7 @@ export default function ReviewEmail() {
                         </div>
                       </div>
                     ))}
-                    {groups.length === 0 && (
+                    {scopedGroups.length === 0 && (
                       <div className="px-3 py-2 text-sm text-gray-400">No groups found. Create one below.</div>
                     )}
                   </div>
@@ -1004,7 +1052,12 @@ export default function ReviewEmail() {
                           placeholder="Job Title" />
                         <button 
                           onClick={async () => {
-                            const g = await createGroup({ company: newGroupCompany, job_title: newGroupTitle, eval_run_id: runId });
+                            if (groupScopeRunId == null) return;
+                            const g = await createGroup({
+                              company: newGroupCompany,
+                              job_title: newGroupTitle,
+                              eval_run_id: groupScopeRunId,
+                            });
                             setGroups(prev => [g, ...prev]);
                             setLabel(p => ({
                               ...p,
@@ -1017,7 +1070,8 @@ export default function ReviewEmail() {
                             setNewGroupCompany("");
                             setNewGroupTitle("");
                           }}
-                          className="px-3 py-1 bg-blue-600 text-white rounded text-xs">
+                          disabled={groupScopeRunId == null}
+                          className="px-3 py-1 bg-blue-600 text-white rounded text-xs disabled:opacity-50 disabled:cursor-not-allowed">
                           Create
                         </button>
                       </div>
@@ -1161,6 +1215,7 @@ function CorrectionLog({
       if (!dt) return "info";
       if (dt === "CONFIRMED") return "success";
       if (dt === "NEW_GROUP_CREATED") return "info";
+      if (dt === "PARTIAL_RUN_INCOMPLETE") return "warn";
       if (dt === "MARKED_NOT_JOB") return "warn";
       return "error";
     };
@@ -1179,11 +1234,19 @@ function CorrectionLog({
       : "—";
     lines.push({ stage: "grouping", message: `  Predicted: #${ga.predicted_group_id ?? "—"} "${_predName}"  (size ${ga.predicted_group_size})`, level: "info" });
     lines.push({ stage: "grouping", message: `  Correct:   #${ga.correct_group_id ?? "—"} "${_corrName}"  (size ${ga.correct_group_size})`, level: "info" });
-    lines.push({
-      stage: "grouping",
-      message: `  Cluster match: ${ga.group_id_match ? "✓ same cluster" : "✗ cluster mismatch"}`,
-      level: ga.group_id_match ? "success" : "error",
-    });
+    if (!ga.co_member_predictions_complete && ga.co_member_count > 0) {
+      lines.push({
+        stage: "grouping",
+        message: "  Cluster match: ? incomplete (co-members missing in this eval run)",
+        level: "warn",
+      });
+    } else {
+      lines.push({
+        stage: "grouping",
+        message: `  Cluster match: ${ga.group_id_match ? "✓ same cluster" : "✗ cluster mismatch"}`,
+        level: ga.group_id_match ? "success" : "error",
+      });
+    }
 
     // ── Dedup key analysis ──────────────────────────────
     lines.push({ stage: "grouping", message: `  ── Dedup Key ──`, level: "info" });
@@ -1209,14 +1272,16 @@ function CorrectionLog({
         const rawDate = ga.co_member_email_dates?.[i];
         const dateLabel = rawDate ? ` (${new Date(rawDate).toLocaleDateString()})` : "";
         const predGrpName = ga.co_member_predicted_group_names?.[i];
-        const issamePred = ga.co_member_predicted_group_ids?.[i] === ga.predicted_group_id;
+        const predGrpId = ga.co_member_predicted_group_ids?.[i];
+        const hasPred = predGrpId != null;
+        const issamePred = hasPred && predGrpId === ga.predicted_group_id;
         const grpLabel = predGrpName
           ? `→ predicted: ${predGrpName}${issamePred ? " ✓ same" : " ✗ different"}`
-          : "→ predicted: (none)";
+          : "→ predicted: (none in this run)";
         lines.push({
           stage: "grouping",
           message: `    email #${eid}${dateLabel} "${subj}"  ${grpLabel}`,
-          level: issamePred ? "success" : "error",
+          level: !hasPred ? "warn" : (issamePred ? "success" : "error"),
         });
       });
       if (ga.co_member_count > 8) {
@@ -1224,7 +1289,13 @@ function CorrectionLog({
       }
       // Summary: are all co-members in the same predicted group?
       const uniquePredGroups = [...new Set((ga.co_member_predicted_group_ids ?? []).filter(Boolean))];
-      if (uniquePredGroups.length > 0) {
+      if (!ga.co_member_predictions_complete) {
+        lines.push({
+          stage: "grouping",
+          message: "  ? Co-member grouping summary skipped (partial run coverage)",
+          level: "warn",
+        });
+      } else if (uniquePredGroups.length > 0) {
         const allSame = uniquePredGroups.every(g => g === ga!.predicted_group_id);
         lines.push({
           stage: "grouping",

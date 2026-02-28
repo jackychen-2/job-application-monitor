@@ -71,6 +71,8 @@ class LLMLinkConfirmResult:
     """Result from an LLM link-confirmation call."""
 
     is_same_application: bool = False
+    reason: str = ""
+    raw_answer: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
     estimated_cost_usd: float = 0.0
@@ -284,7 +286,9 @@ class OpenAIProvider:
         "If timeline suggests a new cycle (e.g., rejection followed by a fresh application later), "
         "prefer DIFFERENT.\n"
         "If requisition IDs are explicitly provided and equal, treat that as the strongest SAME signal.\n\n"
-        "Answer ONLY with the word \"same\" or \"different\"."
+        "Return strict JSON only with keys:\n"
+        "- decision: \"same\" or \"different\"\n"
+        "- reason: short one-sentence explanation grounded in evidence from title/company/timeline/req_id."
     )
 
     def confirm_same_application(
@@ -337,14 +341,33 @@ class OpenAIProvider:
         resp = self._client.chat.completions.create(
             model=cfg.llm_model,
             timeout=cfg.llm_timeout_sec,
+            temperature=0,
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": self._LINK_CONFIRM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
         )
 
-        content = (resp.choices[0].message.content or "").strip().lower()
-        is_same = "same" in content and "different" not in content
+        content = (resp.choices[0].message.content or "").strip()
+        decision = ""
+        reason = ""
+        try:
+            parsed = json.loads(content) if content else {}
+            decision = str(parsed.get("decision", "")).strip().lower()
+            reason = _normalize_llm_text(str(parsed.get("reason", "")))
+        except Exception:
+            parsed = {}
+
+        # Backward compatibility: tolerate legacy plain-text "same"/"different".
+        raw_lower = content.lower()
+        if decision not in {"same", "different"}:
+            if "same" in raw_lower and "different" not in raw_lower:
+                decision = "same"
+            elif "different" in raw_lower and "same" not in raw_lower:
+                decision = "different"
+
+        is_same = decision == "same"
 
         usage = getattr(resp, "usage", None)
         prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
@@ -357,13 +380,17 @@ class OpenAIProvider:
         logger.info(
             "llm_link_confirm",
             is_same=is_same,
-            raw_answer=content[:50],
+            decision=decision or "unknown",
+            reason=reason[:200],
+            raw_answer=content[:200],
             company=app_company,
             prompt_tokens=prompt_tokens,
         )
 
         return LLMLinkConfirmResult(
             is_same_application=is_same,
+            reason=reason,
+            raw_answer=content,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             estimated_cost_usd=estimated_cost,

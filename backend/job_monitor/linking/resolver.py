@@ -463,6 +463,14 @@ _TITLE_SYNONYMS = {
     "iii": "3", "ii": "2", "i": "1", "iv": "4", "v": "5",
 }
 
+# Generic role-anchor tokens used to avoid false positives when using
+# asymmetric token-coverage matching.
+_TITLE_ROLE_ANCHORS = {
+    "engineer", "developer", "scientist", "analyst", "manager",
+    "architect", "designer", "researcher", "consultant", "specialist",
+    "administrator", "director", "lead", "intern", "principal", "staff",
+}
+
 
 def _normalize_title(title: str) -> str:
     """Normalize a job title for comparison."""
@@ -511,8 +519,25 @@ def titles_similar(title_a: str | None, title_b: str | None, threshold: float = 
     intersection = words_a & words_b
     union = words_a | words_b
     jaccard = len(intersection) / len(union)
+    if jaccard >= threshold:
+        return True
 
-    return jaccard >= threshold
+    # Fallback: asymmetric coverage to tolerate extra non-core qualifiers
+    # (location/remote/team/region/level variants) without hardcoding them.
+    # Example:
+    #   "senior data engineer" vs "senior data engineer usa remote"
+    #   => overlap_small = 1.0 (same core role), should match.
+    min_len = min(len(words_a), len(words_b))
+    overlap_small = len(intersection) / min_len if min_len else 0.0
+    if overlap_small < 0.8:
+        return False
+
+    # Guardrail: require at least one shared role anchor so we do not over-merge
+    # generic overlaps like "senior data" between different functions.
+    if not (intersection & _TITLE_ROLE_ANCHORS):
+        return False
+
+    return True
 
 
 def titles_equal_strict(title_a: str | None, title_b: str | None) -> bool:
@@ -537,10 +562,28 @@ def resolve_by_company_candidates(
     email_sender: str = "",
     email_body: str = "",
     timeline_provider: Optional[Callable[[CompanyLinkCandidate], dict]] = None,
+    decision_logger: Optional[Callable[[str, str], None]] = None,
 ) -> LinkResult:
     """Shared company-linking decision core used by prod and eval pipelines."""
+    def _emit(message: str, level: str = "info") -> None:
+        if decision_logger is None:
+            return
+        try:
+            decision_logger(message, level)
+        except Exception:
+            return
+
+    def _reason_suffix(reason: str | None) -> str:
+        cleaned = re.sub(r"\s+", " ", (reason or "")).strip()
+        if not cleaned:
+            return ""
+        if len(cleaned) > 220:
+            cleaned = cleaned[:220].rstrip() + "…"
+        return f" reason={cleaned!r}"
+
     if not company:
         logger.debug("company_link_skipped_no_company")
+        _emit("LLM confirm: skipped (company is empty)", "warn")
         return LinkResult(
             application_id=None,
             confidence=0.0,
@@ -549,6 +592,7 @@ def resolve_by_company_candidates(
 
     normalized = normalize_company(company)
     if not normalized:
+        _emit("LLM confirm: skipped (company normalization is empty)", "warn")
         return LinkResult(
             application_id=None,
             confidence=0.0,
@@ -560,6 +604,7 @@ def resolve_by_company_candidates(
         if _candidate_normalized_company(candidate) == normalized
     ]
     if not same_company_candidates:
+        _emit("LLM confirm: skipped (no same-company candidates)", "info")
         logger.debug(
             "company_link_no_match",
             company=company,
@@ -667,6 +712,7 @@ def resolve_by_company_candidates(
 
     # ── Decision: rule-filtered candidates → LLM confirms ──
     if not filtered_candidates:
+        _emit("LLM confirm: skipped (no candidates after rule filters)", "info")
         logger.info(
             "company_link_all_filtered",
             company=company,
@@ -688,7 +734,11 @@ def resolve_by_company_candidates(
                     fuzzy_candidate_count=len(fuzzy_candidates),
                 )
                 for candidate in fuzzy_candidates[:3]:
+                    candidate_label = (
+                        f"#{candidate.id} {candidate.company or '?'} — {candidate.job_title or 'Unknown'}"
+                    )
                     try:
+                        _emit(f"LLM confirm: checking fuzzy candidate {candidate_label}", "info")
                         confirm_result = _confirm_candidate(
                             llm_provider,
                             candidate=candidate,
@@ -698,6 +748,11 @@ def resolve_by_company_candidates(
                             timeline_provider=timeline_provider,
                         )
                         if confirm_result.is_same_application:
+                            _emit(
+                                f"LLM confirm: SAME for fuzzy candidate {candidate_label}."
+                                f"{_reason_suffix(getattr(confirm_result, 'reason', ''))}",
+                                "success",
+                            )
                             logger.info(
                                 "linked_by_fuzzy_llm_rescue",
                                 company=company,
@@ -706,6 +761,7 @@ def resolve_by_company_candidates(
                                 normalized_matched=_candidate_normalized_company(candidate),
                                 application_id=candidate.id,
                                 prompt_tokens=confirm_result.prompt_tokens,
+                                llm_reason=getattr(confirm_result, "reason", ""),
                             )
                             return LinkResult(
                                 application_id=candidate.id,
@@ -713,13 +769,23 @@ def resolve_by_company_candidates(
                                 link_method="company_fuzzy",
                             )
                         else:
+                            _emit(
+                                f"LLM confirm: DIFFERENT for fuzzy candidate {candidate_label}."
+                                f"{_reason_suffix(getattr(confirm_result, 'reason', ''))}",
+                                "warn",
+                            )
                             logger.info(
                                 "fuzzy_rescue_llm_rejected",
                                 company=company,
                                 matched_company=candidate.company,
                                 application_id=candidate.id,
+                                llm_reason=getattr(confirm_result, "reason", ""),
                             )
                     except Exception as exc:
+                        _emit(
+                            f"LLM confirm: ERROR for fuzzy candidate {candidate_label}: {exc}",
+                            "error",
+                        )
                         logger.warning(
                             "fuzzy_rescue_llm_error",
                             company=company,
@@ -727,6 +793,10 @@ def resolve_by_company_candidates(
                             error=str(exc),
                         )
                         continue
+            else:
+                _emit("LLM confirm: skipped (no fuzzy rescue candidates)", "info")
+        else:
+            _emit("LLM confirm: skipped (LLM confirm unavailable)", "warn")
 
         return LinkResult(
             application_id=None,
@@ -738,7 +808,9 @@ def resolve_by_company_candidates(
     # If LLM is unavailable, default to creating a new application (conservative)
     if llm_provider is not None and hasattr(llm_provider, "confirm_same_application"):
         for candidate in filtered_candidates:
+            candidate_label = f"#{candidate.id} {candidate.company or '?'} — {candidate.job_title or 'Unknown'}"
             try:
+                _emit(f"LLM confirm: checking candidate {candidate_label}", "info")
                 confirm_result = _confirm_candidate(
                     llm_provider,
                     candidate=candidate,
@@ -748,11 +820,17 @@ def resolve_by_company_candidates(
                     timeline_provider=timeline_provider,
                 )
                 if confirm_result.is_same_application:
+                    _emit(
+                        f"LLM confirm: SAME for {candidate_label}."
+                        f"{_reason_suffix(getattr(confirm_result, 'reason', ''))}",
+                        "success",
+                    )
                     logger.info(
                         "linked_by_company_llm_confirmed",
                         company=company,
                         application_id=candidate.id,
                         prompt_tokens=confirm_result.prompt_tokens,
+                        llm_reason=getattr(confirm_result, "reason", ""),
                     )
                     return LinkResult(
                         application_id=candidate.id,
@@ -760,12 +838,19 @@ def resolve_by_company_candidates(
                         link_method="company",
                     )
                 else:
+                    _emit(
+                        f"LLM confirm: DIFFERENT for {candidate_label}."
+                        f"{_reason_suffix(getattr(confirm_result, 'reason', ''))}",
+                        "warn",
+                    )
                     logger.info(
                         "company_link_llm_rejected",
                         company=company,
                         application_id=candidate.id,
+                        llm_reason=getattr(confirm_result, "reason", ""),
                     )
             except Exception as exc:
+                _emit(f"LLM confirm: ERROR for {candidate_label}: {exc}", "error")
                 logger.warning(
                     "company_link_llm_error",
                     company=company,
@@ -793,6 +878,7 @@ def resolve_by_company_candidates(
         company=company,
         candidate_count=len(filtered_candidates),
     )
+    _emit("LLM confirm: skipped (LLM confirm unavailable)", "warn")
     return LinkResult(
         application_id=None,
         confidence=0.0,
@@ -811,6 +897,7 @@ def resolve_by_company(
     email_subject: str = "",
     email_sender: str = "",
     email_body: str = "",
+    decision_logger: Optional[Callable[[str, str], None]] = None,
 ) -> LinkResult:
     """Attempt to link a new email to an existing Application by company name.
 
@@ -874,4 +961,5 @@ def resolve_by_company(
         email_sender=email_sender,
         email_body=email_body,
         timeline_provider=_timeline_provider,
+        decision_logger=decision_logger,
     )

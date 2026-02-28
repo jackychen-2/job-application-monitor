@@ -227,13 +227,21 @@ export function setLlmEnabled(enabled: boolean): Promise<EvalSettings> {
  *  When `emailIds` is provided (non-empty), only those cached emails are evaluated
  *  and `maxEmails` is ignored.
  */
-export function streamEvalRun(name?: string, maxEmails?: number, emailIds?: number[]): EventSource {
+export function streamEvalRun(
+  name?: string,
+  maxEmails?: number,
+  emailIds?: number[],
+  targetRunId?: number,
+): EventSource {
   const params = new URLSearchParams();
   if (name) params.set("name", name);
   if (emailIds && emailIds.length > 0) {
     params.set("email_ids", emailIds.join(","));
   } else if (maxEmails && maxEmails > 0) {
     params.set("max_emails", String(maxEmails));
+  }
+  if (targetRunId != null) {
+    params.set("target_run_id", String(targetRunId));
   }
   const qs = params.toString() ? `?${params}` : "";
   return new EventSource(`${BASE}/runs/stream${qs}`);

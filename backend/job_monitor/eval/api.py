@@ -259,7 +259,7 @@ def cache_get_email(
     result_q = session.query(EvalRunResult).filter(EvalRunResult.cached_email_id == email_id)
     if run_id is not None:
         result_q = result_q.filter(EvalRunResult.eval_run_id == run_id)
-    latest_result = result_q.order_by(EvalRunResult.eval_run_id.desc()).first()
+    latest_result = result_q.order_by(EvalRunResult.eval_run_id.desc(), EvalRunResult.id.desc()).first()
 
     # Get EvalPredictedGroup display info if predicted group exists
     app_display = None
@@ -310,10 +310,18 @@ def cache_get_email_prediction_runs(
     if not ce:
         raise HTTPException(404, "Cached email not found")
 
+    run_id_rows = (
+        session.query(distinct(EvalRunResult.eval_run_id))
+        .filter(EvalRunResult.cached_email_id == email_id)
+        .all()
+    )
+    run_ids = [rid for (rid,) in run_id_rows if rid is not None]
+    if not run_ids:
+        return []
+
     rows = (
         session.query(EvalRun)
-        .join(EvalRunResult, EvalRunResult.eval_run_id == EvalRun.id)
-        .filter(EvalRunResult.cached_email_id == email_id)
+        .filter(EvalRun.id.in_(run_ids))
         .order_by(EvalRun.started_at.desc())
         .all()
     )
@@ -391,7 +399,7 @@ def replay_email_pipeline(
     latest = (
         session.query(EvalRunResult)
         .filter(EvalRunResult.cached_email_id == email_id)
-        .order_by(EvalRunResult.eval_run_id.desc())
+        .order_by(EvalRunResult.eval_run_id.desc(), EvalRunResult.id.desc())
         .first()
     )
     if latest and latest.llm_used:
@@ -704,15 +712,6 @@ def upsert_label(
     if not ce:
         raise HTTPException(404, "Cached email not found")
 
-    # Validate group ID exists if provided (treat 0 as None)
-    group_id = data.correct_application_group_id
-    if group_id == 0:
-        group_id = None
-    if group_id is not None:
-        group = session.query(EvalApplicationGroup).get(group_id)
-        if not group:
-            raise HTTPException(400, f"Application group {group_id} does not exist")
-
     # Build data dict with corrected group_id
     # Strip non-DB fields (run_id, corrections) before passing to SQLAlchemy
     _NON_DB = {"run_id", "corrections"}
@@ -725,7 +724,7 @@ def upsert_label(
     latest_pred = (
         session.query(EvalRunResult)
         .filter(EvalRunResult.cached_email_id == cached_email_id)
-        .order_by(EvalRunResult.eval_run_id.desc())
+        .order_by(EvalRunResult.eval_run_id.desc(), EvalRunResult.id.desc())
         .first()
     )
 
@@ -734,6 +733,21 @@ def upsert_label(
 
     # Run ID to tag corrections with (frontend passes ?run_id or we fall back to latest run)
     save_run_id: Optional[int] = data.run_id or (latest_pred.eval_run_id if latest_pred else None)
+
+    # Validate group ID exists/scope if provided (treat 0 as None)
+    group_id = data.correct_application_group_id
+    if group_id == 0:
+        group_id = None
+    if group_id is not None:
+        group = session.query(EvalApplicationGroup).get(group_id)
+        if not group:
+            raise HTTPException(400, f"Application group {group_id} does not exist")
+        if save_run_id is not None and group.eval_run_id != save_run_id:
+            raise HTTPException(
+                400,
+                f"Application group {group_id} belongs to run #{group.eval_run_id}, "
+                f"cannot be used for label run #{save_run_id}",
+            )
 
     # Load existing label early — scoped to (cached_email_id, eval_run_id)
     _run_id_for_label = save_run_id  # use the run_id from the request
@@ -870,6 +884,7 @@ def upsert_label(
         co_member_email_dates: list[Optional[str]] = []
         co_member_predicted_group_ids: list[Optional[int]] = []
         co_member_predicted_group_names: list[Optional[str]] = []
+        co_member_predictions_complete = True
         if correct_group_id:
             co_labels = (
                 session.query(EvalLabel)
@@ -919,12 +934,18 @@ def upsert_label(
         if dedup_failure is not None:
             group_id_match = False
         elif co_member_ids:
-            # All co-members must be in the same predicted group
-            group_id_match = all(
-                pgid == pred_group_id
-                for pgid in co_member_predicted_group_ids
-                if pgid is not None
+            # Require complete co-member predictions first; otherwise treat as
+            # non-match (prevents all([])==True false positives on partial runs).
+            co_member_predictions_complete = all(
+                pgid is not None for pgid in co_member_predicted_group_ids
             )
+            if not co_member_predictions_complete:
+                group_id_match = False
+            else:
+                group_id_match = all(
+                    pgid == pred_group_id
+                    for pgid in co_member_predicted_group_ids
+                )
         else:
             group_id_match = True  # no co-members yet; key match is sufficient
 
@@ -937,6 +958,10 @@ def upsert_label(
             group_decision_type = "NEW_GROUP_CREATED"
         elif dedup_failure is not None:
             group_decision_type = "SPLIT_FROM_EXISTING"
+        elif co_member_ids and not co_member_predictions_complete:
+            # Review reruns may include only one email. When co-members are not
+            # present in the same eval run, cluster agreement is undecidable.
+            group_decision_type = "PARTIAL_RUN_INCOMPLETE"
         elif not co_member_ids:
             group_decision_type = "NEW_GROUP_CREATED"
         elif group_id_match:
@@ -946,7 +971,13 @@ def upsert_label(
             group_decision_type = "MERGED_INTO_EXISTING"
 
         # ── Grouping failure category ─────────────────────
-        if group_decision_type in ("CONFIRMED", "MARKED_NOT_JOB", "NEW_GROUP_CREATED", None):
+        if group_decision_type in (
+            "CONFIRMED",
+            "MARKED_NOT_JOB",
+            "NEW_GROUP_CREATED",
+            "PARTIAL_RUN_INCOMPLETE",
+            None,
+        ):
             grouping_failure_category: Optional[str] = None
         elif group_decision_type == "MERGED_INTO_EXISTING":
             grouping_failure_category = "OVER_SPLIT"
@@ -991,6 +1022,7 @@ def upsert_label(
             "co_member_subjects":                   co_member_subjects,
             "co_member_email_dates":                co_member_email_dates,
             "co_member_count":                      len(co_member_ids),
+            "co_member_predictions_complete":       co_member_predictions_complete,
             "co_member_predicted_group_ids":        co_member_predicted_group_ids,
             "co_member_predicted_group_names":      co_member_predicted_group_names,
             # Section 4: Decision
@@ -1262,11 +1294,14 @@ def get_group_members(group_id: int, session: Session = Depends(get_db)):
 
     Returns a list of ``{"cached_email_id", "subject", "sender", "email_date", "review_status"}``.
     """
-    labels = (
-        session.query(EvalLabel)
-        .filter(EvalLabel.correct_application_group_id == group_id)
-        .all()
-    )
+    group = session.query(EvalApplicationGroup).get(group_id)
+    if not group:
+        raise HTTPException(404, "Group not found")
+
+    labels_q = session.query(EvalLabel).filter(EvalLabel.correct_application_group_id == group_id)
+    if group.eval_run_id is not None:
+        labels_q = labels_q.filter(EvalLabel.eval_run_id == group.eval_run_id)
+    labels = labels_q.all()
     result = []
     for label in labels:
         ce = session.query(CachedEmail).get(label.cached_email_id)
@@ -1471,6 +1506,7 @@ async def stream_eval_run(
     name: Optional[str] = Query(None),
     max_emails: Optional[int] = Query(None, ge=1, description="Limit evaluation to the first N emails"),
     email_ids: Optional[str] = Query(None, description="Comma-separated list of CachedEmail IDs to evaluate"),
+    target_run_id: Optional[int] = Query(None, description="When provided, append versioned predictions into this existing run"),
     config: AppConfig = Depends(get_config),
 ):
     """Trigger a new evaluation run and stream SSE progress events.
@@ -1519,17 +1555,18 @@ async def stream_eval_run(
                 cancel_token=_eval_cancel_event,
                 max_emails=max_emails,
                 email_ids=parsed_email_ids,
+                target_run_id=target_run_id,
             )
             db.commit()
             _was_cancelled = _eval_cancel_event.is_set()
             if _was_cancelled:
                 _progress_cb(f"Cancelled — saving partial results for run #{result.id}…", 0, 0)
-            # Auto-bootstrap: reset EvalLabel fields to new run's predictions
-            # so Review Queue shows "unlabeled" with fresh defaults.
-            # Corrections history (corrections_json) is preserved.
-            # Runs even on cancel so partial results are usable.
-            _progress_cb(f"Auto-bootstrapping labels from run #{result.id}…", 0, 0)
-            try:
+            # Only bootstrap labels for brand-new runs.
+            # For versioned in-place re-predict (target_run_id), keep existing
+            # labels/corrections intact and update predictions only.
+            if target_run_id is None:
+                _progress_cb(f"Auto-bootstrapping labels from run #{result.id}…", 0, 0)
+                try:
                     from job_monitor.eval.models import EvalPredictedGroup as _EPG
                     _all_groups: list[EvalApplicationGroup] = db.query(EvalApplicationGroup).all()
                     _now = datetime.now(timezone.utc)
@@ -1664,8 +1701,14 @@ async def stream_eval_run(
                         _progress_cb("✓ Report refreshed with bootstrap labels.", 0, 0)
                     except Exception as _rbe:
                         logger.warning("report_refresh_failed", error=str(_rbe))
-            except Exception as _be:
-                logger.warning("auto_bootstrap_failed", error=str(_be))
+                except Exception as _be:
+                    logger.warning("auto_bootstrap_failed", error=str(_be))
+            else:
+                _progress_cb(
+                    f"✓ Run #{result.id} updated in-place (new prediction version).",
+                    0,
+                    0,
+                )
 
             if _was_cancelled:
                 msg_q.put({"type": "cancelled", "run_id": result.id})
@@ -1777,9 +1820,15 @@ def get_run_results(
     from job_monitor.extraction.rules import normalize_req_id as _norm_req
     from job_monitor.linking.resolver import normalize_company as _norm_co, titles_similar as _titles_sim
 
+    latest_ids = (
+        session.query(func.max(EvalRunResult.id).label("max_id"))
+        .filter(EvalRunResult.eval_run_id == run_id)
+        .group_by(EvalRunResult.cached_email_id)
+        .subquery()
+    )
     results = (
         session.query(EvalRunResult)
-        .filter(EvalRunResult.eval_run_id == run_id)
+        .join(latest_ids, EvalRunResult.id == latest_ids.c.max_id)
         .all()
     )
     out = []

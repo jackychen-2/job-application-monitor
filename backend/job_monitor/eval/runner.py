@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import structlog
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from job_monitor.config import AppConfig
@@ -51,6 +52,21 @@ def _validate_job_title(title: str) -> str:
     return _vt(title)
 
 
+def _latest_results_for_run(session: Session, run_id: int) -> list[EvalRunResult]:
+    """Return one latest EvalRunResult per email for a run (max id as version)."""
+    latest_ids = (
+        session.query(func.max(EvalRunResult.id).label("max_id"))
+        .filter(EvalRunResult.eval_run_id == run_id)
+        .group_by(EvalRunResult.cached_email_id)
+        .subquery()
+    )
+    return (
+        session.query(EvalRunResult)
+        .join(latest_ids, EvalRunResult.id == latest_ids.c.max_id)
+        .all()
+    )
+
+
 def run_evaluation(
     config: AppConfig,
     session: Session,
@@ -59,6 +75,7 @@ def run_evaluation(
     cancel_token: Optional[threading.Event] = None,
     max_emails: Optional[int] = None,
     email_ids: Optional[list[int]] = None,
+    target_run_id: Optional[int] = None,
 ) -> EvalRun:
     """Run the full pipeline on all cached emails and compute metrics against labels.
 
@@ -71,6 +88,8 @@ def run_evaluation(
         max_emails: Optional limit — evaluate only the first N emails (ignored when email_ids is set).
         email_ids: Optional explicit list of CachedEmail IDs to evaluate. When set, only those
             emails are run through the pipeline (max_emails is ignored).
+        target_run_id: Optional existing EvalRun.id. When provided, writes new prediction
+            versions into that run instead of creating a new run record.
     """
 
     def _log(msg: str, current: int = 0, total: int = 0) -> None:
@@ -81,19 +100,25 @@ def run_evaluation(
             except Exception:
                 pass
 
-    # Create run record
-    _log("Creating evaluation run record…")
-    eval_run = EvalRun(
-        run_name=run_name or f"Run {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}",
-        started_at=datetime.now(timezone.utc),
-        config_snapshot=json.dumps({
-            "llm_enabled": config.llm_enabled,
-            "llm_model": config.llm_model if config.llm_enabled else None,
-            "llm_provider": config.llm_provider if config.llm_enabled else None,
-        }),
-    )
-    session.add(eval_run)
-    session.flush()
+    # Create run record (or reuse an existing run for in-place versioned re-predict)
+    if target_run_id is None:
+        _log("Creating evaluation run record…")
+        eval_run = EvalRun(
+            run_name=run_name or f"Run {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}",
+            started_at=datetime.now(timezone.utc),
+            config_snapshot=json.dumps({
+                "llm_enabled": config.llm_enabled,
+                "llm_model": config.llm_model if config.llm_enabled else None,
+                "llm_provider": config.llm_provider if config.llm_enabled else None,
+            }),
+        )
+        session.add(eval_run)
+        session.flush()
+    else:
+        eval_run = session.query(EvalRun).get(target_run_id)
+        if eval_run is None:
+            raise ValueError(f"Target eval run #{target_run_id} not found")
+        _log(f"Reusing evaluation run #{target_run_id} (versioned re-predict mode)…")
 
     # Load cached emails — filtered by explicit IDs, limited by max_emails, or all
     _log("Loading cached emails from database…")
@@ -104,13 +129,18 @@ def run_evaluation(
     cached_emails = q.all()
     if not email_ids and max_emails and max_emails > 0:
         cached_emails = cached_emails[:max_emails]
-    eval_run.total_emails = len(cached_emails)
+    if target_run_id is None:
+        eval_run.total_emails = len(cached_emails)
 
     # Load labels indexed by cached_email_id
     _log(f"Found {len(cached_emails)} cached emails. Loading labels…")
     labels_map: dict[int, EvalLabel] = {}
-    for label in session.query(EvalLabel).all():
-        labels_map[label.cached_email_id] = label
+    if target_run_id is None:
+        for label in session.query(EvalLabel).all():
+            labels_map[label.cached_email_id] = label
+    else:
+        for label in session.query(EvalLabel).filter(EvalLabel.eval_run_id == eval_run.id).all():
+            labels_map[label.cached_email_id] = label
     eval_run.labeled_emails = len(labels_map)
     _log(f"Loaded {len(labels_map)} labels.")
 
@@ -140,6 +170,61 @@ def run_evaluation(
     )
 
     app_group_info: dict[int, dict] = {}  # group_id → metadata
+    if target_run_id is not None:
+        # Seed grouping candidates from the existing run's latest predictions so a
+        # single-email re-predict can still link against historical groups in-run.
+        prior_groups = (
+            session.query(EvalPredictedGroup)
+            .filter(EvalPredictedGroup.eval_run_id == eval_run.id)
+            .all()
+        )
+        for pg in prior_groups:
+            app_group_info[pg.id] = {
+                "company_norm": pg.company_norm,
+                "company_orig": pg.company or "",
+                "job_title": pg.job_title or "",
+                "req_id": "",
+                "status": "",
+                "latest_email_date": None,
+                "latest_email_subject": "",
+            }
+
+        for prev in _latest_results_for_run(session, eval_run.id):
+            gid = prev.predicted_application_group_id
+            if gid is None:
+                continue
+            if gid not in app_group_info:
+                company_orig = prev.predicted_company or ""
+                job_title = prev.predicted_job_title or ""
+                app_group_info[gid] = {
+                    "company_norm": _prod_normalize_company(company_orig) or "",
+                    "company_orig": company_orig,
+                    "job_title": job_title,
+                    "req_id": "",
+                    "status": "",
+                    "latest_email_date": None,
+                    "latest_email_subject": "",
+                }
+
+            info = app_group_info[gid]
+            if prev.predicted_company:
+                info["company_orig"] = prev.predicted_company
+                info["company_norm"] = _prod_normalize_company(prev.predicted_company) or info["company_norm"]
+            if prev.predicted_job_title:
+                info["job_title"] = prev.predicted_job_title
+            if prev.predicted_req_id:
+                info["req_id"] = prev.predicted_req_id
+
+            prev_email = prev.cached_email
+            prev_date = prev_email.email_date if prev_email else None
+            prev_subject = prev_email.subject if prev_email else ""
+            latest_date = info.get("latest_email_date")
+            if prev_date and (latest_date is None or prev_date > latest_date):
+                info["latest_email_date"] = prev_date
+                info["latest_email_subject"] = prev_subject or ""
+                if prev.predicted_status:
+                    info["status"] = prev.predicted_status
+
     total = len(cached_emails)
 
     for idx, cached in enumerate(cached_emails):
@@ -359,6 +444,9 @@ def run_evaluation(
                         ],
                     }
 
+                def _grouping_log(message: str, level: str = "info") -> None:
+                    dstep("grouping", message, level)
+
                 shared_result = _resolve_company_link_shared(
                     company=pred_company,
                     candidates=group_candidates,
@@ -370,6 +458,7 @@ def run_evaluation(
                     email_sender=sender,
                     email_body=body,
                     timeline_provider=_timeline_provider,
+                    decision_logger=_grouping_log,
                 )
 
                 if shared_result.is_linked and shared_result.application_id in app_group_info:
@@ -467,7 +556,33 @@ def run_evaluation(
             logger.warning("eval_email_commit_failed", email_id=cached.id, error=str(commit_err))
             session.rollback()
 
-    # Compute metrics against labels
+    if target_run_id is not None:
+        # In versioned re-predict mode, recompute report from latest per-email
+        # results in this run (not just the subset processed in this call).
+        _log(f"Pipeline complete — processed {len(results)} emails. Refreshing Run #{eval_run.id}…", total, total)
+        eval_run.completed_at = datetime.now(timezone.utc)
+        eval_run.total_emails = (
+            session.query(func.count(func.distinct(EvalRunResult.cached_email_id)))
+            .filter(EvalRunResult.eval_run_id == eval_run.id)
+            .scalar() or 0
+        )
+        eval_run.labeled_emails = (
+            session.query(func.count(EvalLabel.id))
+            .filter(EvalLabel.eval_run_id == eval_run.id)
+            .scalar() or 0
+        )
+        refresh_eval_run_report(session, eval_run.id)
+        session.commit()
+        _log(f"✓ Re-predict complete — updated Run #{eval_run.id} (versioned).", total, total)
+        logger.info(
+            "eval_run_versioned_update_complete",
+            run_id=eval_run.id,
+            processed=len(results),
+            total=eval_run.total_emails,
+        )
+        return eval_run
+
+    # Compute metrics against labels (new run mode)
     _log(f"Pipeline complete — processed {len(results)} emails. Computing metrics…", total, total)
     report = _compute_report(results, labels_map, cached_emails)
 
@@ -589,11 +704,7 @@ def refresh_eval_run_report(session: Session, run_id: int) -> None:
     if eval_run is None:
         return
 
-    results = (
-        session.query(EvalRunResult)
-        .filter(EvalRunResult.eval_run_id == run_id)
-        .all()
-    )
+    results = _latest_results_for_run(session, run_id)
     if not results:
         return
 
@@ -620,6 +731,7 @@ def refresh_eval_run_report(session: Session, run_id: int) -> None:
     eval_run.grouping_v_measure = report.grouping.v_measure
     eval_run.report_json = report.to_json()
     eval_run.labeled_emails = len(labels_map)
+    eval_run.total_emails = len(results)
 
     # Recompute per-result grouping correctness
     _true_to_pred: dict[int, set[int]] = defaultdict(set)

@@ -118,23 +118,21 @@ def _get_or_create_application(
     # Use normalized_company for matching to handle variations like "Qventus, Inc" vs "Qventus"
     normalized = normalize_company(company)
     
+    def _base_q():
+        return session.query(Application).filter(Application.normalized_company == normalized)
+
     # Try to find existing (normalized_company + job_title + req_id match)
     # Handle NULL/empty title and req_id as equivalent buckets.
     if job_title and req_id:
         existing = (
-            session.query(Application)
-            .filter(
-                Application.normalized_company == normalized,
-                Application.job_title == job_title,
-                Application.req_id == req_id,
-            )
+            _base_q()
+            .filter(Application.job_title == job_title, Application.req_id == req_id)
             .first()
         )
     elif job_title:
         existing = (
-            session.query(Application)
+            _base_q()
             .filter(
-                Application.normalized_company == normalized,
                 Application.job_title == job_title,
                 (Application.req_id == None) | (Application.req_id == ""),  # noqa: E711
             )
@@ -142,9 +140,8 @@ def _get_or_create_application(
         )
     elif req_id:
         existing = (
-            session.query(Application)
+            _base_q()
             .filter(
-                Application.normalized_company == normalized,
                 (Application.job_title == None) | (Application.job_title == ""),  # noqa: E711
                 Application.req_id == req_id,
             )
@@ -152,9 +149,8 @@ def _get_or_create_application(
         )
     else:
         existing = (
-            session.query(Application)
+            _base_q()
             .filter(
-                Application.normalized_company == normalized,
                 (Application.job_title == None) | (Application.job_title == ""),  # noqa: E711
                 (Application.req_id == None) | (Application.req_id == ""),  # noqa: E711
             )
