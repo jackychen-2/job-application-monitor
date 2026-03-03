@@ -131,7 +131,44 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Stats cards */}
+      {/* Applications + LLM cost (same area) */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+          <h2 className="text-sm font-medium text-gray-700 mb-3">Applications + LLM Cost</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 gap-3">
+            <div className="rounded-md border border-gray-200 bg-gray-50 px-4 py-3">
+              <div className="text-xs uppercase tracking-wide text-gray-500">Applications Tracked</div>
+              <div className={`mt-1 text-2xl font-bold ${statsLoading ? "animate-pulse text-gray-300" : "text-gray-900"}`}>
+                {statsLoading ? "—" : (stats?.total_applications ?? 0)}
+              </div>
+            </div>
+            <div className="rounded-md border border-gray-200 bg-gray-50 px-4 py-3">
+              <div className="text-xs uppercase tracking-wide text-gray-500">Total LLM Cost</div>
+              <div className={`mt-1 text-2xl font-bold ${statsLoading ? "animate-pulse text-gray-300" : "text-indigo-700"}`}>
+                {statsLoading ? "—" : `$${(stats?.total_llm_cost ?? 0).toFixed(4)}`}
+              </div>
+              <div className="mt-1 text-xs text-gray-500">
+                {statsLoading ? "" : `${stats?.total_emails_scanned ?? 0} emails scanned`}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 xl:col-span-2">
+          <CostChart
+            data={stats?.daily_llm_costs ?? []}
+            totalCost={stats?.total_llm_cost ?? 0}
+          />
+        </div>
+      </div>
+
+      {/* Sankey (single, larger section) */}
+      <SankeyFlow
+        flowData={flowData}
+        loading={flowLoading}
+        height={430}
+      />
+
+      {/* Status cards */}
       <StatsCards stats={stats} loading={statsLoading} />
 
       {/* Activity Heatmap (GitHub/LeetCode style) */}
@@ -139,20 +176,6 @@ export default function Dashboard() {
         data={stats?.daily_applications ?? []}
         totalApplications={stats?.total_applications ?? 0}
       />
-
-      {/* Sankey Flow + LLM Cost Chart */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <SankeyFlow
-          flowData={flowData}
-          loading={flowLoading}
-        />
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-          <CostChart
-            data={stats?.daily_llm_costs ?? []}
-            totalCost={stats?.total_llm_cost ?? 0}
-          />
-        </div>
-      </div>
 
       {/* Review Queue (shows only if there are pending emails) */}
       <ReviewQueue onResolved={handleRefresh} />

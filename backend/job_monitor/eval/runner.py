@@ -12,7 +12,6 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from job_monitor.config import AppConfig
-from job_monitor.email.classifier import is_job_related
 from job_monitor.eval.cache import reparse_cached_email
 from job_monitor.eval.metrics import (
     FullReport,
@@ -28,19 +27,14 @@ from job_monitor.eval.models import (
     EvalRun,
     EvalRunResult,
 )
+from job_monitor.extraction.core import run_core_classification_and_extraction
 from job_monitor.extraction.llm import (
-    LLMExtractionResult,
     LLMProvider,
     create_llm_provider,
-    extract_with_timeout,
 )
+from job_monitor.extraction.pipeline import build_title_req_filters as _prod_build_title_req_filters
 from job_monitor.extraction.rules import (
-    extract_company,
-    extract_job_req_id,
-    extract_job_title,
-    extract_status,
     normalize_req_id,
-    split_title_and_req_id,
 )
 
 logger = structlog.get_logger(__name__)
@@ -183,7 +177,7 @@ def run_evaluation(
                 "company_norm": pg.company_norm,
                 "company_orig": pg.company or "",
                 "job_title": pg.job_title or "",
-                "req_id": "",
+                "req_id": pg.req_id or "",
                 "status": "",
                 "latest_email_date": None,
                 "latest_email_subject": "",
@@ -257,136 +251,52 @@ def run_evaluation(
         dstep("input", f"Sender  : {sender[:120]!r}")
         dstep("input", f"Body    : {body[:200]!r}{'…' if len(body) > 200 else ''}")
 
-        # Run pipeline stages
-        llm_result: Optional[LLMExtractionResult] = None
-        llm_used = False
+        # Stage 1~3: Shared prod core (classification + status + extraction)
+        core_prediction = run_core_classification_and_extraction(
+            sender=sender,
+            subject=subject,
+            body=body,
+            llm_provider=llm_provider,
+            llm_timeout_sec=config.llm_timeout_sec,
+            validate_job_title=_validate_job_title,
+            decision_logger=dstep,
+            llm_provider_label=f"{config.llm_provider} / {config.llm_model}",
+        )
+        llm_result = core_prediction.classification.llm_result
+        llm_used = core_prediction.classification.llm_used
+        pred_is_job = core_prediction.classification.is_trackable_job
+        pred_email_category = core_prediction.classification.predicted_email_category
+        pred_non_job_reason = core_prediction.classification.non_job_reason
 
-        # Stage 1: LLM extraction (if available)
-        if llm_provider is not None:
-            llm_used = True
-            dstep("llm", f"LLM enabled: {config.llm_provider} / {config.llm_model}")
-            try:
-                llm_result = extract_with_timeout(
-                    llm_provider, sender, subject, body, timeout_sec=config.llm_timeout_sec
-                )
-                eval_run.total_prompt_tokens += llm_result.prompt_tokens
-                eval_run.total_completion_tokens += llm_result.completion_tokens
-                eval_run.total_estimated_cost += llm_result.estimated_cost_usd
-                dstep("llm", f"is_job={llm_result.is_job_application}  category={llm_result.email_category!r}  "
-                      f"company={llm_result.company!r}  title={llm_result.job_title!r}  "
-                      f"req_id={llm_result.req_id!r}  "
-                      f"status={llm_result.status!r}  confidence={llm_result.confidence}  "
-                      f"tokens={llm_result.prompt_tokens}+{llm_result.completion_tokens}")
-            except Exception as llm_exc:
-                dstep("llm", f"LLM failed: {llm_exc} — falling back to rules", "error")
-                llm_result = None
-        else:
-            dstep("llm", "LLM disabled — rule-based pipeline only", "info")
-
-        # Stage 2: Classification
-        dstep("classification", "═══ Stage 2: Classification ═══")
-        is_recruiter_reach_out = False
-        is_onboarding = False
-        is_oa = False
         if llm_result is not None:
-            normalized_status = (llm_result.status or "").strip().lower().replace("_", " ")
-            is_recruiter_reach_out = normalized_status in {
-                "recruiter reach-out",
-                "recruiter reach out",
-            }
-            is_onboarding = normalized_status in {
-                "onboarding",
-                "background check",
-                "background screening",
-            }
-            is_oa = normalized_status in {
-                "oa",
-                "online assessment",
-                "online assessemnt",
-                "online test",
-                "coding challenge",
-                "assessment",
-                "take-home",
-                "take home",
-                "hackerrank",
-                "codesignal",
-                "codility",
-            }
-            pred_is_job = llm_result.is_job_application or is_recruiter_reach_out or is_onboarding or is_oa
-            dstep(
-                "classification",
-                f"LLM result: is_job_application={llm_result.is_job_application} "
-                f"email_category={llm_result.email_category!r} "
-                f"trackable={pred_is_job} "
-                f"(confidence={llm_result.confidence:.2f})",
-                "success" if pred_is_job else "warn",
-            )
-        else:
-            pred_is_job = is_job_related(subject, sender)
-            dstep("classification",
-                  f"Rule-based: is_job_related={pred_is_job} (subject: {subject[:80]!r})",
-                  "success" if pred_is_job else "warn")
+            eval_run.total_prompt_tokens += llm_result.prompt_tokens
+            eval_run.total_completion_tokens += llm_result.completion_tokens
+            eval_run.total_estimated_cost += llm_result.estimated_cost_usd
 
         if not pred_is_job:
-            dstep("classification", "→ Not job-related — field extraction skipped", "warn")
             pred_company = None
             pred_title = None
             pred_req_id = None
             pred_status = None
             pred_confidence = None
         else:
-            # Stage 3: Field extraction (only for job-related emails)
-            dstep("company", "═══ Stage 3: Company ═══")
-            dstep("title",   "═══ Stage 3: Title ═══")
-            dstep("req_id",  "═══ Stage 3: Req ID ═══")
-            dstep("status",  "═══ Stage 3: Status ═══")
-            if llm_result is not None:
-                pred_company = (llm_result.company or "").strip() or "Unknown"
-                raw_title = _validate_job_title(llm_result.base_title or llm_result.job_title)
-                base_title, req_from_title = split_title_and_req_id(raw_title)
-                pred_req_id = normalize_req_id(llm_result.req_id) or normalize_req_id(req_from_title)
-                if not base_title:
-                    llm_title_with_req = _validate_job_title(llm_result.title_with_req_id)
-                    base_title, req_from_title_with_req = split_title_and_req_id(llm_title_with_req)
-                    if not pred_req_id:
-                        pred_req_id = normalize_req_id(req_from_title_with_req)
-                pred_title = base_title
-                if is_recruiter_reach_out:
-                    pred_status = "Recruiter Reach-out"
-                    dstep("status", "LLM status recruiter reach-out -> Recruiter Reach-out", "success")
-                elif is_oa:
-                    pred_status = "OA"
-                    dstep("status", "LLM status OA-like -> OA", "success")
-                elif is_onboarding:
-                    pred_status = "Onboarding"
-                    dstep("status", "LLM status onboarding-like -> Onboarding", "success")
-                else:
-                    llm_status = llm_result.status
-                    if llm_status and llm_status.lower() != "unknown":
-                        pred_status = llm_status
-                        dstep("status", f"LLM: {pred_status!r}", "success")
-                    else:
-                        pred_status = "Unknown"
-                        dstep("status", "LLM returned unknown", "warn")
-                pred_confidence = llm_result.confidence
-                dstep("company", f"LLM: {pred_company!r}",
-                      "success" if pred_company else "warn")
-                dstep("title",   f"LLM: {pred_title!r}",
-                      "success" if pred_title else "warn")
-                dstep("req_id",  f"LLM: {pred_req_id!r}",
-                      "success" if pred_req_id else "warn")
-            else:
-                pred_company = extract_company(subject, sender)
-                raw_title = _validate_job_title(extract_job_title(subject, body))
-                base_title, req_from_title = split_title_and_req_id(raw_title)
-                pred_req_id = normalize_req_id(extract_job_req_id(subject, body, base_title) or req_from_title)
-                pred_title = base_title
-                pred_status = extract_status(subject, body)
+            extraction = core_prediction.extraction
+            if extraction is None:
+                dstep("classification", "Core extraction missing for trackable email", "error")
+                pred_company = None
+                pred_title = None
+                pred_req_id = None
+                pred_status = None
                 pred_confidence = None
-                dstep("company", f"Rules: {pred_company!r}", "success" if pred_company and pred_company != "Unknown" else "warn")
-                dstep("title",   f"Rules: {pred_title!r}", "success" if pred_title else "warn")
-                dstep("req_id",  f"Rules: {pred_req_id!r}", "success" if pred_req_id else "warn")
-                dstep("status",  f"Rules: {pred_status!r}", "success")
+                pred_is_job = False
+                pred_email_category = "not_job_related"
+                pred_non_job_reason = None
+            else:
+                pred_company = extraction.company
+                pred_title = extraction.job_title
+                pred_req_id = extraction.req_id
+                pred_status = extraction.status
+                pred_confidence = extraction.confidence
 
         # Stage 4: Grouping
         # Uses the shared production company-link resolver core.
@@ -486,22 +396,30 @@ def run_evaluation(
                     app_group_info[pred_group_id]["latest_email_subject"] = subject
                 else:
                     # Shared resolver declined linking — create/reuse an eval predicted group.
-                    title_norm_for_key = (pred_title or "").strip().lower()
-                    existing_group = session.query(EvalPredictedGroup).filter(
+                    # Use the SAME production dedup function as _get_or_create_application()
+                    # so that the two paths never diverge.
+                    _norm_req = normalize_req_id(pred_req_id or "") or ""
+                    _grp_q = session.query(EvalPredictedGroup).filter(
                         EvalPredictedGroup.eval_run_id == eval_run.id,
                         EvalPredictedGroup.company_norm == company_norm_prod,
-                        EvalPredictedGroup.job_title_norm == title_norm_for_key,
+                    )
+                    # _prod_build_title_req_filters is build_title_req_filters() from pipeline.py —
+                    # the identical 4-case (job_title, req_id) logic used by _get_or_create_application.
+                    existing_group = _grp_q.filter(
+                        *_prod_build_title_req_filters(EvalPredictedGroup, pred_title, _norm_req)
                     ).first()
+
                     if existing_group:
                         pred_group_id = existing_group.id
-                        dstep("grouping", f"Reused existing group #{pred_group_id} (same norm key)", "info")
+                        dstep("grouping", f"Reused existing group #{pred_group_id} (same dedup key: title+req_id)", "info")
                     else:
                         pred_group = EvalPredictedGroup(
                             eval_run_id=eval_run.id,
                             company=pred_company,
                             job_title=pred_title,
+                            req_id=_norm_req or None,
                             company_norm=company_norm_prod,
-                            job_title_norm=title_norm_for_key,
+                            job_title_norm=(pred_title or "").strip().lower(),
                         )
                         session.add(pred_group)
                         session.flush()
@@ -521,19 +439,12 @@ def run_evaluation(
         else:
             dstep("grouping", "Skipped (not job-related or no company extracted)", "warn")
 
-        # Derive predicted_email_category from LLM result or boolean fallback
-        if llm_result and llm_result.email_category:
-            pred_email_category: str | None = llm_result.email_category
-        elif pred_is_job:
-            pred_email_category = "job_application"
-        else:
-            pred_email_category = None  # rule-based: can't distinguish recruiter vs. not_job_related
-
         result = EvalRunResult(
             eval_run_id=eval_run.id,
             cached_email_id=cached.id,
             predicted_is_job_related=pred_is_job,
             predicted_email_category=pred_email_category,
+            predicted_non_job_reason=pred_non_job_reason if not pred_is_job else None,
             predicted_company=pred_company if pred_is_job else None,
             predicted_job_title=pred_title if pred_is_job else None,
             predicted_req_id=pred_req_id if pred_is_job else None,

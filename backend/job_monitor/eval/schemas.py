@@ -56,6 +56,7 @@ class CachedEmailDetailOut(CachedEmailOut):
     # Pipeline predictions (from latest eval run, if any)
     predicted_is_job_related: Optional[bool] = None
     predicted_email_category: Optional[str] = None
+    predicted_non_job_reason: Optional[str] = None
     predicted_company: Optional[str] = None
     predicted_job_title: Optional[str] = None
     predicted_req_id: Optional[str] = None
@@ -272,6 +273,7 @@ class EvalRunResultOut(BaseModel):
     cached_email_id: int
     predicted_is_job_related: bool
     predicted_email_category: Optional[str] = None
+    predicted_non_job_reason: Optional[str] = None
     predicted_company: Optional[str] = None
     predicted_job_title: Optional[str] = None
     predicted_req_id: Optional[str] = None
