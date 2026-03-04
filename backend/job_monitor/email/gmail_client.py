@@ -21,6 +21,15 @@ class GmailHistoryExpiredError(RuntimeError):
     """Raised when startHistoryId is too old and Gmail no longer has the history window."""
 
 
+class GmailApiError(RuntimeError):
+    """Raised for Gmail API HTTP failures with parsed provider error details."""
+
+    def __init__(self, status_code: int, reason: str | None, message: str) -> None:
+        self.status_code = status_code
+        self.reason = reason
+        super().__init__(message)
+
+
 def _stable_uid_from_gmail_id(gmail_message_id: str) -> int:
     """Map Gmail message ID to stable signed 63-bit int for legacy uid column compatibility."""
     digest = hashlib.sha256(gmail_message_id.encode("utf-8")).digest()
@@ -66,10 +75,39 @@ class GmailClient:
             raise RuntimeError("Gmail client not initialized — use as context manager")
         return self._client
 
+    @staticmethod
+    def _raise_gmail_error(exc: httpx.HTTPStatusError) -> None:
+        response = exc.response
+        status = response.status_code
+
+        reason: str | None = None
+        message = f"Gmail API request failed ({status})"
+        try:
+            payload = response.json()
+            err = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(err, dict):
+                api_message = str(err.get("message") or "").strip()
+                details = err.get("errors") or []
+                if isinstance(details, list) and details:
+                    first = details[0]
+                    if isinstance(first, dict):
+                        reason = str(first.get("reason") or "").strip() or None
+                if api_message:
+                    message = f"Gmail API request failed ({status}): {api_message}"
+                    if reason:
+                        message = f"{message} [reason={reason}]"
+        except Exception:
+            pass
+
+        raise GmailApiError(status_code=status, reason=reason, message=message) from exc
+
     def _get(self, path: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         client = self._ensure_client()
         res = client.get(path, params=params)
-        res.raise_for_status()
+        try:
+            res.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            self._raise_gmail_error(exc)
         return res.json()
 
     def get_latest_history_id(self) -> int:
@@ -163,8 +201,8 @@ class GmailClient:
 
             try:
                 data = self._get("/users/me/history", params=params)
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
+            except GmailApiError as exc:
+                if exc.status_code == 404:
                     raise GmailHistoryExpiredError(
                         f"startHistoryId {start_history_id} expired"
                     ) from exc
