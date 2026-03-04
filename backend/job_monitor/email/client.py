@@ -41,9 +41,17 @@ class IMAPClient:
                 msg = client.fetch_message(uid)
     """
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        email_username: str | None = None,
+        oauth_access_token: str | None = None,
+    ) -> None:
         self._config = config
         self._mail: imaplib.IMAP4_SSL | None = None
+        self._email_username = email_username or config.email_username
+        self._oauth_access_token = oauth_access_token
 
     # ── Context manager ───────────────────────────────────
     def __enter__(self) -> "IMAPClient":
@@ -68,8 +76,16 @@ class IMAPClient:
         logger.info("imap_connecting", host=cfg.imap_host, port=cfg.imap_port)
         self._mail = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port)
 
-        logger.info("imap_logging_in", username=cfg.email_username)
-        self._mail.login(cfg.email_username, cfg.email_password.get_secret_value())
+        if self._oauth_access_token:
+            logger.info("imap_oauth_authenticating", username=self._email_username)
+            xoauth2 = f"user={self._email_username}\x01auth=Bearer {self._oauth_access_token}\x01\x01"
+            self._mail.authenticate("XOAUTH2", lambda _: xoauth2.encode("utf-8"))
+        else:
+            logger.info("imap_logging_in", username=self._email_username)
+            password = cfg.email_password.get_secret_value()
+            if not self._email_username or not password:
+                raise RuntimeError("IMAP credentials are not configured")
+            self._mail.login(self._email_username, password)
 
         status, _ = self._mail.select(cfg.email_folder)
         if status != "OK":

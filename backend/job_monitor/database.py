@@ -7,12 +7,29 @@ from datetime import datetime
 from typing import Generator
 
 import structlog
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, sessionmaker, with_loader_criteria
 
 from job_monitor.config import AppConfig
-from job_monitor.models import Base
+from job_monitor.models import (
+    Application,
+    AuthSession,
+    Base,
+    GoogleAccount,
+    ProcessedEmail,
+    ScanState,
+    StatusHistory,
+    User,
+)
+from job_monitor.eval.models import (
+    CachedEmail,
+    EvalApplicationGroup,
+    EvalLabel,
+    EvalPredictedGroup,
+    EvalRun,
+    EvalRunResult,
+)
 import job_monitor.eval.models as _eval_models  # noqa: F401 — register eval tables
 
 logger = structlog.get_logger(__name__)
@@ -21,6 +38,63 @@ logger = structlog.get_logger(__name__)
 _engine: Engine | None = None
 _SessionLocal: sessionmaker[Session] | None = None
 
+_OWNER_SCOPED_MODELS = (
+    Application,
+    ProcessedEmail,
+    StatusHistory,
+    ScanState,
+    CachedEmail,
+    EvalApplicationGroup,
+    EvalLabel,
+    EvalRun,
+    EvalRunResult,
+    EvalPredictedGroup,
+)
+
+_OWNER_SCOPED_TABLES = (
+    "applications",
+    "processed_emails",
+    "status_history",
+    "scan_state",
+    "cached_emails",
+    "eval_application_groups",
+    "eval_labels",
+    "eval_runs",
+    "eval_run_results",
+    "eval_predicted_groups",
+)
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _inject_owner_scope(execute_state):
+    """Automatically scope owner-bound ORM selects to request owner_user_id."""
+    owner_user_id = execute_state.session.info.get("owner_user_id")
+    if not owner_user_id or not execute_state.is_select:
+        return
+
+    statement = execute_state.statement
+    for model in _OWNER_SCOPED_MODELS:
+        statement = statement.options(
+            with_loader_criteria(
+                model,
+                lambda cls: cls.owner_user_id == owner_user_id,  # noqa: B023
+                include_aliases=True,
+            )
+        )
+    execute_state.statement = statement
+
+
+@event.listens_for(Session, "before_flush")
+def _assign_owner_before_flush(session: Session, flush_context, instances) -> None:  # type: ignore[no-untyped-def]
+    """Default owner_user_id on newly created owner-scoped rows."""
+    owner_user_id = session.info.get("owner_user_id")
+    if not owner_user_id:
+        return
+
+    for obj in session.new:
+        if hasattr(obj, "owner_user_id") and getattr(obj, "owner_user_id", None) is None:
+            setattr(obj, "owner_user_id", owner_user_id)
+
 
 def _enable_sqlite_wal(dbapi_conn: object, _connection_record: object) -> None:
     """Enable WAL mode for SQLite for better concurrent read performance."""
@@ -28,189 +102,6 @@ def _enable_sqlite_wal(dbapi_conn: object, _connection_record: object) -> None:
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
-
-
-def _add_column_if_missing(engine: Engine, table: str, column: str, definition: str) -> None:
-    """Add a column to an existing table only if it doesn't already exist (SQLite-safe)."""
-    with engine.connect() as conn:
-        rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
-        existing = {r[1] for r in rows}
-        if column not in existing:
-            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
-            conn.commit()
-            logger.info("schema_migration_applied", table=table, column=column)
-
-
-def _migrate_applications_unique_constraint(engine: Engine) -> None:
-    """Upgrade applications unique constraint to include req_id for SQLite DBs."""
-    if engine.dialect.name != "sqlite":
-        return
-
-    with engine.connect() as conn:
-        row = conn.execute(
-            text("SELECT sql FROM sqlite_master WHERE type='table' AND name='applications'")
-        ).fetchone()
-        create_sql = (row[0] or "").lower() if row else ""
-        if not create_sql:
-            return
-
-        already_new = (
-            "uq_company_job_title_req_id" in create_sql
-            or "unique (company, job_title, req_id)" in create_sql
-        )
-        old_shape = (
-            "uq_company_job_title" in create_sql
-            or "unique (company, job_title)" in create_sql
-        )
-        if already_new or not old_shape:
-            return
-
-        conn.execute(text("PRAGMA foreign_keys=OFF"))
-        conn.execute(
-            text(
-                """
-                CREATE TABLE applications_new (
-                    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-                    company VARCHAR(200) NOT NULL,
-                    normalized_company VARCHAR(200),
-                    job_title VARCHAR(300),
-                    req_id VARCHAR(80),
-                    email_subject TEXT,
-                    email_sender VARCHAR(300),
-                    email_date DATETIME,
-                    status VARCHAR(50) NOT NULL DEFAULT '已申请',
-                    source VARCHAR(50) NOT NULL DEFAULT 'email',
-                    notes TEXT,
-                    created_at DATETIME NOT NULL,
-                    updated_at DATETIME NOT NULL,
-                    CONSTRAINT uq_company_job_title_req_id UNIQUE (company, job_title, req_id)
-                )
-                """
-            )
-        )
-        conn.execute(
-            text(
-                """
-                INSERT INTO applications_new (
-                    id, company, normalized_company, job_title, req_id,
-                    email_subject, email_sender, email_date, status, source, notes,
-                    created_at, updated_at
-                )
-                SELECT
-                    id, company, normalized_company, job_title, req_id,
-                    email_subject, email_sender, email_date, status, source, notes,
-                    created_at, updated_at
-                FROM applications
-                """
-            )
-        )
-        conn.execute(text("DROP TABLE applications"))
-        conn.execute(text("ALTER TABLE applications_new RENAME TO applications"))
-        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_applications_company ON applications (company)"))
-        conn.execute(
-            text("CREATE INDEX IF NOT EXISTS ix_applications_normalized_company ON applications (normalized_company)")
-        )
-        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_applications_status ON applications (status)"))
-        conn.execute(text("PRAGMA foreign_keys=ON"))
-        conn.commit()
-        logger.info("schema_migration_applied", table="applications", change="unique_constraint_req_id")
-
-
-def _migrate_eval_predicted_groups_constraint(engine: Engine) -> None:
-    """Upgrade eval_predicted_groups unique constraint from job_title_norm to job_title+req_id.
-
-    v1: UNIQUE (eval_run_id, company_norm, job_title_norm)
-    v2: UNIQUE (eval_run_id, company_norm, job_title, req_id)  ← mirrors Application dedup key
-
-    This makes the eval fallback dedup identical to _get_or_create_application() so that
-    eval faithfully replicates production behaviour.
-    """
-    if engine.dialect.name != "sqlite":
-        return
-
-    with engine.connect() as conn:
-        row = conn.execute(
-            text("SELECT sql FROM sqlite_master WHERE type='table' AND name='eval_predicted_groups'")
-        ).fetchone()
-        create_sql = (row[0] or "").lower() if row else ""
-        if not create_sql:
-            return  # table does not exist yet; create_all() will use the new model schema
-
-        # Already migrated to v2?
-        if "uq_predicted_group_v2" in create_sql:
-            return
-
-        # Only migrate if the old v1 constraint is present
-        if "uq_predicted_group" not in create_sql:
-            return
-
-        conn.execute(text("PRAGMA foreign_keys=OFF"))
-        conn.execute(
-            text(
-                """
-                CREATE TABLE eval_predicted_groups_new (
-                    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-                    eval_run_id INTEGER NOT NULL
-                        REFERENCES eval_runs(id) ON DELETE CASCADE,
-                    company VARCHAR(200),
-                    job_title VARCHAR(300),
-                    req_id VARCHAR(80),
-                    company_norm VARCHAR(200) NOT NULL DEFAULT '',
-                    job_title_norm VARCHAR(300) NOT NULL DEFAULT '',
-                    created_at DATETIME NOT NULL,
-                    CONSTRAINT uq_predicted_group_v2
-                        UNIQUE (eval_run_id, company_norm, job_title, req_id)
-                )
-                """
-            )
-        )
-        conn.execute(
-            text(
-                """
-                INSERT INTO eval_predicted_groups_new (
-                    id, eval_run_id, company, job_title, req_id,
-                    company_norm, job_title_norm, created_at
-                )
-                SELECT
-                    id, eval_run_id, company, job_title, NULL,
-                    company_norm, job_title_norm, created_at
-                FROM eval_predicted_groups
-                """
-            )
-        )
-        conn.execute(text("DROP TABLE eval_predicted_groups"))
-        conn.execute(
-            text("ALTER TABLE eval_predicted_groups_new RENAME TO eval_predicted_groups")
-        )
-        conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_eval_predicted_groups_eval_run_id "
-                "ON eval_predicted_groups (eval_run_id)"
-            )
-        )
-        conn.execute(text("PRAGMA foreign_keys=ON"))
-        conn.commit()
-        logger.info(
-            "schema_migration_applied",
-            table="eval_predicted_groups",
-            change="uq_predicted_group_v2_job_title_req_id",
-        )
-
-
-def _apply_schema_migrations(engine: Engine) -> None:
-    """Run incremental column additions for existing databases."""
-    _add_column_if_missing(engine, "applications", "req_id", "VARCHAR(80)")
-    _migrate_applications_unique_constraint(engine)
-    _add_column_if_missing(engine, "eval_labels", "email_category", "VARCHAR(50)")
-    _add_column_if_missing(engine, "eval_labels", "correct_req_id", "VARCHAR(80)")
-    _add_column_if_missing(engine, "eval_run_results", "predicted_email_category", "VARCHAR(50)")
-    _add_column_if_missing(engine, "eval_run_results", "predicted_non_job_reason", "VARCHAR(64)")
-    _add_column_if_missing(engine, "eval_run_results", "predicted_req_id", "VARCHAR(80)")
-    _add_column_if_missing(engine, "eval_run_results", "req_id_correct", "BOOLEAN")
-    # Rebuild eval_predicted_groups with v2 dedup key (job_title+req_id, mirrors production)
-    _migrate_eval_predicted_groups_constraint(engine)
-    # Safety net: add req_id column for any fresh install that already has v2 schema via create_all
-    _add_column_if_missing(engine, "eval_predicted_groups", "req_id", "VARCHAR(80)")
 
 
 def init_db(config: AppConfig) -> Engine:
@@ -232,100 +123,148 @@ def init_db(config: AppConfig) -> Engine:
     if config.database_url.startswith("sqlite"):
         event.listen(_engine, "connect", _enable_sqlite_wal)
 
-    # Create all tables
+    # Create all tables for new databases
     Base.metadata.create_all(bind=_engine)
-    # Incremental migrations for columns added after initial table creation
-    _apply_schema_migrations(_engine)
+    _SessionLocal = sessionmaker(bind=_engine, autocommit=False, autoflush=False)
+
+    # Upgrade existing DB schema and owner backfill when needed
+    _run_schema_upgrades(config)
+
     logger.info("database_initialized", url=config.database_url)
 
-    _SessionLocal = sessionmaker(bind=_engine, autocommit=False, autoflush=False)
-    
     # Re-process data with latest non-LLM logic on startup
     _cleanup_on_startup()
-    
+
     return _engine
+
+
+def _run_schema_upgrades(config: AppConfig) -> None:
+    """Run idempotent additive schema upgrades for auth and owner scoping."""
+    if _engine is None or _SessionLocal is None:
+        return
+
+    inspector = inspect(_engine)
+    existing_tables = set(inspector.get_table_names())
+
+    with _engine.begin() as conn:
+        for table_name in _OWNER_SCOPED_TABLES:
+            if table_name not in existing_tables:
+                continue
+
+            columns = {col["name"] for col in inspector.get_columns(table_name)}
+            if "owner_user_id" not in columns:
+                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN owner_user_id INTEGER"))
+                logger.info("schema_upgrade_added_column", table=table_name, column="owner_user_id")
+            conn.execute(
+                text(
+                    f"CREATE INDEX IF NOT EXISTS idx_{table_name}_owner_user_id "
+                    f"ON {table_name}(owner_user_id)"
+                )
+            )
+
+    session = _SessionLocal()
+    try:
+        rows_needing_backfill = 0
+        for table_name in _OWNER_SCOPED_TABLES:
+            if table_name not in existing_tables:
+                continue
+            count = session.execute(
+                text(f"SELECT COUNT(*) FROM {table_name} WHERE owner_user_id IS NULL")
+            ).scalar_one()
+            rows_needing_backfill += int(count or 0)
+
+        if rows_needing_backfill == 0:
+            return
+
+        owner_email = config.legacy_owner_email.strip().lower()
+        if not owner_email:
+            raise RuntimeError(
+                "LEGACY_OWNER_EMAIL is required because existing rows need owner backfill"
+            )
+
+        owner = session.query(User).filter(User.email == owner_email).first()
+        if owner is None:
+            owner = User(email=owner_email, display_name="Legacy Owner", is_active=True)
+            session.add(owner)
+            session.flush()
+
+        for table_name in _OWNER_SCOPED_TABLES:
+            if table_name not in existing_tables:
+                continue
+            session.execute(
+                text(f"UPDATE {table_name} SET owner_user_id = :owner_id WHERE owner_user_id IS NULL"),
+                {"owner_id": owner.id},
+            )
+
+        session.commit()
+        logger.info("schema_owner_backfill_complete", owner_email=owner_email, rows=rows_needing_backfill)
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def _cleanup_on_startup() -> None:
     """Re-process existing data with latest rules on startup (skip LLM)."""
     from job_monitor.linking.resolver import normalize_company
-    from job_monitor.models import Application
-    from job_monitor.extraction.rules import normalize_req_id, split_title_and_req_id
-    
+
     if _SessionLocal is None:
         return
-    
+
     session = _SessionLocal()
     try:
         apps = session.query(Application).all()
-        
+
         # Step 1: Re-normalize all company names
         normalized_count = 0
-        split_title_count = 0
         for app in apps:
             new_normalized = normalize_company(app.company)
             if app.normalized_company != new_normalized:
                 app.normalized_company = new_normalized
                 normalized_count += 1
-            # Split legacy "Title - REQ" into separate columns on startup.
-            base_title, req_from_title = split_title_and_req_id(app.job_title or "")
-            existing_req = normalize_req_id(app.req_id or "")
-            merged_req = existing_req or req_from_title
-            if base_title and base_title != (app.job_title or ""):
-                app.job_title = base_title
-                split_title_count += 1
-            if merged_req and merged_req != (app.req_id or ""):
-                app.req_id = merged_req
-        
-        # Step 2: Merge duplicates (same normalized_company + job_title + req_id)
-        # Keep the one with most recent email_date, delete others
+
+        # Step 2: Merge duplicates (same owner + normalized_company + job_title)
         from sqlalchemy import func
+
         duplicates_deleted = 0
-        
-        # Find groups with duplicates
         dup_groups = (
             session.query(
+                Application.owner_user_id,
                 Application.normalized_company,
                 Application.job_title,
-                Application.req_id,
                 func.count(Application.id).label("cnt"),
             )
-            .group_by(Application.normalized_company, Application.job_title, Application.req_id)
+            .group_by(Application.owner_user_id, Application.normalized_company, Application.job_title)
             .having(func.count(Application.id) > 1)
             .all()
         )
-        
-        for norm_company, job_title, req_id, _ in dup_groups:
-            # Get all apps in this group, ordered by email_date desc
+
+        for owner_user_id, norm_company, job_title, _ in dup_groups:
             group_apps = (
                 session.query(Application)
                 .filter(
+                    Application.owner_user_id == owner_user_id,
                     Application.normalized_company == norm_company,
-                    Application.job_title == job_title if job_title else (
-                        (Application.job_title == None) | (Application.job_title == "")
-                    ),
-                    Application.req_id == req_id if req_id else (
-                        (Application.req_id == None) | (Application.req_id == "")
-                    ),
+                    Application.job_title == job_title
+                    if job_title
+                    else ((Application.job_title == None) | (Application.job_title == "")),  # noqa: E711
                 )
                 .order_by(Application.email_date.desc().nullslast())
                 .all()
             )
-            
+
             if len(group_apps) > 1:
-                # Find the record with most recent email_date
                 most_recent_app = max(
                     group_apps,
-                    key=lambda a: a.email_date if a.email_date else datetime.min
+                    key=lambda a: a.email_date if a.email_date else datetime.min,
                 )
-                
-                # Keep the first record but update with most recent email info
                 keep = group_apps[0]
                 if most_recent_app.email_date and keep.email_date != most_recent_app.email_date:
                     keep.email_date = most_recent_app.email_date
                     keep.email_subject = most_recent_app.email_subject
                     keep.email_sender = most_recent_app.email_sender
-                
+
                 for app_to_delete in group_apps[1:]:
                     session.delete(app_to_delete)
                     duplicates_deleted += 1
@@ -334,12 +273,11 @@ def _cleanup_on_startup() -> None:
                         kept_id=keep.id,
                         deleted_id=app_to_delete.id,
                         company=norm_company,
+                        owner_user_id=owner_user_id,
                     )
-        
+
         # Step 3: Update each Application's email_date to most recent ProcessedEmail
-        from job_monitor.models import ProcessedEmail
         email_dates_updated = 0
-        
         for app in session.query(Application).all():
             most_recent_email = (
                 session.query(ProcessedEmail)
@@ -347,22 +285,16 @@ def _cleanup_on_startup() -> None:
                 .order_by(ProcessedEmail.email_date.desc().nullslast())
                 .first()
             )
-            
-            if most_recent_email and most_recent_email.email_date:
-                if app.email_date != most_recent_email.email_date:
-                    app.email_date = most_recent_email.email_date
-                    app.email_subject = most_recent_email.subject
-                    app.email_sender = most_recent_email.sender
-                    email_dates_updated += 1
-        
+            if most_recent_email and most_recent_email.email_date and app.email_date != most_recent_email.email_date:
+                app.email_date = most_recent_email.email_date
+                app.email_subject = most_recent_email.subject
+                app.email_sender = most_recent_email.sender
+                email_dates_updated += 1
+
         # Step 4: Re-evaluate company-linked emails with new linking rules.
-        # Emails linked via 'company' method may have been incorrectly merged
-        # (e.g., re-application to same company after rejection).
-        # Re-run the linking rules; if the result says "don't link", split into new Application.
-        from job_monitor.linking.resolver import resolve_by_company
         from job_monitor.extraction.rules import extract_status
-        from job_monitor.models import StatusHistory
-        
+        from job_monitor.linking.resolver import resolve_by_company
+
         relinked_count = 0
         company_emails = (
             session.query(ProcessedEmail)
@@ -374,29 +306,25 @@ def _cleanup_on_startup() -> None:
             .order_by(ProcessedEmail.email_date.asc())
             .all()
         )
-        
+
+        previous_owner_scope = session.info.get("owner_user_id")
         for pe in company_emails:
             app = session.query(Application).get(pe.application_id)
             if not app:
                 continue
-            
-            # Extract the status from this email's subject (lightweight, no LLM)
+
+            session.info["owner_user_id"] = pe.owner_user_id
             email_status = extract_status(pe.subject or "", "")
-            
-            # Re-run company linking with new rules
             result = resolve_by_company(
                 session,
                 app.company,
                 extracted_status=email_status,
                 job_title=app.job_title,
-                req_id=app.req_id,
                 email_date=pe.email_date,
             )
-            
-            # If the new rules say this email should NOT link to the current app
+
             if not result.is_linked or result.application_id != app.id:
                 if result.is_linked and result.application_id is not None:
-                    # Rules found a better existing app to link to — relink
                     pe.application_id = result.application_id
                     pe.link_method = "company_relinked"
                     relinked_count += 1
@@ -408,27 +336,20 @@ def _cleanup_on_startup() -> None:
                         company=app.company,
                     )
                 else:
-                    # No valid link — log for awareness, next rescan will fix
                     logger.info(
                         "startup_relink_needs_rescan",
                         email_uid=pe.uid,
                         app_id=app.id,
                         company=app.company,
                     )
-        
+
+        session.info["owner_user_id"] = previous_owner_scope
         session.commit()
-        
-        if (
-            normalized_count > 0
-            or split_title_count > 0
-            or duplicates_deleted > 0
-            or email_dates_updated > 0
-            or relinked_count > 0
-        ):
+
+        if normalized_count > 0 or duplicates_deleted > 0 or email_dates_updated > 0 or relinked_count > 0:
             logger.info(
                 "startup_cleanup_complete",
                 normalized=normalized_count,
-                title_req_split=split_title_count,
                 duplicates_deleted=duplicates_deleted,
                 email_dates_updated=email_dates_updated,
                 relinked=relinked_count,

@@ -20,10 +20,10 @@ class AppConfig(BaseSettings):
     )
 
     # ── IMAP ──────────────────────────────────────────────
-    imap_host: str
+    imap_host: str = "imap.gmail.com"
     imap_port: int = 993
-    email_username: str
-    email_password: SecretStr
+    email_username: str = ""
+    email_password: SecretStr = SecretStr("")
     email_folder: str = "INBOX"
 
     # ── Database ──────────────────────────────────────────
@@ -48,6 +48,18 @@ class AppConfig(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
+    frontend_url: str = "http://localhost:5173"
+
+    # ── Auth / OAuth ──────────────────────────────────────
+    auth_session_ttl_days: int = 30
+    auth_cookie_name: str = "job_monitor_session"
+    auth_cookie_secure: bool = False
+    google_client_id: str = ""
+    google_client_secret: SecretStr = SecretStr("")
+    google_redirect_uri: str = "http://localhost:8000/api/auth/google/callback"
+    google_oauth_scopes: str = "openid,email,profile,https://www.googleapis.com/auth/gmail.readonly"
+    token_encryption_key: SecretStr = SecretStr("")
+    legacy_owner_email: str = ""
 
     # ── Logging ───────────────────────────────────────────
     log_level: str = "INFO"
@@ -57,6 +69,13 @@ class AppConfig(BaseSettings):
     @field_validator("llm_enabled", mode="before")
     @classmethod
     def parse_bool(cls, v: object) -> bool:
+        if isinstance(v, str):
+            return v.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(v)
+
+    @field_validator("auth_cookie_secure", mode="before")
+    @classmethod
+    def parse_auth_cookie_secure(cls, v: object) -> bool:
         if isinstance(v, str):
             return v.strip().lower() in {"1", "true", "yes", "on"}
         return bool(v)
@@ -84,6 +103,10 @@ class AppConfig(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def google_oauth_scopes_list(self) -> list[str]:
+        return [s.strip() for s in self.google_oauth_scopes.split(",") if s.strip()]
 
     @property
     def database_path(self) -> Optional[Path]:

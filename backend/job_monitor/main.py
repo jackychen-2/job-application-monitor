@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from job_monitor.auth.api import router as auth_router
 from job_monitor.api.applications import router as applications_router
 from job_monitor.api.emails import router as emails_router
 from job_monitor.api.scan import router as scan_router
@@ -72,6 +73,7 @@ def create_app() -> FastAPI:
     )
 
     # Register routers
+    app.include_router(auth_router)
     app.include_router(applications_router)
     app.include_router(emails_router)
     app.include_router(scan_router)

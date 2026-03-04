@@ -9,6 +9,7 @@ import type {
   ApplicationDetail,
   ApplicationListResponse,
   ApplicationUpdate,
+  AuthUser,
   FlowData,
   LinkedEmail,
   PendingReviewEmail,
@@ -22,6 +23,7 @@ const BASE = "/api";
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json", ...init?.headers },
+    credentials: "include",
     ...init,
   });
   if (!res.ok) {
@@ -31,6 +33,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // 204 No Content
   if (res.status === 204) return undefined as unknown as T;
   return res.json();
+}
+
+// ── Auth ────────────────────────────────────────────────
+
+export async function authMe(): Promise<AuthUser> {
+  return request<AuthUser>("/auth/me");
+}
+
+export function startGoogleLogin(): void {
+  window.location.href = `${BASE}/auth/google/start`;
+}
+
+export async function logout(): Promise<{ status: string }> {
+  return request<{ status: string }>("/auth/logout", { method: "POST" });
 }
 
 // ── Applications ─────────────────────────────────────────

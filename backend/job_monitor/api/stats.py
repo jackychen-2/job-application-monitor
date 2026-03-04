@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import structlog
 from fastapi import APIRouter, Depends
-from sqlalchemy import cast, func, Date
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from job_monitor.database import get_db
+from job_monitor.auth.deps import get_owner_scoped_db
 from job_monitor.models import Application, ProcessedEmail, StatusHistory
 from job_monitor.schemas import ApplicationOut, FlowData, StatsOut, StatusCount, StatusTransition
 
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/stats", tags=["stats"])
 
 
 @router.get("", response_model=StatsOut)
-def get_stats(db: Session = Depends(get_db)) -> StatsOut:
+def get_stats(db: Session = Depends(get_owner_scoped_db)) -> StatsOut:
     """Return dashboard statistics: totals, status breakdown, recent activity, daily costs."""
     total = db.query(func.count(Application.id)).scalar() or 0
 
@@ -78,7 +78,7 @@ def get_stats(db: Session = Depends(get_db)) -> StatsOut:
 
 
 @router.get("/flow", response_model=FlowData)
-def get_flow_data(db: Session = Depends(get_db)) -> FlowData:
+def get_flow_data(db: Session = Depends(get_owner_scoped_db)) -> FlowData:
     """Return application flow data: status counts + transition edges for Sankey diagram.
 
     Aggregates StatusHistory transitions (old_status → new_status) and also counts

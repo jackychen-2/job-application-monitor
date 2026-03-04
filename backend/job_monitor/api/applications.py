@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from job_monitor.database import get_db
+from job_monitor.auth.deps import get_owner_scoped_db
 from job_monitor.models import Application, ProcessedEmail, StatusHistory
 from job_monitor.schemas import (
     ApplicationCreate,
@@ -34,7 +34,7 @@ def list_applications(
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
     sort_by: str = Query("created_at", description="Sort field"),
     sort_order: str = Query("desc", pattern="^(asc|desc)$", description="Sort order"),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_owner_scoped_db),
 ) -> ApplicationListOut:
     """List applications with optional filtering, sorting, and pagination."""
     query = db.query(Application)
@@ -92,7 +92,7 @@ def list_applications(
 @router.get("/{application_id}", response_model=ApplicationDetailOut)
 def get_application(
     application_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_owner_scoped_db),
 ) -> ApplicationDetailOut:
     """Get a single application with its full status history and linked emails."""
     app = db.query(Application).filter(Application.id == application_id).first()
@@ -129,7 +129,7 @@ def get_application(
 @router.get("/{application_id}/emails", response_model=list[LinkedEmailOut])
 def get_application_emails(
     application_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_owner_scoped_db),
 ) -> list[LinkedEmailOut]:
     """Get all linked emails for an application (for expandable row in table)."""
     # Verify application exists
@@ -153,7 +153,7 @@ def get_application_emails(
 @router.post("", response_model=ApplicationOut, status_code=201)
 def create_application(
     body: ApplicationCreate,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_owner_scoped_db),
 ) -> ApplicationOut:
     """Manually create a new application."""
     # Check for duplicates
@@ -203,7 +203,7 @@ def create_application(
 def update_application(
     application_id: int,
     body: ApplicationUpdate,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_owner_scoped_db),
 ) -> ApplicationOut:
     """Update an application's fields (status, notes, etc.)."""
     app = db.query(Application).filter(Application.id == application_id).first()
@@ -236,7 +236,7 @@ def update_application(
 @router.delete("/{application_id}", status_code=204)
 def delete_application(
     application_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_owner_scoped_db),
 ) -> None:
     """Delete an application and its history."""
     app = db.query(Application).filter(Application.id == application_id).first()
@@ -252,7 +252,7 @@ def delete_application(
 def merge_applications(
     application_id: int,
     body: MergeApplicationRequest,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_owner_scoped_db),
 ) -> ApplicationOut:
     """Merge source application into target. Moves all emails and history, deletes source."""
     target = db.query(Application).filter(Application.id == application_id).first()

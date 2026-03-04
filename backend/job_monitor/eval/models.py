@@ -33,10 +33,14 @@ class CachedEmail(Base):
 
     __tablename__ = "cached_emails"
     __table_args__ = (
-        UniqueConstraint("gmail_message_id", name="uq_cached_gmail_message_id"),
+        UniqueConstraint("owner_user_id", "gmail_message_id", name="uq_cached_owner_gmail_message_id"),
+        UniqueConstraint("owner_user_id", "uid", "email_account", "email_folder", name="uq_cached_owner_uid_account_folder"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     uid: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     email_account: Mapped[str] = mapped_column(String(300), nullable=False)
     email_folder: Mapped[str] = mapped_column(String(100), nullable=False, default="INBOX")
@@ -77,6 +81,9 @@ class EvalApplicationGroup(Base):
     __tablename__ = "eval_application_groups"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     eval_run_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("eval_runs.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -111,6 +118,9 @@ class EvalPredictedGroup(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     eval_run_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("eval_runs.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -147,6 +157,9 @@ class EvalLabel(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     cached_email_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("cached_emails.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -207,6 +220,9 @@ class EvalRun(Base):
     __tablename__ = "eval_runs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     run_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
@@ -250,6 +266,9 @@ class EvalRunResult(Base):
     __tablename__ = "eval_run_results"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     eval_run_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("eval_runs.id", ondelete="CASCADE"), nullable=False, index=True
     )

@@ -7,8 +7,24 @@ import ReviewQueue from "./pages/eval/ReviewQueue";
 import ReviewEmail from "./pages/eval/ReviewEmail";
 import EvalRuns from "./pages/eval/EvalRuns";
 import RunDetail from "./pages/eval/RunDetail";
+import { useAuth } from "./auth/AuthContext";
+import AuthModal from "./components/AuthModal";
 
 export default function App() {
+  const { loading, user } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-600">
+        Checking authentication...
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthModal />;
+  }
+
   return (
     <Routes>
       <Route element={<Layout />}>

@@ -1,17 +1,19 @@
 # Job Application Monitor
 
-A production-quality tool that monitors your email inbox via IMAP, detects job-application related messages using regex rules + LLM (OpenAI), and tracks applications in a SQLite database with a web dashboard.
+A production-quality tool that monitors your Gmail inbox via Google OAuth + Gmail API (read-only), detects job-application related messages using regex rules + LLM (OpenAI), and tracks applications in a SQLite database with a web dashboard.
 
 ## Features
 
-- **Email Scanning** — Connects via IMAP, scans for job-related emails using keyword classification
+- **Google Login** — Secure Google OAuth login with server-side sessions (HttpOnly cookies)
+- **Per-User Mailbox Scanning** — Each logged-in user scans their own Gmail mailbox
+- **Email Scanning** — Connects via Gmail API (read-only), scans for job-related emails using keyword classification
 - **LLM Extraction** — Uses OpenAI (GPT-4o-mini) to extract company, job title, and status with rule-based fallback
 - **Web Dashboard** — React frontend with filterable table, status charts, and stats cards
 - **REST API** — FastAPI backend with full CRUD for applications
 - **Status Tracking** — Audit trail of all status changes with timestamps
 - **Duplicate Detection** — Prevents re-processing emails and duplicate application entries
 - **Export** — Download applications as CSV or Excel
-- **Retry Logic** — IMAP and LLM calls retry on transient failures (tenacity)
+- **Retry Logic** — Gmail API and LLM calls retry on transient failures (tenacity)
 - **Docker Ready** — Single-command deployment with Docker Compose
 
 ## Architecture
@@ -24,7 +26,7 @@ backend/job_monitor/
 ├── schemas.py           # API schemas
 ├── database.py          # DB engine + sessions
 ├── api/                 # REST endpoints
-├── email/               # IMAP client, parser, classifier
+├── email/               # Gmail client, parser, classifier
 ├── extraction/          # Rules + LLM pipeline
 └── export/              # CSV + Excel exporters
 
@@ -41,14 +43,14 @@ frontend/src/
 
 - Python 3.10+
 - Node.js 18+
-- An email account with IMAP access (Gmail: use App Password)
+- A Google Cloud OAuth app (for Google sign-in + Gmail access)
 - OpenAI API key (optional, for LLM extraction)
 
 ### 1. Clone and configure
 
 ```bash
 cp backend/.env.example .env
-# Edit .env with your email credentials and OpenAI key
+# Edit .env with Google OAuth + encryption settings and optional OpenAI key
 ```
 
 ### 2. Backend setup
@@ -109,12 +111,34 @@ See [`backend/.env.example`](backend/.env.example) for all configuration options
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `IMAP_HOST` | ✅ | — | IMAP server hostname |
-| `EMAIL_USERNAME` | ✅ | — | Email address |
-| `EMAIL_PASSWORD` | ✅ | — | App password |
+| `IMAP_HOST` | ❌ | `imap.gmail.com` | Legacy IMAP host (not used in Gmail API mode) |
+| `EMAIL_USERNAME` | ❌ | — | Legacy fallback username (not used in Gmail API mode) |
+| `EMAIL_PASSWORD` | ❌ | — | Legacy fallback password (not used in Gmail API mode) |
+| `GOOGLE_CLIENT_ID` | ✅ | — | Google OAuth client ID |
+| `GOOGLE_CLIENT_SECRET` | ✅ | — | Google OAuth client secret |
+| `GOOGLE_REDIRECT_URI` | ✅ | — | OAuth callback URL (e.g. `http://localhost:8000/api/auth/google/callback`) |
+| `GOOGLE_OAUTH_SCOPES` | ✅ | `openid,email,profile,https://www.googleapis.com/auth/gmail.readonly` | Required OAuth scopes |
+| `TOKEN_ENCRYPTION_KEY` | ✅ | — | Fernet key used to encrypt stored OAuth tokens |
+| `LEGACY_OWNER_EMAIL` | ✅ (existing DB) | — | Existing rows are backfilled to this owner on startup |
+| `AUTH_COOKIE_NAME` | ❌ | `job_monitor_session` | Session cookie name |
+| `AUTH_SESSION_TTL_DAYS` | ❌ | `30` | Login session lifetime |
+| `AUTH_COOKIE_SECURE` | ❌ | `false` | Use `true` for HTTPS deployments |
 | `LLM_ENABLED` | ❌ | `true` | Enable LLM extraction |
 | `LLM_API_KEY` | ❌ | — | OpenAI API key |
 | `DATABASE_URL` | ❌ | `sqlite:///job_monitor.db` | Database URL |
+
+## Google OAuth Setup
+
+1. Create OAuth credentials in Google Cloud Console.
+2. Add authorized redirect URI: `http://localhost:8000/api/auth/google/callback` (and your production callback).
+3. Put client ID/secret in `.env`.
+4. Generate a Fernet key and set `TOKEN_ENCRYPTION_KEY`:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+After login, scans run against the logged-in user's Gmail account.
 
 ## Development
 

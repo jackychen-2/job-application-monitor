@@ -133,6 +133,17 @@ export interface FlowData {
   total: number;
 }
 
+export interface AuthUser {
+  id: number;
+  email: string;
+  display_name: string | null;
+}
+
+export interface AuthState {
+  loading: boolean;
+  user: AuthUser | null;
+}
+
 /** Status value constants */
 export const STATUSES = ["Recruiter Reach-out", "已申请", "OA", "面试", "Offer", "Onboarding", "拒绝", "Unknown"] as const;
 export type Status = (typeof STATUSES)[number];

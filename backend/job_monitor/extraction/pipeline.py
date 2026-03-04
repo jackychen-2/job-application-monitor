@@ -23,14 +23,16 @@ ProgressCallback = Callable[[ProgressInfo], None]
 from sqlalchemy.orm import Session
 
 from job_monitor.config import AppConfig
-from job_monitor.email.client import IMAPClient
+from job_monitor.email.classifier import is_job_related
+from job_monitor.email.gmail_client import GmailClient, GmailHistoryExpiredError
 from job_monitor.email.parser import ParsedEmailData, parse_email_message
-from job_monitor.extraction.core import run_core_classification_and_extraction
 from job_monitor.extraction.llm import (
     LLMExtractionResult,
     LLMProvider,
     create_llm_provider,
+    extract_with_timeout,
 )
+from job_monitor.extraction.rules import extract_company, extract_job_title, extract_status
 from job_monitor.linking.resolver import (
     is_message_already_processed,
     normalize_company,
@@ -53,17 +55,15 @@ def _validate_job_title(title: str) -> str:
         return ""
     if len(cleaned) < 3:
         return ""
-    # Max length: allow up to 200 chars to accommodate titles with team qualifiers and job IDs
-    if len(cleaned) > 200:
+    # Max length: real job titles are rarely > 80 chars
+    if len(cleaned) > 80:
         return ""
     if cleaned.lower() in _INVALID_TITLES:
         return ""
-    # Reject values that start with lowercase (likely a sentence fragment, not a title)
-    if cleaned[0].islower():
+    # Reject sentence-like patterns (contains periods followed by spaces, or starts with lowercase)
+    if ". " in cleaned or cleaned[0].islower():
         return ""
     return cleaned
-
-
 from job_monitor.models import Application, ProcessedEmail, ScanState, StatusHistory
 
 logger = structlog.get_logger(__name__)
@@ -89,51 +89,11 @@ class ScanSummary:
             self.errors = []
 
 
-def build_title_req_filters(model_cls: type, job_title: str | None, req_id: str | None) -> list:
-    """Build the 4-case (job_title, req_id) dedup filter conditions for a SQLAlchemy query.
-
-    This is the **single source of truth** for the application dedup key logic.
-    Both ``_get_or_create_application`` (production) and the eval runner's
-    ``EvalPredictedGroup`` fallback dedup call this function so that any future
-    change to the dedup rules is automatically reflected in both paths.
-
-    Both ``Application`` and ``EvalPredictedGroup`` expose ``.job_title`` and
-    ``.req_id`` columns, so the same filter builder works for either model.
-
-    Args:
-        model_cls: SQLAlchemy model class (``Application`` or ``EvalPredictedGroup``).
-        job_title: Raw job title string (``None`` / ``""`` treated as absent).
-        req_id: Normalised req-ID string (``None`` / ``""`` treated as absent).
-
-    Returns:
-        List of SQLAlchemy column-expression filters to pass to ``.filter(*filters)``.
-    """
-    jt = job_title or None   # normalise "" → None
-    rq = req_id or None      # normalise "" → None
-    if jt and rq:
-        return [model_cls.job_title == jt, model_cls.req_id == rq]
-    elif jt:
-        return [
-            model_cls.job_title == jt,
-            (model_cls.req_id == None) | (model_cls.req_id == ""),  # noqa: E711
-        ]
-    elif rq:
-        return [
-            (model_cls.job_title == None) | (model_cls.job_title == ""),  # noqa: E711
-            model_cls.req_id == rq,
-        ]
-    else:
-        return [
-            (model_cls.job_title == None) | (model_cls.job_title == ""),  # noqa: E711
-            (model_cls.req_id == None) | (model_cls.req_id == ""),  # noqa: E711
-        ]
-
-
 def _get_or_create_application(
     session: Session,
+    owner_user_id: int,
     company: str,
     job_title: str,
-    req_id: str,
     email_subject: str,
     email_sender: str,
     email_date: Optional[datetime],
@@ -143,18 +103,34 @@ def _get_or_create_application(
     """Find an existing application or create a new one.
 
     Returns (application, created) where created=True for new rows.
-    Deduplicates by normalized_company + job_title + req_id via
-    :func:`build_title_req_filters` (shared with the eval runner).
+    Deduplicates by normalized_company + job_title (treats empty titles as equivalent).
     Updates existing record if data has changed.
     """
     # Use normalized_company for matching to handle variations like "Qventus, Inc" vs "Qventus"
     normalized = normalize_company(company)
-
-    def _base_q():
-        return session.query(Application).filter(Application.normalized_company == normalized)
-
-    # Delegate the 4-case filter logic to the shared helper so prod and eval stay in sync.
-    existing = _base_q().filter(*build_title_req_filters(Application, job_title, req_id)).first()
+    
+    # Try to find existing (normalized_company + job_title match)
+    # Handle NULL/empty job_title: treat all empty titles for same company as one
+    if job_title:
+        existing = (
+            session.query(Application)
+            .filter(
+                Application.owner_user_id == owner_user_id,
+                Application.normalized_company == normalized,
+                Application.job_title == job_title,
+            )
+            .first()
+        )
+    else:
+        existing = (
+            session.query(Application)
+            .filter(
+                Application.owner_user_id == owner_user_id,
+                Application.normalized_company == normalized,
+                (Application.job_title == None) | (Application.job_title == ""),  # noqa: E711
+            )
+            .first()
+        )
     if existing:
         # Update fields - merge old into most recent
         if existing.company != company:
@@ -162,8 +138,6 @@ def _get_or_create_application(
             existing.normalized_company = normalized
         if job_title and existing.job_title != job_title:
             existing.job_title = job_title
-        if req_id and existing.req_id != req_id:
-            existing.req_id = req_id
         # Always update to most recent email info
         _ed = email_date.replace(tzinfo=None) if email_date and hasattr(email_date, 'tzinfo') and email_date.tzinfo else email_date
         _ad = existing.email_date.replace(tzinfo=None) if existing.email_date and hasattr(existing.email_date, 'tzinfo') and existing.email_date.tzinfo else existing.email_date
@@ -172,20 +146,14 @@ def _get_or_create_application(
             existing.email_subject = email_subject
             existing.email_sender = email_sender
         existing.updated_at = datetime.utcnow()
-        logger.info(
-            "application_merged",
-            app_id=existing.id,
-            company=company,
-            job_title=job_title,
-            req_id=req_id,
-        )
+        logger.info("application_merged", app_id=existing.id, company=company, job_title=job_title)
         return existing, False
 
     app = Application(
+        owner_user_id=owner_user_id,
         company=company,
         normalized_company=normalize_company(company),
         job_title=job_title,
-        req_id=req_id,
         email_subject=email_subject,
         email_sender=email_sender,
         email_date=email_date,
@@ -198,6 +166,7 @@ def _get_or_create_application(
     # Initial status history entry
     session.add(
         StatusHistory(
+            owner_user_id=owner_user_id,
             application_id=app.id,
             old_status=None,
             new_status=status,
@@ -211,6 +180,7 @@ def _update_status_if_changed(
     session: Session,
     app: Application,
     new_status: str,
+    owner_user_id: int,
     change_source: str = "email_scan",
     email_date: Optional[datetime] = None,
 ) -> bool:
@@ -243,6 +213,7 @@ def _update_status_if_changed(
     app.status = new_status
     session.add(
         StatusHistory(
+            owner_user_id=owner_user_id,
             application_id=app.id,
             old_status=old,
             new_status=new_status,
@@ -255,9 +226,9 @@ def _update_status_if_changed(
 
 def _cleanup_orphaned_app(
     session: Session,
+    owner_user_id: int,
     app_id: Optional[int],
-    *,
-    exclude_processed_email_id: Optional[int] = None,
+    exclude_uid: int,
     summary: Optional[ScanSummary] = None,
 ) -> None:
     """删除孤立的Application（没有其他邮件引用时）。
@@ -269,10 +240,15 @@ def _cleanup_orphaned_app(
     """
     if app_id is None:
         return
-    refs_q = session.query(ProcessedEmail).filter(ProcessedEmail.application_id == app_id)
-    if exclude_processed_email_id is not None:
-        refs_q = refs_q.filter(ProcessedEmail.id != exclude_processed_email_id)
-    other_refs = refs_q.count()
+    other_refs = (
+        session.query(ProcessedEmail)
+        .filter(
+            ProcessedEmail.owner_user_id == owner_user_id,
+            ProcessedEmail.application_id == app_id,
+            ProcessedEmail.uid != exclude_uid,
+        )
+        .count()
+    )
     if other_refs == 0:
         app = session.query(Application).get(app_id)
         if app:
@@ -282,65 +258,46 @@ def _cleanup_orphaned_app(
             session.delete(app)
             if summary is not None:
                 summary.applications_deleted += 1
-            logger.info(
-                "application_deleted_orphaned",
-                app_id=app_id,
-                excluded_email_id=exclude_processed_email_id,
-                company=app.company,
-                job_title=app.job_title,
-            )
+            logger.info("application_deleted_orphaned", app_id=app_id, uid=exclude_uid,
+                        company=app.company, job_title=app.job_title)
     else:
-        logger.info(
-            "application_kept_has_other_refs",
-            app_id=app_id,
-            excluded_email_id=exclude_processed_email_id,
-            other_refs=other_refs,
-        )
-
-
-def _find_existing_processed_email(
-    session: Session,
-    config: AppConfig,
-    uid: int,
-    gmail_message_id: Optional[str],
-) -> Optional[ProcessedEmail]:
-    """Find existing processed email row by message-id first, then UID/account/folder."""
-    if gmail_message_id:
-        by_message = (
-            session.query(ProcessedEmail)
-            .filter(ProcessedEmail.gmail_message_id == gmail_message_id)
-            .first()
-        )
-        if by_message is not None:
-            return by_message
-
-    return (
-        session.query(ProcessedEmail)
-        .filter(
-            ProcessedEmail.uid == uid,
-            ProcessedEmail.email_account == config.email_username,
-            ProcessedEmail.email_folder == config.email_folder,
-        )
-        .first()
-    )
+        logger.info("application_kept_has_other_refs", app_id=app_id, uid=exclude_uid,
+                     other_refs=other_refs)
 
 
 def _get_previous_app_id(
     session: Session,
+    owner_user_id: int,
     uid: int,
-    config: AppConfig,
-    gmail_message_id: Optional[str] = None,
+    account: str,
+    folder: str,
 ) -> Optional[int]:
     """获取该邮件UID之前关联的application_id（用于重新扫描时的清理）。"""
-    existing = _find_existing_processed_email(session, config, uid, gmail_message_id)
+    existing = (
+        session.query(ProcessedEmail)
+        .filter(
+            ProcessedEmail.owner_user_id == owner_user_id,
+            ProcessedEmail.uid == uid,
+            ProcessedEmail.email_account == account,
+            ProcessedEmail.email_folder == folder,
+        )
+        .first()
+    )
     return existing.application_id if existing else None
 
 
-def _is_already_processed(session: Session, uid: int, account: str, folder: str) -> bool:
+def _is_already_processed(
+    session: Session,
+    owner_user_id: int,
+    uid: int,
+    account: str,
+    folder: str,
+) -> bool:
     """Check if this email UID has already been processed."""
     return (
         session.query(ProcessedEmail)
         .filter(
+            ProcessedEmail.owner_user_id == owner_user_id,
             ProcessedEmail.uid == uid,
             ProcessedEmail.email_account == account,
             ProcessedEmail.email_folder == folder,
@@ -350,23 +307,35 @@ def _is_already_processed(session: Session, uid: int, account: str, folder: str)
     )
 
 
-def _get_scan_state(session: Session, account: str, folder: str) -> int:
+def _get_scan_state(session: Session, owner_user_id: int, account: str, folder: str) -> int:
     """Return last_uid for the given account+folder, or 0."""
     state = (
         session.query(ScanState)
-        .filter(ScanState.email_account == account, ScanState.email_folder == folder)
+        .filter(
+            ScanState.owner_user_id == owner_user_id,
+            ScanState.email_account == account,
+            ScanState.email_folder == folder,
+        )
         .first()
     )
     return state.last_uid if state else 0
 
 
 def _update_scan_state(
-    session: Session, account: str, folder: str, last_uid: int
+    session: Session,
+    owner_user_id: int,
+    account: str,
+    folder: str,
+    last_uid: int,
 ) -> None:
     """Upsert the scan state for account+folder."""
     state = (
         session.query(ScanState)
-        .filter(ScanState.email_account == account, ScanState.email_folder == folder)
+        .filter(
+            ScanState.owner_user_id == owner_user_id,
+            ScanState.email_account == account,
+            ScanState.email_folder == folder,
+        )
         .first()
     )
     now = datetime.utcnow()
@@ -376,6 +345,7 @@ def _update_scan_state(
     else:
         session.add(
             ScanState(
+                owner_user_id=owner_user_id,
                 email_account=account,
                 email_folder=folder,
                 last_uid=last_uid,
@@ -388,9 +358,13 @@ def _process_single_email(
     session: Session,
     config: AppConfig,
     llm_provider: Optional[LLMProvider],
+    owner_user_id: int,
+    mailbox_email: str,
+    mailbox_folder: str,
     uid: int,
     parsed: ParsedEmailData,
     summary: ScanSummary,
+    gmail_message_id_override: Optional[str] = None,
 ) -> None:
     """Process one parsed email: classify, extract, persist.
 
@@ -403,19 +377,27 @@ def _process_single_email(
     0. 记住之前的app关联（用于清理）
     1. Thread linking (attempt to link via gmail_thread_id BEFORE LLM)
     2. LLM classification + extraction
-    3. Determine if job-related (如果非求职，先覆盖邮件记录，再清理旧app并返回)
+    3. Determine if job-related (如果非求职，清理旧app并返回)
     4. Extract fields
     5. Persist application (更新所有字段)
-    6. Record processed email（同一封邮件按 message-id 覆盖）
-    7. 清理孤立的旧Application（如果关联变了）
+    6. 清理孤立的旧Application（如果关联变了）
+    7. Record processed email
     """
     subject = parsed.subject
     sender = parsed.sender
     body = parsed.body_text
     email_date = parsed.date_dt
-    gmail_message_id = parsed.message_id
+    gmail_message_id = gmail_message_id_override or parsed.message_id
+    gmail_thread_id = parsed.gmail_thread_id
+
     # ── Step 0: 记住之前的app关联 ─────────────────────────
-    previous_app_id = _get_previous_app_id(session, uid, config, gmail_message_id)
+    previous_app_id = _get_previous_app_id(
+        session,
+        owner_user_id=owner_user_id,
+        uid=uid,
+        account=mailbox_email,
+        folder=mailbox_folder,
+    )
 
     # ── Step 1: (Thread linking removed — unreliable for companies
     #    like Amazon that reuse threads for different positions) ────
@@ -423,73 +405,86 @@ def _process_single_email(
     link_method: str = "new"
     needs_review: bool = False
 
+    llm_result: Optional[LLMExtractionResult] = None
+    llm_used = False
+
+    # ── Step 2: LLM classification + extraction ──────────
     if llm_provider is not None:
-        logger.info("llm_extracting", uid=uid)
-
-    # ── Step 2~4: Shared core (classification + extraction) ──────────────
-    core_prediction = run_core_classification_and_extraction(
-        sender=sender,
-        subject=subject,
-        body=body,
-        llm_provider=llm_provider,
-        llm_timeout_sec=config.llm_timeout_sec,
-        validate_job_title=_validate_job_title,
-    )
-    llm_result = core_prediction.classification.llm_result
-    llm_used = core_prediction.classification.llm_used
-    is_trackable_job = core_prediction.classification.is_trackable_job
-    non_job_reason = core_prediction.classification.non_job_reason
-
-    if llm_result is not None:
-        summary.total_prompt_tokens += llm_result.prompt_tokens
-        summary.total_completion_tokens += llm_result.completion_tokens
-        summary.total_estimated_cost += llm_result.estimated_cost_usd
-
-    if not is_trackable_job:
-        if llm_result is not None:
-            logger.info(
-                "email_skipped_llm",
-                uid=uid,
-                email_category=llm_result.email_category,
-                non_job_reason=non_job_reason,
+        llm_used = True
+        try:
+            logger.info("llm_extracting", uid=uid)
+            llm_result = extract_with_timeout(
+                llm_provider, sender, subject, body, timeout_sec=config.llm_timeout_sec
             )
-        elif llm_used:
-            logger.info("email_skipped_rules_fallback", uid=uid, non_job_reason=non_job_reason)
+            summary.total_prompt_tokens += llm_result.prompt_tokens
+            summary.total_completion_tokens += llm_result.completion_tokens
+            summary.total_estimated_cost += llm_result.estimated_cost_usd
+        except Exception as exc:
+            logger.warning("llm_fallback", uid=uid, error=str(exc))
+            llm_result = None
+
+    # ── Step 3: Determine if job-related ──────────────────
+    if llm_result is not None:
+        if not llm_result.is_job_application:
+            logger.info("email_skipped_llm", uid=uid)
+            _cleanup_orphaned_app(
+                session,
+                owner_user_id=owner_user_id,
+                app_id=previous_app_id,
+                exclude_uid=uid,
+                summary=summary,
+            )
+            _record_processed(
+                session, uid, mailbox_email, mailbox_folder, owner_user_id, parsed, is_job=False, app_id=None, llm_used=True,
+                llm_result=llm_result,
+                gmail_message_id=gmail_message_id,
+            )
+            return
+    else:
+        if not is_job_related(subject, sender):
+            if llm_used:
+                logger.info("email_skipped_rules_fallback", uid=uid)
+            else:
+                logger.info("email_skipped_rules", uid=uid)
+            _cleanup_orphaned_app(
+                session,
+                owner_user_id=owner_user_id,
+                app_id=previous_app_id,
+                exclude_uid=uid,
+                summary=summary,
+            )
+            _record_processed(
+                session, uid, mailbox_email, mailbox_folder, owner_user_id, parsed, is_job=False, app_id=None, llm_used=False,
+                gmail_message_id=gmail_message_id,
+            )
+            return
+
+    # ── Step 4: Extract fields ────────────────────────────
+    if llm_result is not None and llm_result.is_job_application:
+        company = llm_result.company or extract_company(subject, sender)
+        job_title = _validate_job_title(llm_result.job_title) or _validate_job_title(extract_job_title(subject, body))
+        # 如果 LLM 返回空或 "Unknown"，使用规则提取
+        llm_status = llm_result.status
+        if llm_status and llm_status.lower() != "unknown":
+            status = llm_status
         else:
-            logger.info("email_skipped_rules", uid=uid, non_job_reason=non_job_reason)
-        recorded_email = _record_processed(
-            session, uid, config, parsed, is_job=False, app_id=None, llm_used=llm_used,
-            llm_result=llm_result,
-        )
-        _cleanup_orphaned_app(
-            session,
-            previous_app_id,
-            exclude_processed_email_id=recorded_email.id,
-            summary=summary,
-        )
-        return
+            status = extract_status(subject, body)
+    else:
+        company = extract_company(subject, sender)
+        job_title = _validate_job_title(extract_job_title(subject, body))
+        status = extract_status(subject, body)
 
-    extraction = core_prediction.extraction
-    if extraction is None:
-        # Defensive guard: trackable emails should always include extraction output.
-        logger.warning("core_extraction_missing_for_trackable", uid=uid, subject=subject[:120])
-        return
-
-    company = extraction.company or "Unknown"
-    job_title = extraction.job_title
-    req_id = extraction.req_id
-    status = extraction.status
+    if not company:
+        company = "Unknown"
 
     # ── Step 4.5: Company-based linking (fallback) ────────
-    # If thread linking didn't find a match, try company name.
+    # If thread linking didn't find a match, try company name
     if linked_app_id is None and company != "Unknown":
         company_link = resolve_by_company(
             session, company,
             extracted_status=status,
             job_title=job_title,
-            req_id=req_id,
             email_date=email_date,
-            exclude_application_id=previous_app_id,
             llm_provider=llm_provider,
             email_subject=subject,
             email_sender=sender,
@@ -509,9 +504,9 @@ def _process_single_email(
             logger.warning("linked_app_not_found", application_id=linked_app_id)
             app, created = _get_or_create_application(
                 session,
+                owner_user_id=owner_user_id,
                 company=company,
                 job_title=job_title,
-                req_id=req_id,
                 email_subject=subject,
                 email_sender=sender,
                 email_date=email_date,
@@ -524,31 +519,13 @@ def _process_single_email(
             created = False
             # 更新所有可能变化的字段（重新扫描时内容可能不同）
             changed = False
-            # For req-id direct links, keep canonical app key fields stable.
-            # This avoids unique-key collisions when title extraction varies across emails.
-            # Also keep key fields stable when this email is being re-linked from one app
-            # to another in the same transaction (old app row is removed later).
-            relinking_from_different_app = (
-                previous_app_id is not None and previous_app_id != app.id
-            )
-            if link_method != "company_req_id" and not relinking_from_different_app:
-                if company and app.company != company:
-                    app.company = company
-                    app.normalized_company = normalize_company(company)
-                    changed = True
-                if job_title and app.job_title != job_title:
-                    app.job_title = job_title
-                    changed = True
-                if req_id and app.req_id != req_id:
-                    app.req_id = req_id
-                    changed = True
-            elif relinking_from_different_app:
-                logger.info(
-                    "application_key_fields_kept_on_relink",
-                    app_id=app.id,
-                    previous_app_id=previous_app_id,
-                    link_method=link_method,
-                )
+            if company and app.company != company:
+                app.company = company
+                app.normalized_company = normalize_company(company)
+                changed = True
+            if job_title and app.job_title != job_title:
+                app.job_title = job_title
+                changed = True
             if email_date:
                 # Normalize both datetimes to naive UTC for comparison
                 cmp_email_date = email_date.replace(tzinfo=None) if email_date.tzinfo else email_date
@@ -558,7 +535,14 @@ def _process_single_email(
                     app.email_subject = subject
                     app.email_sender = sender
                     changed = True
-            if _update_status_if_changed(session, app, status, change_source=f"email_uid_{uid}", email_date=email_date):
+            if _update_status_if_changed(
+                session,
+                app,
+                status,
+                owner_user_id=owner_user_id,
+                change_source=f"email_uid_{uid}",
+                email_date=email_date,
+            ):
                 summary.applications_updated += 1
                 changed = True
             if changed:
@@ -567,9 +551,9 @@ def _process_single_email(
     else:
         app, created = _get_or_create_application(
             session,
+            owner_user_id=owner_user_id,
             company=company,
             job_title=job_title,
-            req_id=req_id,
             email_subject=subject,
             email_sender=sender,
             email_date=email_date,
@@ -579,34 +563,45 @@ def _process_single_email(
             summary.applications_created += 1
             logger.info("created_new_application", uid=uid, company=company, title=job_title)
         else:
-            updated = _update_status_if_changed(session, app, status, change_source=f"email_uid_{uid}", email_date=email_date)
+            updated = _update_status_if_changed(
+                session,
+                app,
+                status,
+                owner_user_id=owner_user_id,
+                change_source=f"email_uid_{uid}",
+                email_date=email_date,
+            )
             if updated:
                 summary.applications_updated += 1
 
-    summary.emails_matched += 1
-
-    # ── Step 6: Record processed email ────────────────────
-    recorded_email = _record_processed(
-        session, uid, config, parsed,
-        is_job=is_trackable_job, app_id=app.id, llm_used=llm_used, llm_result=llm_result,
-        link_method=link_method, needs_review=needs_review,
-    )
-
-    # ── Step 7: 清理孤立的旧Application ───────────────────
+    # ── Step 6: 清理孤立的旧Application ───────────────────
     # 如果这封邮件之前关联到不同的app，清理旧的（如果没有其他邮件引用）
     if previous_app_id is not None and previous_app_id != app.id:
         _cleanup_orphaned_app(
             session,
-            previous_app_id,
-            exclude_processed_email_id=recorded_email.id,
+            owner_user_id=owner_user_id,
+            app_id=previous_app_id,
+            exclude_uid=uid,
             summary=summary,
         )
+
+    summary.emails_matched += 1
+
+    # ── Step 7: Record processed email ────────────────────
+    _record_processed(
+        session, uid, mailbox_email, mailbox_folder, owner_user_id, parsed,
+        is_job=True, app_id=app.id, llm_used=llm_used, llm_result=llm_result,
+        link_method=link_method, needs_review=needs_review,
+        gmail_message_id=gmail_message_id,
+    )
 
 
 def _record_processed(
     session: Session,
     uid: int,
-    config: AppConfig,
+    account: str,
+    folder: str,
+    owner_user_id: int,
     parsed: ParsedEmailData,
     *,
     is_job: bool,
@@ -615,20 +610,37 @@ def _record_processed(
     llm_result: Optional[LLMExtractionResult] = None,
     link_method: str = "new",
     needs_review: bool = False,
-) -> ProcessedEmail:
+    gmail_message_id: Optional[str] = None,
+) -> None:
     """Insert or update a row in processed_emails (supports re-scanning).
     
     Now also stores gmail_message_id, gmail_thread_id, link_method, and needs_review.
     """
-    existing = _find_existing_processed_email(session, config, uid, parsed.message_id)
+    effective_gmail_message_id = gmail_message_id or parsed.message_id
+
+    existing = None
+    if effective_gmail_message_id:
+        existing = (
+            session.query(ProcessedEmail)
+            .filter(
+                ProcessedEmail.owner_user_id == owner_user_id,
+                ProcessedEmail.gmail_message_id == effective_gmail_message_id,
+            )
+            .first()
+        )
+    if existing is None:
+        existing = (
+            session.query(ProcessedEmail)
+            .filter(
+                ProcessedEmail.owner_user_id == owner_user_id,
+                ProcessedEmail.uid == uid,
+                ProcessedEmail.email_account == account,
+                ProcessedEmail.email_folder == folder,
+            )
+            .first()
+        )
     if existing:
-        # Overwrite existing row for the same email (message-id first, UID fallback).
-        existing.uid = uid
-        existing.email_account = config.email_username
-        existing.email_folder = config.email_folder
-        existing.subject = parsed.subject
-        existing.sender = parsed.sender
-        existing.email_date = parsed.date_dt
+        # Update existing record
         existing.is_job_related = is_job
         existing.application_id = app_id
         existing.llm_used = llm_used
@@ -637,41 +649,42 @@ def _record_processed(
         existing.estimated_cost_usd = llm_result.estimated_cost_usd if llm_result else 0.0
         existing.link_method = link_method
         existing.needs_review = needs_review
-        # Keep message-id stable unless this row was missing it.
-        if parsed.message_id and (
-            not existing.gmail_message_id or existing.gmail_message_id == parsed.message_id
-        ):
-            existing.gmail_message_id = parsed.message_id
-        if parsed.gmail_thread_id:
+        # Update gmail fields if not already set
+        if effective_gmail_message_id and not existing.gmail_message_id:
+            existing.gmail_message_id = effective_gmail_message_id
+        if parsed.gmail_thread_id and not existing.gmail_thread_id:
             existing.gmail_thread_id = parsed.gmail_thread_id
-        return existing
     else:
-        processed = ProcessedEmail(
-            uid=uid,
-            email_account=config.email_username,
-            email_folder=config.email_folder,
-            gmail_message_id=parsed.message_id,
-            gmail_thread_id=parsed.gmail_thread_id,
-            subject=parsed.subject,
-            sender=parsed.sender,
-            email_date=parsed.date_dt,
-            is_job_related=is_job,
-            application_id=app_id,
-            llm_used=llm_used,
-            link_method=link_method,
-            needs_review=needs_review,
-            prompt_tokens=llm_result.prompt_tokens if llm_result else 0,
-            completion_tokens=llm_result.completion_tokens if llm_result else 0,
-            estimated_cost_usd=llm_result.estimated_cost_usd if llm_result else 0.0,
+        session.add(
+            ProcessedEmail(
+                owner_user_id=owner_user_id,
+                uid=uid,
+                email_account=account,
+                email_folder=folder,
+                gmail_message_id=effective_gmail_message_id,
+                gmail_thread_id=parsed.gmail_thread_id,
+                subject=parsed.subject,
+                sender=parsed.sender,
+                email_date=parsed.date_dt,
+                is_job_related=is_job,
+                application_id=app_id,
+                llm_used=llm_used,
+                link_method=link_method,
+                needs_review=needs_review,
+                prompt_tokens=llm_result.prompt_tokens if llm_result else 0,
+                completion_tokens=llm_result.completion_tokens if llm_result else 0,
+                estimated_cost_usd=llm_result.estimated_cost_usd if llm_result else 0.0,
+            )
         )
-        session.add(processed)
-        session.flush()
-        return processed
 
 
 def run_scan(
     config: AppConfig,
     session: Session,
+    owner_user_id: int,
+    mailbox_email: str,
+    oauth_access_token: str | None = None,
+    mailbox_folder: str | None = None,
     should_cancel: Optional[Callable[[], bool]] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> ScanSummary:
@@ -700,30 +713,32 @@ def run_scan(
     scan_count = config.max_scan_emails
     logger.info("scan_starting", count=scan_count)
 
-    with IMAPClient(config) as imap:
-        uids = imap.fetch_latest_uids(scan_count)
-        summary.emails_scanned = len(uids)
+    email_folder = mailbox_folder or config.email_folder
 
-        max_uid = 0
-        for idx, uid in enumerate(uids, start=1):
+    with GmailClient(config, oauth_access_token=oauth_access_token or "") as gmail:
+        message_ids, latest_history_id = gmail.fetch_latest_message_ids(scan_count)
+        summary.emails_scanned = len(message_ids)
+
+        max_history_id = 0
+        for idx, gmail_message_id in enumerate(message_ids, start=1):
             # Check for cancellation
             if should_cancel and should_cancel():
-                logger.warning("scan_cancelled", processed=idx-1, total=len(uids))
+                logger.warning("scan_cancelled", processed=idx-1, total=len(message_ids))
                 summary.cancelled = True
                 summary.emails_scanned = idx - 1
                 if progress_callback:
                     progress_callback({
                         "processed": idx - 1,
-                        "total": len(uids),
+                        "total": len(message_ids),
                         "current_subject": "",
                         "status": "cancelled",
                     })
                 break
 
-            logger.info("processing_email", index=idx, total=len(uids), uid=uid)
+            logger.info("processing_email", index=idx, total=len(message_ids), gmail_message_id=gmail_message_id)
 
             try:
-                _, msg, gmail_thread_id = imap.fetch_message(uid)
+                uid, msg, gmail_thread_id, _, history_id = gmail.fetch_message(gmail_message_id)
                 if msg is None:
                     continue
                 parsed = parse_email_message(msg, gmail_thread_id=gmail_thread_id)
@@ -732,29 +747,40 @@ def run_scan(
                 if progress_callback:
                     progress_callback({
                         "processed": idx,
-                        "total": len(uids),
+                        "total": len(message_ids),
                         "current_subject": parsed.subject[:100] if parsed.subject else "",
                         "status": "processing",
                     })
                 
-                _process_single_email(session, config, llm_provider, uid, parsed, summary)
-                max_uid = max(max_uid, uid)
+                _process_single_email(
+                    session,
+                    config,
+                    llm_provider,
+                    owner_user_id,
+                    mailbox_email,
+                    email_folder,
+                    uid,
+                    parsed,
+                    summary,
+                    gmail_message_id_override=gmail_message_id,
+                )
+                max_history_id = max(max_history_id, history_id)
             except Exception as exc:
-                error_msg = f"uid={uid}: {exc}"
-                logger.error("email_processing_error", uid=uid, error=str(exc))
-                session.rollback()
+                error_msg = f"gmail_message_id={gmail_message_id}: {exc}"
+                logger.error("email_processing_error", gmail_message_id=gmail_message_id, error=str(exc))
                 summary.errors.append(error_msg)
                 if progress_callback:
                     progress_callback({
                         "processed": idx,
-                        "total": len(uids),
+                        "total": len(message_ids),
                         "current_subject": "",
                         "status": "error",
                     })
 
-        # Update scan state with the highest UID processed
-        if max_uid > 0:
-            _update_scan_state(session, config.email_username, config.email_folder, max_uid)
+        # Update scan state with the latest history ID for incremental sync.
+        cursor = max(max_history_id, latest_history_id)
+        if cursor > 0:
+            _update_scan_state(session, owner_user_id, mailbox_email, email_folder, cursor)
 
     session.commit()
 
@@ -793,6 +819,10 @@ def run_scan(
 def run_date_range_scan(
     config: AppConfig,
     session: Session,
+    owner_user_id: int,
+    mailbox_email: str,
+    oauth_access_token: str | None = None,
+    mailbox_folder: str | None = None,
     since_date: Optional[str] = None,
     before_date: Optional[str] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
@@ -821,30 +851,31 @@ def run_date_range_scan(
 
     logger.info("date_range_scan_start", since=since_date, before=before_date)
 
-    with IMAPClient(config) as imap:
-        uids = imap.fetch_uids_by_date_range(since_date, before_date)
-        summary.emails_scanned = len(uids)
+    email_folder = mailbox_folder or config.email_folder
 
-        max_uid = 0
-        for idx, uid in enumerate(uids, start=1):
+    with GmailClient(config, oauth_access_token=oauth_access_token or "") as gmail:
+        message_ids, _ = gmail.fetch_message_ids_by_date_range(since_date, before_date)
+        summary.emails_scanned = len(message_ids)
+
+        for idx, gmail_message_id in enumerate(message_ids, start=1):
             # Check for cancellation
             if should_cancel and should_cancel():
-                logger.warning("scan_cancelled", processed=idx-1, total=len(uids))
+                logger.warning("scan_cancelled", processed=idx-1, total=len(message_ids))
                 summary.cancelled = True
                 summary.emails_scanned = idx - 1
                 if progress_callback:
                     progress_callback({
                         "processed": idx - 1,
-                        "total": len(uids),
+                        "total": len(message_ids),
                         "current_subject": "",
                         "status": "cancelled",
                     })
                 break
 
-            logger.info("processing_email", index=idx, total=len(uids), uid=uid)
+            logger.info("processing_email", index=idx, total=len(message_ids), gmail_message_id=gmail_message_id)
 
             try:
-                _, msg, gmail_thread_id = imap.fetch_message(uid)
+                uid, msg, gmail_thread_id, _, _ = gmail.fetch_message(gmail_message_id)
                 if msg is None:
                     continue
                 parsed = parse_email_message(msg, gmail_thread_id=gmail_thread_id)
@@ -853,22 +884,31 @@ def run_date_range_scan(
                 if progress_callback:
                     progress_callback({
                         "processed": idx,
-                        "total": len(uids),
+                        "total": len(message_ids),
                         "current_subject": parsed.subject[:100] if parsed.subject else "",
                         "status": "processing",
                     })
 
-                _process_single_email(session, config, llm_provider, uid, parsed, summary)
-                max_uid = max(max_uid, uid)
+                _process_single_email(
+                    session,
+                    config,
+                    llm_provider,
+                    owner_user_id,
+                    mailbox_email,
+                    email_folder,
+                    uid,
+                    parsed,
+                    summary,
+                    gmail_message_id_override=gmail_message_id,
+                )
             except Exception as exc:
-                error_msg = f"uid={uid}: {exc}"
-                logger.error("email_processing_error", uid=uid, error=str(exc))
-                session.rollback()
+                error_msg = f"gmail_message_id={gmail_message_id}: {exc}"
+                logger.error("email_processing_error", gmail_message_id=gmail_message_id, error=str(exc))
                 summary.errors.append(error_msg)
                 if progress_callback:
                     progress_callback({
                         "processed": idx,
-                        "total": len(uids),
+                        "total": len(message_ids),
                         "current_subject": "",
                         "status": "error",
                     })
@@ -906,6 +946,10 @@ def run_date_range_scan(
 def run_incremental_scan(
     config: AppConfig,
     session: Session,
+    owner_user_id: int,
+    mailbox_email: str,
+    oauth_access_token: str | None = None,
+    mailbox_folder: str | None = None,
     should_cancel: Optional[Callable[[], bool]] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> ScanSummary:
@@ -921,9 +965,14 @@ def run_incremental_scan(
     """
     summary = ScanSummary()
 
-    # Get the last scanned UID
-    last_uid = _get_scan_state(session, config.email_username, config.email_folder)
-    logger.info("incremental_scan_starting", last_uid=last_uid, max_scan_emails=config.max_scan_emails)
+    # Get the last Gmail history cursor
+    email_folder = mailbox_folder or config.email_folder
+    last_history_id = _get_scan_state(session, owner_user_id, mailbox_email, email_folder)
+    logger.info(
+        "incremental_scan_starting",
+        last_history_id=last_history_id,
+        max_scan_emails=config.max_scan_emails,
+    )
 
     # Resolve LLM provider
     llm_provider: Optional[LLMProvider] = None
@@ -934,12 +983,25 @@ def run_incremental_scan(
         except Exception as exc:
             logger.warning("llm_provider_init_failed", error=str(exc))
 
-    with IMAPClient(config) as imap:
-        uids = imap.fetch_uids_after(last_uid)
-        summary.emails_scanned = len(uids)
+    with GmailClient(config, oauth_access_token=oauth_access_token or "") as gmail:
+        try:
+            message_ids, latest_history_id = gmail.fetch_message_ids_after_history(
+                last_history_id,
+                max_count=config.max_scan_emails,
+            )
+        except GmailHistoryExpiredError:
+            logger.warning(
+                "gmail_history_cursor_expired_fallback_full",
+                last_history_id=last_history_id,
+            )
+            message_ids, latest_history_id = gmail.fetch_latest_message_ids(config.max_scan_emails)
+
+        summary.emails_scanned = len(message_ids)
         
-        if not uids:
-            logger.info("incremental_scan_no_new_emails", last_uid=last_uid)
+        if not message_ids:
+            logger.info("incremental_scan_no_new_emails", last_history_id=last_history_id)
+            if latest_history_id > last_history_id:
+                _update_scan_state(session, owner_user_id, mailbox_email, email_folder, latest_history_id)
             if progress_callback:
                 progress_callback({
                     "processed": 0,
@@ -949,25 +1011,25 @@ def run_incremental_scan(
                 })
             return summary
 
-        max_uid = last_uid
-        for idx, uid in enumerate(uids, start=1):
+        max_history_id = last_history_id
+        for idx, gmail_message_id in enumerate(message_ids, start=1):
             if should_cancel and should_cancel():
-                logger.warning("scan_cancelled", processed=idx-1, total=len(uids))
+                logger.warning("scan_cancelled", processed=idx-1, total=len(message_ids))
                 summary.cancelled = True
                 summary.emails_scanned = idx - 1
                 if progress_callback:
                     progress_callback({
                         "processed": idx - 1,
-                        "total": len(uids),
+                        "total": len(message_ids),
                         "current_subject": "",
                         "status": "cancelled",
                     })
                 break
 
-            logger.info("processing_email", index=idx, total=len(uids), uid=uid)
+            logger.info("processing_email", index=idx, total=len(message_ids), gmail_message_id=gmail_message_id)
 
             try:
-                _, msg, gmail_thread_id = imap.fetch_message(uid)
+                uid, msg, gmail_thread_id, _, history_id = gmail.fetch_message(gmail_message_id)
                 if msg is None:
                     continue
                 parsed = parse_email_message(msg, gmail_thread_id=gmail_thread_id)
@@ -976,29 +1038,40 @@ def run_incremental_scan(
                 if progress_callback:
                     progress_callback({
                         "processed": idx,
-                        "total": len(uids),
+                        "total": len(message_ids),
                         "current_subject": parsed.subject[:100] if parsed.subject else "",
                         "status": "processing",
                     })
                 
-                _process_single_email(session, config, llm_provider, uid, parsed, summary)
-                max_uid = max(max_uid, uid)
+                _process_single_email(
+                    session,
+                    config,
+                    llm_provider,
+                    owner_user_id,
+                    mailbox_email,
+                    email_folder,
+                    uid,
+                    parsed,
+                    summary,
+                    gmail_message_id_override=gmail_message_id,
+                )
+                max_history_id = max(max_history_id, history_id)
             except Exception as exc:
-                error_msg = f"uid={uid}: {exc}"
-                logger.error("email_processing_error", uid=uid, error=str(exc))
-                session.rollback()
+                error_msg = f"gmail_message_id={gmail_message_id}: {exc}"
+                logger.error("email_processing_error", gmail_message_id=gmail_message_id, error=str(exc))
                 summary.errors.append(error_msg)
                 if progress_callback:
                     progress_callback({
                         "processed": idx,
-                        "total": len(uids),
+                        "total": len(message_ids),
                         "current_subject": "",
                         "status": "error",
                     })
 
-        # Update scan state with the highest UID processed
-        if max_uid > last_uid:
-            _update_scan_state(session, config.email_username, config.email_folder, max_uid)
+        # Update scan state with the latest Gmail history cursor.
+        cursor = max(max_history_id, latest_history_id)
+        if cursor > last_history_id:
+            _update_scan_state(session, owner_user_id, mailbox_email, email_folder, cursor)
 
     session.commit()
 

@@ -6,12 +6,11 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from job_monitor.database import get_db
-from job_monitor.models import Application, ProcessedEmail, StatusHistory
+from job_monitor.auth.deps import get_owner_scoped_db
+from job_monitor.models import Application, ProcessedEmail
 from job_monitor.schemas import (
     LinkEmailRequest,
     LinkedEmailOut,
-    MergeApplicationRequest,
     PendingReviewEmailOut,
 )
 
@@ -21,7 +20,7 @@ router = APIRouter(prefix="/api/emails", tags=["emails"])
 
 @router.get("/pending-review", response_model=list[PendingReviewEmailOut])
 def get_pending_review_emails(
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_owner_scoped_db),
 ) -> list[PendingReviewEmailOut]:
     """Get all emails that need user review for linking."""
     emails = (
@@ -60,7 +59,7 @@ def get_pending_review_emails(
 def link_email_to_application(
     email_id: int,
     body: LinkEmailRequest,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_owner_scoped_db),
 ) -> LinkedEmailOut:
     """Manually link an email to a specific application."""
     email = db.query(ProcessedEmail).filter(ProcessedEmail.id == email_id).first()
@@ -92,7 +91,7 @@ def link_email_to_application(
 @router.delete("/{email_id}/link", response_model=LinkedEmailOut)
 def unlink_email(
     email_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_owner_scoped_db),
 ) -> LinkedEmailOut:
     """Remove an email's link to its application."""
     email = db.query(ProcessedEmail).filter(ProcessedEmail.id == email_id).first()
@@ -114,7 +113,7 @@ def unlink_email(
 @router.post("/{email_id}/dismiss-review", response_model=dict)
 def dismiss_review(
     email_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_owner_scoped_db),
 ) -> dict:
     """Dismiss the review flag on an email without changing its link."""
     email = db.query(ProcessedEmail).filter(ProcessedEmail.id == email_id).first()
