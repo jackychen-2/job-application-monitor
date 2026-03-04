@@ -292,6 +292,41 @@ def cache_get_email(email_id: int, session: Session = Depends(get_owner_scoped_d
     )
 
 
+@router.get("/cache/emails/{email_id}/prediction-runs", response_model=list[EmailPredictionRunOut])
+def cache_get_email_prediction_runs(
+    email_id: int,
+    session: Session = Depends(get_owner_scoped_db),
+):
+    """List historical eval runs that contain predictions for this cached email."""
+    ce = session.query(CachedEmail).get(email_id)
+    if not ce:
+        raise HTTPException(404, "Cached email not found")
+
+    run_id_rows = (
+        session.query(distinct(EvalRunResult.eval_run_id))
+        .filter(EvalRunResult.cached_email_id == email_id)
+        .all()
+    )
+    run_ids = [rid for (rid,) in run_id_rows if rid is not None]
+    if not run_ids:
+        return []
+
+    rows = (
+        session.query(EvalRun)
+        .filter(EvalRun.id.in_(run_ids))
+        .order_by(EvalRun.started_at.desc())
+        .all()
+    )
+
+    return [
+        EmailPredictionRunOut(
+            run_id=r.id,
+            run_name=r.run_name,
+            started_at=r.started_at,
+            completed_at=r.completed_at,
+        )
+        for r in rows
+    ]
 # ── Pipeline Replay (decision trace) ─────────────────────
 
 
@@ -1678,6 +1713,18 @@ def get_run(run_id: int, session: Session = Depends(get_owner_scoped_db)):
     run = session.query(EvalRun).get(run_id)
     if not run:
         raise HTTPException(404, "Run not found")
+    return run
+
+
+@router.post("/runs/{run_id}/refresh-report", response_model=EvalRunDetailOut)
+def refresh_run_report(run_id: int, session: Session = Depends(get_owner_scoped_db)):
+    """Recompute report_json and per-result correctness flags from current labels."""
+    run = session.query(EvalRun).get(run_id)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    from job_monitor.eval.runner import refresh_eval_run_report
+    refresh_eval_run_report(session, run_id)
+    session.commit()
     return run
 
 
