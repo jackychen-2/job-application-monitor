@@ -29,6 +29,15 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_utc(dt: datetime | None) -> datetime | None:
+    """Normalize possibly naive datetimes from SQLite to UTC-aware."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def build_google_authorize_url(config: AppConfig) -> str:
     state = secrets.token_urlsafe(24)
     _oauth_state_store[state] = _utcnow() + timedelta(minutes=10)
@@ -162,10 +171,11 @@ def get_valid_google_access_token(
         raise RuntimeError("Google account not linked")
 
     now = _utcnow()
+    access_token_expires_at = _as_utc(account.access_token_expires_at)
     if (
         account.access_token_encrypted
-        and account.access_token_expires_at
-        and account.access_token_expires_at > now + timedelta(seconds=60)
+        and access_token_expires_at
+        and access_token_expires_at > now + timedelta(seconds=60)
     ):
         return decrypt_token(account.access_token_encrypted, config.token_encryption_key.get_secret_value()), account.email
 
