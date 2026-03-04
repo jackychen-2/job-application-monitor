@@ -337,7 +337,7 @@ async def _event_generator(
             if event is None:
                 break
 
-            yield f"data: {json.dumps(event)}\\n\\n"
+            yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:
             logger.error("sse_generator_error", error=str(exc))
             break
