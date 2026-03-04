@@ -143,6 +143,7 @@ export type GroupDecisionType =
   | "MERGED_INTO_EXISTING"
   | "SPLIT_FROM_EXISTING"
   | "NEW_GROUP_CREATED"
+  | "PARTIAL_RUN_INCOMPLETE"
   | "MARKED_NOT_JOB";
 
 export type GroupingFailureCategory =
@@ -183,6 +184,7 @@ export interface GroupingAnalysis {
   co_member_subjects: (string | null)[];            // subject line for each co-member email
   co_member_email_dates: (string | null)[];         // ISO send date for each co-member email
   co_member_count: number;
+  co_member_predictions_complete: boolean;          // false when latest run did not include all co-members
   co_member_predicted_group_ids: (number | null)[]; // predicted groups for each co-member
   co_member_predicted_group_names: (string | null)[]; // "#ID Company — Title" for each
 

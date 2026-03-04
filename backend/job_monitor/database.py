@@ -116,6 +116,87 @@ def _migrate_applications_unique_constraint(engine: Engine) -> None:
         logger.info("schema_migration_applied", table="applications", change="unique_constraint_req_id")
 
 
+def _migrate_eval_predicted_groups_constraint(engine: Engine) -> None:
+    """Upgrade eval_predicted_groups unique constraint from job_title_norm to job_title+req_id.
+
+    v1: UNIQUE (eval_run_id, company_norm, job_title_norm)
+    v2: UNIQUE (eval_run_id, company_norm, job_title, req_id)  ← mirrors Application dedup key
+
+    This makes the eval fallback dedup identical to _get_or_create_application() so that
+    eval faithfully replicates production behaviour.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT sql FROM sqlite_master WHERE type='table' AND name='eval_predicted_groups'")
+        ).fetchone()
+        create_sql = (row[0] or "").lower() if row else ""
+        if not create_sql:
+            return  # table does not exist yet; create_all() will use the new model schema
+
+        # Already migrated to v2?
+        if "uq_predicted_group_v2" in create_sql:
+            return
+
+        # Only migrate if the old v1 constraint is present
+        if "uq_predicted_group" not in create_sql:
+            return
+
+        conn.execute(text("PRAGMA foreign_keys=OFF"))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE eval_predicted_groups_new (
+                    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                    eval_run_id INTEGER NOT NULL
+                        REFERENCES eval_runs(id) ON DELETE CASCADE,
+                    company VARCHAR(200),
+                    job_title VARCHAR(300),
+                    req_id VARCHAR(80),
+                    company_norm VARCHAR(200) NOT NULL DEFAULT '',
+                    job_title_norm VARCHAR(300) NOT NULL DEFAULT '',
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT uq_predicted_group_v2
+                        UNIQUE (eval_run_id, company_norm, job_title, req_id)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO eval_predicted_groups_new (
+                    id, eval_run_id, company, job_title, req_id,
+                    company_norm, job_title_norm, created_at
+                )
+                SELECT
+                    id, eval_run_id, company, job_title, NULL,
+                    company_norm, job_title_norm, created_at
+                FROM eval_predicted_groups
+                """
+            )
+        )
+        conn.execute(text("DROP TABLE eval_predicted_groups"))
+        conn.execute(
+            text("ALTER TABLE eval_predicted_groups_new RENAME TO eval_predicted_groups")
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_eval_predicted_groups_eval_run_id "
+                "ON eval_predicted_groups (eval_run_id)"
+            )
+        )
+        conn.execute(text("PRAGMA foreign_keys=ON"))
+        conn.commit()
+        logger.info(
+            "schema_migration_applied",
+            table="eval_predicted_groups",
+            change="uq_predicted_group_v2_job_title_req_id",
+        )
+
+
 def _apply_schema_migrations(engine: Engine) -> None:
     """Run incremental column additions for existing databases."""
     _add_column_if_missing(engine, "applications", "req_id", "VARCHAR(80)")
@@ -123,8 +204,13 @@ def _apply_schema_migrations(engine: Engine) -> None:
     _add_column_if_missing(engine, "eval_labels", "email_category", "VARCHAR(50)")
     _add_column_if_missing(engine, "eval_labels", "correct_req_id", "VARCHAR(80)")
     _add_column_if_missing(engine, "eval_run_results", "predicted_email_category", "VARCHAR(50)")
+    _add_column_if_missing(engine, "eval_run_results", "predicted_non_job_reason", "VARCHAR(64)")
     _add_column_if_missing(engine, "eval_run_results", "predicted_req_id", "VARCHAR(80)")
     _add_column_if_missing(engine, "eval_run_results", "req_id_correct", "BOOLEAN")
+    # Rebuild eval_predicted_groups with v2 dedup key (job_title+req_id, mirrors production)
+    _migrate_eval_predicted_groups_constraint(engine)
+    # Safety net: add req_id column for any fresh install that already has v2 schema via create_all
+    _add_column_if_missing(engine, "eval_predicted_groups", "req_id", "VARCHAR(80)")
 
 
 def init_db(config: AppConfig) -> Engine:

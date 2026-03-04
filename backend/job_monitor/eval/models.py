@@ -96,11 +96,18 @@ class EvalApplicationGroup(Base):
 
 
 class EvalPredictedGroup(Base):
-    """A predicted group created by the runner based on company+job_title."""
+    """A predicted group created by the runner based on company+job_title.
+
+    The dedup key mirrors _get_or_create_application in pipeline.py:
+    (eval_run_id, company_norm, job_title, req_id) using raw job_title + req_id,
+    so the eval faithfully replicates what production does when the resolver declines.
+    """
 
     __tablename__ = "eval_predicted_groups"
     __table_args__ = (
-        UniqueConstraint("eval_run_id", "company_norm", "job_title_norm", name="uq_predicted_group"),
+        # v2: raw job_title + req_id to match Application table's dedup key exactly.
+        # job_title_norm is kept for display/search but is NOT the uniqueness discriminator.
+        UniqueConstraint("eval_run_id", "company_norm", "job_title", "req_id", name="uq_predicted_group_v2"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -109,6 +116,7 @@ class EvalPredictedGroup(Base):
     )
     company: Mapped[str | None] = mapped_column(String(200), nullable=True)
     job_title: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    req_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     company_norm: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     job_title_norm: Mapped[str] = mapped_column(String(300), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(
@@ -253,6 +261,8 @@ class EvalRunResult(Base):
     predicted_is_job_related: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # Two-way predicted category: "job_application" | "not_job_related"
     predicted_email_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Optional non-job subtype for error analysis (e.g. social_invitation/job_recommendation_digest)
+    predicted_non_job_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     predicted_company: Mapped[str | None] = mapped_column(String(200), nullable=True)
     predicted_job_title: Mapped[str | None] = mapped_column(String(300), nullable=True)
     predicted_req_id: Mapped[str | None] = mapped_column(String(80), nullable=True)

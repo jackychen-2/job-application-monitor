@@ -94,16 +94,17 @@ def get_flow_data(db: Session = Depends(get_db)) -> FlowData:
     )
     status_counts = [StatusCount(status=s, count=c) for s, c in status_rows]
 
-    # Aggregate transitions from StatusHistory
-    # Only count transitions where old_status is not None (skip initial creation entries)
+    # Aggregate transitions from StatusHistory.
+    # Initial creation entries have old_status = NULL; map them to a virtual root
+    # node so the Sankey graph can be built from transition edges only.
+    from_status_expr = func.coalesce(StatusHistory.old_status, "Applications")
     transition_rows = (
         db.query(
-            StatusHistory.old_status,
+            from_status_expr,
             StatusHistory.new_status,
             func.count(StatusHistory.id),
         )
-        .filter(StatusHistory.old_status.isnot(None))
-        .group_by(StatusHistory.old_status, StatusHistory.new_status)
+        .group_by(from_status_expr, StatusHistory.new_status)
         .all()
     )
     transitions = [

@@ -70,7 +70,11 @@ class LLMExtractionResult:
 class LLMLinkConfirmResult:
     """Result from an LLM link-confirmation call."""
 
+    decision: str = ""
     is_same_application: bool = False
+    confidence: float = 0.0
+    reason: str = ""
+    raw_answer: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
     estimated_cost_usd: float = 0.0
@@ -97,6 +101,14 @@ class LLMProvider(Protocol):
         app_last_email_date: str = "",
         days_since_last_email: int | None = None,
         recent_events: list[dict[str, str]] | None = None,
+        new_status: str = "",
+        new_title: str = "",
+        new_req_id: str = "",
+        candidate_status: str = "",
+        candidate_title: str = "",
+        candidate_req_id: str = "",
+        title_similarity: float | None = None,
+        days_gap: int | None = None,
     ) -> LLMLinkConfirmResult: ...
 
 
@@ -136,9 +148,11 @@ class OpenAIProvider:
         "application summary digests (emails summarizing multiple application statuses), "
         "promotional emails, unsubscribe confirmations, "
         "general company newsletters even if from a careers/talent team, "
+        "social invitations (for example LinkedIn connection invites like 'You have an invitation'), "
         "recruiter or TA proactively reaching out about a role (the user did NOT apply — set status='Recruiter Reach-out'). "
         "If the email lists multiple job openings or says 'Your Job Alert matched the following jobs', "
-        "it is a job alert digest, NOT an application — return is_job_application=false. "
+        "or includes sharing phrasing like 'I think this job might be right for you', "
+        "it is a job alert/recommendation digest, NOT an application — return is_job_application=false. "
         "\n\n"
         "- email_category: REQUIRED — classify into exactly one of:\n"
         "  * 'job_application'     — user submitted an application; email is a confirmation, "
@@ -276,15 +290,20 @@ class OpenAIProvider:
     _LINK_CONFIRM_PROMPT = (
         "You are matching job application emails. Determine if a new email "
         "is about the SAME job application as an existing record, or a DIFFERENT one.\n\n"
-        "SAME means: both refer to the same position at the same company "
-        "(e.g., application confirmation followed by interview invite for the same role).\n"
-        "DIFFERENT means: different position, different application cycle, "
-        "or the email is unrelated to this specific application.\n\n"
-        "Use timeline signals to judge application cycle continuity. "
-        "If timeline suggests a new cycle (e.g., rejection followed by a fresh application later), "
-        "prefer DIFFERENT.\n"
-        "If requisition IDs are explicitly provided and equal, treat that as the strongest SAME signal.\n\n"
-        "Answer ONLY with the word \"same\" or \"different\"."
+        "SAME means this email updates the same application lifecycle record.\n"
+        "DIFFERENT means a distinct role, distinct requisition, or clearly a new re-application cycle.\n\n"
+        "Decision policy:\n"
+        "1) Rejection/interview/OA/offer/onboarding emails are usually SAME status updates.\n"
+        "2) Prefer DIFFERENT only with strong new-application evidence such as:\n"
+        "   - conflicting req_id values,\n"
+        "   - clearly different role title,\n"
+        "   - explicit re-apply/new application language plus long gap.\n"
+        "3) If company and role core are aligned and no conflict evidence appears, prefer SAME.\n"
+        "4) Use provided structured fields first; use raw body only as supporting evidence.\n\n"
+        "Return strict JSON only with keys:\n"
+        "- decision: \"same\" or \"different\"\n"
+        "- confidence: number between 0 and 1\n"
+        "- reason: short one-sentence explanation grounded in evidence from req_id/title/status/timeline."
     )
 
     def confirm_same_application(
@@ -301,6 +320,14 @@ class OpenAIProvider:
         app_last_email_date: str = "",
         days_since_last_email: int | None = None,
         recent_events: list[dict[str, str]] | None = None,
+        new_status: str = "",
+        new_title: str = "",
+        new_req_id: str = "",
+        candidate_status: str = "",
+        candidate_title: str = "",
+        candidate_req_id: str = "",
+        title_similarity: float | None = None,
+        days_gap: int | None = None,
     ) -> LLMLinkConfirmResult:
         """Ask LLM whether a new email belongs to an existing application."""
         cfg = self._config
@@ -313,9 +340,22 @@ class OpenAIProvider:
             esubj = _normalize_llm_text(event.get("subject", "")) or "(none)"
             recent_lines.append(f"{idx}. {edate} | status={estat} | subject=\"{esubj[:140]}\"")
         recent_events_block = "\n".join(recent_lines) if recent_lines else "(none)"
-        days_label = str(days_since_last_email) if days_since_last_email is not None else "(unknown)"
+        gap_value = days_gap if days_gap is not None else days_since_last_email
+        days_label = str(gap_value) if gap_value is not None else "(unknown)"
+        title_sim_label = f"{title_similarity:.3f}" if title_similarity is not None else "(unknown)"
+        normalized_new_req = normalize_req_id(new_req_id or "")
+        normalized_candidate_req = normalize_req_id(candidate_req_id or "")
 
         user_prompt = (
+            f"Structured Signals:\n"
+            f"- incoming_status: {new_status or '(unknown)'}\n"
+            f"- incoming_title: {new_title or '(unknown)'}\n"
+            f"- incoming_req_id: {normalized_new_req or '(none)'}\n"
+            f"- candidate_status: {candidate_status or '(unknown)'}\n"
+            f"- candidate_title: {candidate_title or '(unknown)'}\n"
+            f"- candidate_req_id: {normalized_candidate_req or '(none)'}\n"
+            f"- title_similarity: {title_sim_label}\n"
+            f"- days_gap: {days_label}\n\n"
             f"Existing Application:\n"
             f"- Company: {app_company}\n"
             f"- Job Title: {app_job_title or '(unknown)'}\n"
@@ -337,14 +377,42 @@ class OpenAIProvider:
         resp = self._client.chat.completions.create(
             model=cfg.llm_model,
             timeout=cfg.llm_timeout_sec,
+            temperature=0,
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": self._LINK_CONFIRM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
         )
 
-        content = (resp.choices[0].message.content or "").strip().lower()
-        is_same = "same" in content and "different" not in content
+        content = (resp.choices[0].message.content or "").strip()
+        decision = ""
+        confidence = 0.0
+        reason = ""
+        try:
+            parsed = json.loads(content) if content else {}
+            decision = str(parsed.get("decision", "")).strip().lower()
+            confidence_raw = parsed.get("confidence", 0.0)
+            try:
+                confidence = float(confidence_raw)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            confidence = max(0.0, min(1.0, confidence))
+            reason = _normalize_llm_text(str(parsed.get("reason", "")))
+        except Exception:
+            parsed = {}
+
+        # Backward compatibility: tolerate legacy plain-text "same"/"different".
+        raw_lower = content.lower()
+        if decision not in {"same", "different"}:
+            if "same" in raw_lower and "different" not in raw_lower:
+                decision = "same"
+            elif "different" in raw_lower and "same" not in raw_lower:
+                decision = "different"
+        if confidence <= 0.0:
+            confidence = 0.6 if decision in {"same", "different"} else 0.0
+
+        is_same = decision == "same"
 
         usage = getattr(resp, "usage", None)
         prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
@@ -357,13 +425,20 @@ class OpenAIProvider:
         logger.info(
             "llm_link_confirm",
             is_same=is_same,
-            raw_answer=content[:50],
+            decision=decision or "unknown",
+            confidence=confidence,
+            reason=reason[:200],
+            raw_answer=content[:200],
             company=app_company,
             prompt_tokens=prompt_tokens,
         )
 
         return LLMLinkConfirmResult(
+            decision=decision,
             is_same_application=is_same,
+            confidence=confidence,
+            reason=reason,
+            raw_answer=content,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             estimated_cost_usd=estimated_cost,

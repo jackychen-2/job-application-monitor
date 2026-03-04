@@ -8,10 +8,10 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import structlog
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from job_monitor.config import AppConfig
-from job_monitor.email.classifier import is_job_related
 from job_monitor.eval.cache import reparse_cached_email
 from job_monitor.eval.metrics import (
     FullReport,
@@ -27,19 +27,14 @@ from job_monitor.eval.models import (
     EvalRun,
     EvalRunResult,
 )
+from job_monitor.extraction.core import run_core_classification_and_extraction
 from job_monitor.extraction.llm import (
-    LLMExtractionResult,
     LLMProvider,
     create_llm_provider,
-    extract_with_timeout,
 )
+from job_monitor.extraction.pipeline import build_title_req_filters as _prod_build_title_req_filters
 from job_monitor.extraction.rules import (
-    extract_company,
-    extract_job_req_id,
-    extract_job_title,
-    extract_status,
     normalize_req_id,
-    split_title_and_req_id,
 )
 
 logger = structlog.get_logger(__name__)
@@ -51,6 +46,21 @@ def _validate_job_title(title: str) -> str:
     return _vt(title)
 
 
+def _latest_results_for_run(session: Session, run_id: int) -> list[EvalRunResult]:
+    """Return one latest EvalRunResult per email for a run (max id as version)."""
+    latest_ids = (
+        session.query(func.max(EvalRunResult.id).label("max_id"))
+        .filter(EvalRunResult.eval_run_id == run_id)
+        .group_by(EvalRunResult.cached_email_id)
+        .subquery()
+    )
+    return (
+        session.query(EvalRunResult)
+        .join(latest_ids, EvalRunResult.id == latest_ids.c.max_id)
+        .all()
+    )
+
+
 def run_evaluation(
     config: AppConfig,
     session: Session,
@@ -59,6 +69,7 @@ def run_evaluation(
     cancel_token: Optional[threading.Event] = None,
     max_emails: Optional[int] = None,
     email_ids: Optional[list[int]] = None,
+    target_run_id: Optional[int] = None,
 ) -> EvalRun:
     """Run the full pipeline on all cached emails and compute metrics against labels.
 
@@ -71,6 +82,8 @@ def run_evaluation(
         max_emails: Optional limit — evaluate only the first N emails (ignored when email_ids is set).
         email_ids: Optional explicit list of CachedEmail IDs to evaluate. When set, only those
             emails are run through the pipeline (max_emails is ignored).
+        target_run_id: Optional existing EvalRun.id. When provided, writes new prediction
+            versions into that run instead of creating a new run record.
     """
 
     def _log(msg: str, current: int = 0, total: int = 0) -> None:
@@ -81,19 +94,25 @@ def run_evaluation(
             except Exception:
                 pass
 
-    # Create run record
-    _log("Creating evaluation run record…")
-    eval_run = EvalRun(
-        run_name=run_name or f"Run {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}",
-        started_at=datetime.now(timezone.utc),
-        config_snapshot=json.dumps({
-            "llm_enabled": config.llm_enabled,
-            "llm_model": config.llm_model if config.llm_enabled else None,
-            "llm_provider": config.llm_provider if config.llm_enabled else None,
-        }),
-    )
-    session.add(eval_run)
-    session.flush()
+    # Create run record (or reuse an existing run for in-place versioned re-predict)
+    if target_run_id is None:
+        _log("Creating evaluation run record…")
+        eval_run = EvalRun(
+            run_name=run_name or f"Run {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}",
+            started_at=datetime.now(timezone.utc),
+            config_snapshot=json.dumps({
+                "llm_enabled": config.llm_enabled,
+                "llm_model": config.llm_model if config.llm_enabled else None,
+                "llm_provider": config.llm_provider if config.llm_enabled else None,
+            }),
+        )
+        session.add(eval_run)
+        session.flush()
+    else:
+        eval_run = session.query(EvalRun).get(target_run_id)
+        if eval_run is None:
+            raise ValueError(f"Target eval run #{target_run_id} not found")
+        _log(f"Reusing evaluation run #{target_run_id} (versioned re-predict mode)…")
 
     # Load cached emails — filtered by explicit IDs, limited by max_emails, or all
     _log("Loading cached emails from database…")
@@ -104,13 +123,18 @@ def run_evaluation(
     cached_emails = q.all()
     if not email_ids and max_emails and max_emails > 0:
         cached_emails = cached_emails[:max_emails]
-    eval_run.total_emails = len(cached_emails)
+    if target_run_id is None:
+        eval_run.total_emails = len(cached_emails)
 
     # Load labels indexed by cached_email_id
     _log(f"Found {len(cached_emails)} cached emails. Loading labels…")
     labels_map: dict[int, EvalLabel] = {}
-    for label in session.query(EvalLabel).all():
-        labels_map[label.cached_email_id] = label
+    if target_run_id is None:
+        for label in session.query(EvalLabel).all():
+            labels_map[label.cached_email_id] = label
+    else:
+        for label in session.query(EvalLabel).filter(EvalLabel.eval_run_id == eval_run.id).all():
+            labels_map[label.cached_email_id] = label
     eval_run.labeled_emails = len(labels_map)
     _log(f"Loaded {len(labels_map)} labels.")
 
@@ -131,18 +155,70 @@ def run_evaluation(
     results: list[EvalRunResult] = []
 
     # ── Grouping state — mirrors production Application table ─────────────
-    # app_group_info: group_id → {company_norm, job_title, status, latest_email_date}
-    # Replaces the old (company_stripped, title_norm) dedup dict so Stage 4
-    # uses the exact same Rules A/B/C as resolve_by_company() in production.
-    from difflib import SequenceMatcher as _SM
+    # app_group_info: group_id → {company_norm, company_orig, job_title, req_id, status, latest_email_date}
+    # Stage 4 calls the same shared company-linking core used by production resolver.
     from job_monitor.linking.resolver import (
+        CompanyLinkCandidate as _CompanyLinkCandidate,
         normalize_company as _prod_normalize_company,
-        titles_similar as _prod_titles_similar,
-        _PROGRESSED_STATUSES as _PROD_PROGRESSED,
+        resolve_by_company_candidates as _resolve_company_link_shared,
     )
-    _FUZZY_THRESHOLD = 0.75
 
     app_group_info: dict[int, dict] = {}  # group_id → metadata
+    if target_run_id is not None:
+        # Seed grouping candidates from the existing run's latest predictions so a
+        # single-email re-predict can still link against historical groups in-run.
+        prior_groups = (
+            session.query(EvalPredictedGroup)
+            .filter(EvalPredictedGroup.eval_run_id == eval_run.id)
+            .all()
+        )
+        for pg in prior_groups:
+            app_group_info[pg.id] = {
+                "company_norm": pg.company_norm,
+                "company_orig": pg.company or "",
+                "job_title": pg.job_title or "",
+                "req_id": pg.req_id or "",
+                "status": "",
+                "latest_email_date": None,
+                "latest_email_subject": "",
+            }
+
+        for prev in _latest_results_for_run(session, eval_run.id):
+            gid = prev.predicted_application_group_id
+            if gid is None:
+                continue
+            if gid not in app_group_info:
+                company_orig = prev.predicted_company or ""
+                job_title = prev.predicted_job_title or ""
+                app_group_info[gid] = {
+                    "company_norm": _prod_normalize_company(company_orig) or "",
+                    "company_orig": company_orig,
+                    "job_title": job_title,
+                    "req_id": "",
+                    "status": "",
+                    "latest_email_date": None,
+                    "latest_email_subject": "",
+                }
+
+            info = app_group_info[gid]
+            if prev.predicted_company:
+                info["company_orig"] = prev.predicted_company
+                info["company_norm"] = _prod_normalize_company(prev.predicted_company) or info["company_norm"]
+            if prev.predicted_job_title:
+                info["job_title"] = prev.predicted_job_title
+            if prev.predicted_req_id:
+                info["req_id"] = prev.predicted_req_id
+
+            prev_email = prev.cached_email
+            prev_date = prev_email.email_date if prev_email else None
+            prev_subject = prev_email.subject if prev_email else ""
+            latest_date = info.get("latest_email_date")
+            if prev_date and (latest_date is None or prev_date > latest_date):
+                info["latest_email_date"] = prev_date
+                info["latest_email_subject"] = prev_subject or ""
+                if prev.predicted_status:
+                    info["status"] = prev.predicted_status
+
     total = len(cached_emails)
 
     for idx, cached in enumerate(cached_emails):
@@ -175,144 +251,55 @@ def run_evaluation(
         dstep("input", f"Sender  : {sender[:120]!r}")
         dstep("input", f"Body    : {body[:200]!r}{'…' if len(body) > 200 else ''}")
 
-        # Run pipeline stages
-        llm_result: Optional[LLMExtractionResult] = None
-        llm_used = False
+        # Stage 1~3: Shared prod core (classification + status + extraction)
+        core_prediction = run_core_classification_and_extraction(
+            sender=sender,
+            subject=subject,
+            body=body,
+            llm_provider=llm_provider,
+            llm_timeout_sec=config.llm_timeout_sec,
+            validate_job_title=_validate_job_title,
+            decision_logger=dstep,
+            llm_provider_label=f"{config.llm_provider} / {config.llm_model}",
+        )
+        llm_result = core_prediction.classification.llm_result
+        llm_used = core_prediction.classification.llm_used
+        pred_is_job = core_prediction.classification.is_trackable_job
+        pred_email_category = core_prediction.classification.predicted_email_category
+        pred_non_job_reason = core_prediction.classification.non_job_reason
 
-        # Stage 1: LLM extraction (if available)
-        if llm_provider is not None:
-            llm_used = True
-            dstep("llm", f"LLM enabled: {config.llm_provider} / {config.llm_model}")
-            try:
-                llm_result = extract_with_timeout(
-                    llm_provider, sender, subject, body, timeout_sec=config.llm_timeout_sec
-                )
-                eval_run.total_prompt_tokens += llm_result.prompt_tokens
-                eval_run.total_completion_tokens += llm_result.completion_tokens
-                eval_run.total_estimated_cost += llm_result.estimated_cost_usd
-                dstep("llm", f"is_job={llm_result.is_job_application}  category={llm_result.email_category!r}  "
-                      f"company={llm_result.company!r}  title={llm_result.job_title!r}  "
-                      f"req_id={llm_result.req_id!r}  "
-                      f"status={llm_result.status!r}  confidence={llm_result.confidence}  "
-                      f"tokens={llm_result.prompt_tokens}+{llm_result.completion_tokens}")
-            except Exception as llm_exc:
-                dstep("llm", f"LLM failed: {llm_exc} — falling back to rules", "error")
-                llm_result = None
-        else:
-            dstep("llm", "LLM disabled — rule-based pipeline only", "info")
-
-        # Stage 2: Classification
-        dstep("classification", "═══ Stage 2: Classification ═══")
-        is_recruiter_reach_out = False
-        is_onboarding = False
-        is_oa = False
         if llm_result is not None:
-            normalized_status = (llm_result.status or "").strip().lower().replace("_", " ")
-            is_recruiter_reach_out = normalized_status in {
-                "recruiter reach-out",
-                "recruiter reach out",
-            }
-            is_onboarding = normalized_status in {
-                "onboarding",
-                "background check",
-                "background screening",
-            }
-            is_oa = normalized_status in {
-                "oa",
-                "online assessment",
-                "online assessemnt",
-                "online test",
-                "coding challenge",
-                "assessment",
-                "take-home",
-                "take home",
-                "hackerrank",
-                "codesignal",
-                "codility",
-            }
-            pred_is_job = llm_result.is_job_application or is_recruiter_reach_out or is_onboarding or is_oa
-            dstep(
-                "classification",
-                f"LLM result: is_job_application={llm_result.is_job_application} "
-                f"email_category={llm_result.email_category!r} "
-                f"trackable={pred_is_job} "
-                f"(confidence={llm_result.confidence:.2f})",
-                "success" if pred_is_job else "warn",
-            )
-        else:
-            pred_is_job = is_job_related(subject, sender)
-            dstep("classification",
-                  f"Rule-based: is_job_related={pred_is_job} (subject: {subject[:80]!r})",
-                  "success" if pred_is_job else "warn")
+            eval_run.total_prompt_tokens += llm_result.prompt_tokens
+            eval_run.total_completion_tokens += llm_result.completion_tokens
+            eval_run.total_estimated_cost += llm_result.estimated_cost_usd
 
         if not pred_is_job:
-            dstep("classification", "→ Not job-related — field extraction skipped", "warn")
             pred_company = None
             pred_title = None
             pred_req_id = None
             pred_status = None
             pred_confidence = None
         else:
-            # Stage 3: Field extraction (only for job-related emails)
-            dstep("company", "═══ Stage 3: Company ═══")
-            dstep("title",   "═══ Stage 3: Title ═══")
-            dstep("req_id",  "═══ Stage 3: Req ID ═══")
-            dstep("status",  "═══ Stage 3: Status ═══")
-            if llm_result is not None:
-                pred_company = (llm_result.company or "").strip() or "Unknown"
-                raw_title = _validate_job_title(llm_result.base_title or llm_result.job_title)
-                base_title, req_from_title = split_title_and_req_id(raw_title)
-                pred_req_id = normalize_req_id(llm_result.req_id) or normalize_req_id(req_from_title)
-                if not base_title:
-                    llm_title_with_req = _validate_job_title(llm_result.title_with_req_id)
-                    base_title, req_from_title_with_req = split_title_and_req_id(llm_title_with_req)
-                    if not pred_req_id:
-                        pred_req_id = normalize_req_id(req_from_title_with_req)
-                pred_title = base_title
-                if is_recruiter_reach_out:
-                    pred_status = "Recruiter Reach-out"
-                    dstep("status", "LLM status recruiter reach-out -> Recruiter Reach-out", "success")
-                elif is_oa:
-                    pred_status = "OA"
-                    dstep("status", "LLM status OA-like -> OA", "success")
-                elif is_onboarding:
-                    pred_status = "Onboarding"
-                    dstep("status", "LLM status onboarding-like -> Onboarding", "success")
-                else:
-                    llm_status = llm_result.status
-                    if llm_status and llm_status.lower() != "unknown":
-                        pred_status = llm_status
-                        dstep("status", f"LLM: {pred_status!r}", "success")
-                    else:
-                        pred_status = "Unknown"
-                        dstep("status", "LLM returned unknown", "warn")
-                pred_confidence = llm_result.confidence
-                dstep("company", f"LLM: {pred_company!r}",
-                      "success" if pred_company else "warn")
-                dstep("title",   f"LLM: {pred_title!r}",
-                      "success" if pred_title else "warn")
-                dstep("req_id",  f"LLM: {pred_req_id!r}",
-                      "success" if pred_req_id else "warn")
-            else:
-                pred_company = extract_company(subject, sender)
-                raw_title = _validate_job_title(extract_job_title(subject, body))
-                base_title, req_from_title = split_title_and_req_id(raw_title)
-                pred_req_id = normalize_req_id(extract_job_req_id(subject, body, base_title) or req_from_title)
-                pred_title = base_title
-                pred_status = extract_status(subject, body)
+            extraction = core_prediction.extraction
+            if extraction is None:
+                dstep("classification", "Core extraction missing for trackable email", "error")
+                pred_company = None
+                pred_title = None
+                pred_req_id = None
+                pred_status = None
                 pred_confidence = None
-                dstep("company", f"Rules: {pred_company!r}", "success" if pred_company and pred_company != "Unknown" else "warn")
-                dstep("title",   f"Rules: {pred_title!r}", "success" if pred_title else "warn")
-                dstep("req_id",  f"Rules: {pred_req_id!r}", "success" if pred_req_id else "warn")
-                dstep("status",  f"Rules: {pred_status!r}", "success")
+                pred_is_job = False
+                pred_email_category = "not_job_related"
+                pred_non_job_reason = None
+            else:
+                pred_company = extraction.company
+                pred_title = extraction.job_title
+                pred_req_id = extraction.req_id
+                pred_status = extraction.status
+                pred_confidence = extraction.confidence
 
         # Stage 4: Grouping
-        # Logic:
-        #  • "Applied" emails → create/join group by (company_norm_stripped, title_norm)
-        #  • Follow-up emails (interview/offer/rejection) → first try to find an
-        #    existing upstream group; only create a new one if nothing matches.
-        #  • Company normalization strips legal/descriptive suffixes so that
-        #    "Zoom", "Zoom Communications", "Your Zoom" all map to the same key.
+        # Uses the shared production company-link resolver core.
         dstep("grouping", "═══ Stage 4: Grouping ═══")
         pred_group_id = None
         if pred_is_job and pred_company:
@@ -320,172 +307,144 @@ def run_evaluation(
             dstep("grouping", f"Normalized company: {company_norm_prod!r}  (raw: {pred_company!r})")
 
             if company_norm_prod:
-                # ── Candidate search (same as production resolve_by_company) ──
-                candidates: list[int] = [
-                    gid for gid, info in app_group_info.items()
-                    if info["company_norm"] == company_norm_prod
+                same_company_count = sum(
+                    1 for info in app_group_info.values()
+                    if info.get("company_norm") == company_norm_prod
+                )
+                dstep("grouping", f"{same_company_count} candidate group(s) with same company norm")
+
+                group_candidates = [
+                    _CompanyLinkCandidate(
+                        id=gid,
+                        company=info.get("company_orig") or "",
+                        normalized_company=info.get("company_norm"),
+                        job_title=info.get("job_title"),
+                        req_id=info.get("req_id"),
+                        status=info.get("status"),
+                        last_email_subject=info.get("latest_email_subject"),
+                    )
+                    for gid, info in app_group_info.items()
                 ]
-                dstep("grouping", f"{len(candidates)} candidate group(s) with same company norm")
 
-                # Rule A: Title similarity (Jaccard ≥ 0.9, production threshold)
-                if pred_title and candidates:
-                    before = len(candidates)
-                    candidates = [
-                        gid for gid in candidates
-                        if _prod_titles_similar(pred_title, app_group_info[gid]["job_title"])
-                    ]
-                    if before != len(candidates):
-                        dstep("grouping", f"Rule A (title filter): {before - len(candidates)} removed, {len(candidates)} remain", "info")
+                def _fmt_dt(dt: datetime | None) -> str:
+                    if not dt:
+                        return ""
+                    return dt.isoformat(sep=" ", timespec="seconds")
 
-                # Rule B: Re-application after rejection/interview
-                if pred_status == "已申请" and candidates:
-                    before = len(candidates)
-                    candidates = [
-                        gid for gid in candidates
-                        if app_group_info[gid].get("status") not in _PROD_PROGRESSED
-                    ]
-                    if before != len(candidates):
-                        dstep("grouping", f"Rule B (re-application): {before - len(candidates)} removed, {len(candidates)} remain", "info")
+                def _timeline_provider(candidate: _CompanyLinkCandidate) -> dict:
+                    info = app_group_info.get(candidate.id, {})
+                    candidate_last_dt = info.get("latest_email_date")
+                    if cached.email_date and candidate_last_dt:
+                        cur_dt = cached.email_date.replace(tzinfo=None) if cached.email_date.tzinfo else cached.email_date
+                        prev_dt = candidate_last_dt.replace(tzinfo=None) if candidate_last_dt.tzinfo else candidate_last_dt
+                        days_since_last = abs((cur_dt - prev_dt).days)
+                    else:
+                        days_since_last = None
+                    return {
+                        "new_email_date": _fmt_dt(cached.email_date),
+                        "app_created_at": "",
+                        "app_last_email_date": _fmt_dt(candidate_last_dt),
+                        "days_since_last_email": days_since_last,
+                        "recent_events": [
+                            {
+                                "date": _fmt_dt(candidate_last_dt),
+                                "status": info.get("status", "") or "",
+                                "subject": info.get("latest_email_subject", "") or "",
+                            }
+                        ],
+                    }
 
-                if candidates:
-                    pred_group_id = candidates[0]
-                    # Use the group's canonical company/title as the prediction.
-                    # The follow-up email may have extracted a slightly different name
-                    # ("Your Zoom" vs "Zoom Communications") — the prediction should
-                    # always reflect the group's established canonical name.
+                def _grouping_log(message: str, level: str = "info") -> None:
+                    dstep("grouping", message, level)
+
+                shared_result = _resolve_company_link_shared(
+                    company=pred_company,
+                    candidates=group_candidates,
+                    extracted_status=pred_status,
+                    job_title=pred_title,
+                    req_id=pred_req_id,
+                    llm_provider=llm_provider,
+                    email_subject=subject,
+                    email_sender=sender,
+                    email_body=body,
+                    timeline_provider=_timeline_provider,
+                    decision_logger=_grouping_log,
+                )
+
+                if shared_result.is_linked and shared_result.application_id in app_group_info:
+                    pred_group_id = shared_result.application_id
                     pred_company = app_group_info[pred_group_id].get("company_orig", pred_company)
-                    pred_title   = app_group_info[pred_group_id].get("job_title",    pred_title)
-                    dstep("grouping",
-                          f"Linked to existing group #{pred_group_id} "
-                          f"(canonical: {pred_company!r} / {pred_title!r})", "success")
-                    # Update group state so subsequent emails see the latest status/date
+                    pred_title = app_group_info[pred_group_id].get("job_title", pred_title)
+                    dstep(
+                        "grouping",
+                        f"Linked to existing group #{pred_group_id} via {shared_result.link_method} "
+                        f"(canonical: {pred_company!r} / {pred_title!r})",
+                        "success",
+                    )
+
+                    # Keep eval state aligned with production row update behavior.
+                    if pred_company:
+                        app_group_info[pred_group_id]["company_orig"] = pred_company
+                    if pred_title:
+                        app_group_info[pred_group_id]["job_title"] = pred_title
+                    if pred_req_id:
+                        app_group_info[pred_group_id]["req_id"] = pred_req_id
                     if pred_status:
                         app_group_info[pred_group_id]["status"] = pred_status
                     if cached.email_date:
                         app_group_info[pred_group_id]["latest_email_date"] = cached.email_date
                     app_group_info[pred_group_id]["latest_email_subject"] = subject
                 else:
-                    # No surviving candidate — try fuzzy rescue before creating new group
-                    fuzzy_rescued = False
-                    if llm_provider is not None and company_norm_prod:
-                        # Find groups with similar company norms (fuzzy match).
-                        # Includes exact company-norm matches too — they may have been
-                        # eliminated by Rule A (title mismatch) without LLM confirmation,
-                        # so the LLM should still get a chance to decide.
-                        fuzzy_matches = [
-                            gid for gid, info in app_group_info.items()
-                            if info["company_norm"]
-                            and _SM(None, company_norm_prod, info["company_norm"]).ratio() >= _FUZZY_THRESHOLD
-                        ]
-                        if fuzzy_matches:
-                            dstep("grouping",
-                                  f"Fuzzy rescue: {len(fuzzy_matches)} candidate(s) with similar company norm",
-                                  "info")
-                            for gid in fuzzy_matches[:3]:
-                                try:
-                                    candidate_last_dt = app_group_info[gid].get("latest_email_date")
-                                    if cached.email_date and candidate_last_dt:
-                                        cur_dt = cached.email_date.replace(tzinfo=None) if cached.email_date.tzinfo else cached.email_date
-                                        prev_dt = candidate_last_dt.replace(tzinfo=None) if candidate_last_dt.tzinfo else candidate_last_dt
-                                        days_since_last = abs((cur_dt - prev_dt).days)
-                                    else:
-                                        days_since_last = None
-                                    confirm = llm_provider.confirm_same_application(
-                                        email_subject=subject,
-                                        email_sender=sender,
-                                        email_body=body,
-                                        app_company=app_group_info[gid].get("company_orig", ""),
-                                        app_job_title=app_group_info[gid].get("job_title") or "",
-                                        app_status=app_group_info[gid].get("status") or "",
-                                        app_last_email_subject="",
-                                        new_email_date=cached.email_date.isoformat(sep=" ", timespec="seconds") if cached.email_date else "",
-                                        app_created_at="",
-                                        app_last_email_date=candidate_last_dt.isoformat(sep=" ", timespec="seconds") if candidate_last_dt else "",
-                                        days_since_last_email=days_since_last,
-                                        recent_events=[
-                                            {
-                                                "date": candidate_last_dt.isoformat(sep=" ", timespec="seconds") if candidate_last_dt else "",
-                                                "status": app_group_info[gid].get("status", "") or "",
-                                                "subject": app_group_info[gid].get("latest_email_subject", "") or "",
-                                            }
-                                        ],
-                                    )
-                                    if confirm.is_same_application:
-                                        pred_group_id = gid
-                                        pred_company = app_group_info[gid].get("company_orig", pred_company)
-                                        pred_title   = app_group_info[gid].get("job_title",    pred_title)
-                                        dstep("grouping",
-                                              f"Fuzzy rescue linked to group #{gid} "
-                                              f"(canonical: {pred_company!r} / {pred_title!r})",
-                                              "success")
-                                        eval_run.total_prompt_tokens += confirm.prompt_tokens
-                                        eval_run.total_completion_tokens += confirm.completion_tokens
-                                        eval_run.total_estimated_cost += confirm.estimated_cost_usd
-                                        if pred_status:
-                                            app_group_info[gid]["status"] = pred_status
-                                        if cached.email_date:
-                                            app_group_info[gid]["latest_email_date"] = cached.email_date
-                                        app_group_info[gid]["latest_email_subject"] = subject
-                                        fuzzy_rescued = True
-                                        break
-                                    else:
-                                        dstep("grouping",
-                                              f"Fuzzy rescue LLM rejected group #{gid}", "info")
-                                except Exception as exc:
-                                    dstep("grouping",
-                                          f"Fuzzy rescue LLM error for group #{gid}: {exc}", "warn")
+                    # Shared resolver declined linking — create/reuse an eval predicted group.
+                    # Use the SAME production dedup function as _get_or_create_application()
+                    # so that the two paths never diverge.
+                    _norm_req = normalize_req_id(pred_req_id or "") or ""
+                    _grp_q = session.query(EvalPredictedGroup).filter(
+                        EvalPredictedGroup.eval_run_id == eval_run.id,
+                        EvalPredictedGroup.company_norm == company_norm_prod,
+                    )
+                    # _prod_build_title_req_filters is build_title_req_filters() from pipeline.py —
+                    # the identical 4-case (job_title, req_id) logic used by _get_or_create_application.
+                    existing_group = _grp_q.filter(
+                        *_prod_build_title_req_filters(EvalPredictedGroup, pred_title, _norm_req)
+                    ).first()
 
-                    if not fuzzy_rescued:
-                        # Create new group — guard against duplicate (company_norm, job_title_norm)
-                        # which can happen when two emails extract slightly different titles that
-                        # both normalize to the same key but fail Rule A against each other.
-                        title_norm_for_key = (pred_title or "").strip().lower()
-                        existing_group = session.query(EvalPredictedGroup).filter(
-                            EvalPredictedGroup.eval_run_id == eval_run.id,
-                            EvalPredictedGroup.company_norm == company_norm_prod,
-                            EvalPredictedGroup.job_title_norm == title_norm_for_key,
-                        ).first()
-                        if existing_group:
-                            pred_group_id = existing_group.id
-                            dstep("grouping", f"Reused existing group #{pred_group_id} (same norm key)", "info")
-                        else:
-                            pred_group = EvalPredictedGroup(
-                                eval_run_id=eval_run.id,
-                                company=pred_company,
-                                job_title=pred_title,
-                                company_norm=company_norm_prod,
-                                job_title_norm=title_norm_for_key,
-                            )
-                            session.add(pred_group)
-                            session.flush()
-                            pred_group_id = pred_group.id
-                            dstep("grouping", f"New predicted group #{pred_group_id}", "info")
-                        app_group_info[pred_group_id] = {
-                            "company_norm": company_norm_prod,
-                            "company_orig": pred_company,   # canonical name from first email
-                            "job_title":    pred_title,
-                            "status":       pred_status,
-                            "latest_email_date": cached.email_date,
-                            "latest_email_subject": subject,
-                        }
+                    if existing_group:
+                        pred_group_id = existing_group.id
+                        dstep("grouping", f"Reused existing group #{pred_group_id} (same dedup key: title+req_id)", "info")
+                    else:
+                        pred_group = EvalPredictedGroup(
+                            eval_run_id=eval_run.id,
+                            company=pred_company,
+                            job_title=pred_title,
+                            req_id=_norm_req or None,
+                            company_norm=company_norm_prod,
+                            job_title_norm=(pred_title or "").strip().lower(),
+                        )
+                        session.add(pred_group)
+                        session.flush()
+                        pred_group_id = pred_group.id
+                        dstep("grouping", f"New predicted group #{pred_group_id}", "info")
+                    app_group_info[pred_group_id] = {
+                        "company_norm": company_norm_prod,
+                        "company_orig": pred_company,
+                        "job_title": pred_title,
+                        "req_id": pred_req_id,
+                        "status": pred_status,
+                        "latest_email_date": cached.email_date,
+                        "latest_email_subject": subject,
+                    }
             else:
                 dstep("grouping", "Skipped (company normalization returned empty)", "warn")
         else:
             dstep("grouping", "Skipped (not job-related or no company extracted)", "warn")
-
-        # Derive predicted_email_category from LLM result or boolean fallback
-        if llm_result and llm_result.email_category:
-            pred_email_category: str | None = llm_result.email_category
-        elif pred_is_job:
-            pred_email_category = "job_application"
-        else:
-            pred_email_category = None  # rule-based: can't distinguish recruiter vs. not_job_related
 
         result = EvalRunResult(
             eval_run_id=eval_run.id,
             cached_email_id=cached.id,
             predicted_is_job_related=pred_is_job,
             predicted_email_category=pred_email_category,
+            predicted_non_job_reason=pred_non_job_reason if not pred_is_job else None,
             predicted_company=pred_company if pred_is_job else None,
             predicted_job_title=pred_title if pred_is_job else None,
             predicted_req_id=pred_req_id if pred_is_job else None,
@@ -508,7 +467,33 @@ def run_evaluation(
             logger.warning("eval_email_commit_failed", email_id=cached.id, error=str(commit_err))
             session.rollback()
 
-    # Compute metrics against labels
+    if target_run_id is not None:
+        # In versioned re-predict mode, recompute report from latest per-email
+        # results in this run (not just the subset processed in this call).
+        _log(f"Pipeline complete — processed {len(results)} emails. Refreshing Run #{eval_run.id}…", total, total)
+        eval_run.completed_at = datetime.now(timezone.utc)
+        eval_run.total_emails = (
+            session.query(func.count(func.distinct(EvalRunResult.cached_email_id)))
+            .filter(EvalRunResult.eval_run_id == eval_run.id)
+            .scalar() or 0
+        )
+        eval_run.labeled_emails = (
+            session.query(func.count(EvalLabel.id))
+            .filter(EvalLabel.eval_run_id == eval_run.id)
+            .scalar() or 0
+        )
+        refresh_eval_run_report(session, eval_run.id)
+        session.commit()
+        _log(f"✓ Re-predict complete — updated Run #{eval_run.id} (versioned).", total, total)
+        logger.info(
+            "eval_run_versioned_update_complete",
+            run_id=eval_run.id,
+            processed=len(results),
+            total=eval_run.total_emails,
+        )
+        return eval_run
+
+    # Compute metrics against labels (new run mode)
     _log(f"Pipeline complete — processed {len(results)} emails. Computing metrics…", total, total)
     report = _compute_report(results, labels_map, cached_emails)
 
@@ -630,11 +615,7 @@ def refresh_eval_run_report(session: Session, run_id: int) -> None:
     if eval_run is None:
         return
 
-    results = (
-        session.query(EvalRunResult)
-        .filter(EvalRunResult.eval_run_id == run_id)
-        .all()
-    )
+    results = _latest_results_for_run(session, run_id)
     if not results:
         return
 
@@ -661,6 +642,7 @@ def refresh_eval_run_report(session: Session, run_id: int) -> None:
     eval_run.grouping_v_measure = report.grouping.v_measure
     eval_run.report_json = report.to_json()
     eval_run.labeled_emails = len(labels_map)
+    eval_run.total_emails = len(results)
 
     # Recompute per-result grouping correctness
     _true_to_pred: dict[int, set[int]] = defaultdict(set)
