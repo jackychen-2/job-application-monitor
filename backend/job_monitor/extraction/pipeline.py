@@ -89,6 +89,40 @@ class ScanSummary:
             self.errors = []
 
 
+def build_title_req_filters(model_cls: type, job_title: str | None, req_id: str | None) -> list:
+    """Build dedup filters for (job_title, req_id), with fallback when req_id is absent.
+
+    Eval code imports this helper to keep grouping dedup logic aligned with production.
+    Some models (e.g., current Application schema) may not expose ``req_id``; in that
+    case we gracefully fall back to title-only matching.
+    """
+    jt = (job_title or "").strip()
+    rq = (req_id or "").strip()
+    has_req = hasattr(model_cls, "req_id")
+
+    if not has_req:
+        if jt:
+            return [model_cls.job_title == jt]
+        return [(model_cls.job_title == None) | (model_cls.job_title == "")]  # noqa: E711
+
+    if jt and rq:
+        return [model_cls.job_title == jt, model_cls.req_id == rq]
+    if jt:
+        return [
+            model_cls.job_title == jt,
+            (model_cls.req_id == None) | (model_cls.req_id == ""),  # noqa: E711
+        ]
+    if rq:
+        return [
+            (model_cls.job_title == None) | (model_cls.job_title == ""),  # noqa: E711
+            model_cls.req_id == rq,
+        ]
+    return [
+        (model_cls.job_title == None) | (model_cls.job_title == ""),  # noqa: E711
+        (model_cls.req_id == None) | (model_cls.req_id == ""),  # noqa: E711
+    ]
+
+
 def _get_or_create_application(
     session: Session,
     owner_user_id: int,

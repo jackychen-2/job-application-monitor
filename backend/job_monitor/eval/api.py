@@ -37,6 +37,7 @@ from job_monitor.eval.schemas import (
     CachedEmailOut,
     CacheStatsOut,
     DropdownOptions,
+    EmailPredictionRunOut,
     EvalGroupIn,
     EvalGroupOut,
     EvalLabelIn,

@@ -233,14 +233,20 @@ def _cleanup_on_startup() -> None:
                 Application.owner_user_id,
                 Application.normalized_company,
                 Application.job_title,
+                Application.req_id,
                 func.count(Application.id).label("cnt"),
             )
-            .group_by(Application.owner_user_id, Application.normalized_company, Application.job_title)
+            .group_by(
+                Application.owner_user_id,
+                Application.normalized_company,
+                Application.job_title,
+                Application.req_id,
+            )
             .having(func.count(Application.id) > 1)
             .all()
         )
 
-        for owner_user_id, norm_company, job_title, _ in dup_groups:
+        for owner_user_id, norm_company, job_title, req_id, _ in dup_groups:
             group_apps = (
                 session.query(Application)
                 .filter(
@@ -249,6 +255,9 @@ def _cleanup_on_startup() -> None:
                     Application.job_title == job_title
                     if job_title
                     else ((Application.job_title == None) | (Application.job_title == "")),  # noqa: E711
+                    Application.req_id == req_id
+                    if req_id
+                    else ((Application.req_id == None) | (Application.req_id == "")),  # noqa: E711
                 )
                 .order_by(Application.email_date.desc().nullslast())
                 .all()
@@ -320,6 +329,7 @@ def _cleanup_on_startup() -> None:
                 app.company,
                 extracted_status=email_status,
                 job_title=app.job_title,
+                req_id=app.req_id,
                 email_date=pe.email_date,
             )
 
