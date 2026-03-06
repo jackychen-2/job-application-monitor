@@ -23,6 +23,7 @@ ProgressCallback = Callable[[ProgressInfo], None]
 from sqlalchemy.orm import Session
 
 from job_monitor.config import AppConfig
+from job_monitor.dedupe import merge_owner_duplicate_applications
 from job_monitor.email.classifier import is_job_related
 from job_monitor.email.gmail_client import GmailClient, GmailHistoryExpiredError
 from job_monitor.email.parser import ParsedEmailData, parse_email_message
@@ -32,7 +33,14 @@ from job_monitor.extraction.llm import (
     create_llm_provider,
     extract_with_timeout,
 )
-from job_monitor.extraction.rules import extract_company, extract_job_title, extract_status
+from job_monitor.extraction.rules import (
+    extract_company,
+    extract_job_req_id,
+    extract_job_title,
+    extract_status,
+    normalize_req_id,
+    split_title_and_req_id,
+)
 from job_monitor.linking.resolver import (
     is_message_already_processed,
     normalize_company,
@@ -64,6 +72,40 @@ def _validate_job_title(title: str) -> str:
     if ". " in cleaned or cleaned[0].islower():
         return ""
     return cleaned
+
+
+def _extract_title_and_req_id(
+    subject: str,
+    body: str,
+    *,
+    preferred_title: str = "",
+    preferred_req_id: str = "",
+) -> tuple[str, str]:
+    """Extract normalized (job_title, req_id) with fallbacks from title/body."""
+    req_id = normalize_req_id(preferred_req_id or "")
+    candidates = [preferred_title, extract_job_title(subject, body)]
+    seen: set[str] = set()
+
+    for raw in candidates:
+        title_raw = (raw or "").strip()
+        if not title_raw or title_raw in seen:
+            continue
+        seen.add(title_raw)
+
+        base_title, req_from_title = split_title_and_req_id(title_raw)
+        title = _validate_job_title(base_title or title_raw)
+
+        if not req_id:
+            req_id = normalize_req_id(req_from_title)
+        if not req_id:
+            req_id = normalize_req_id(extract_job_req_id(subject, body, title_raw))
+
+        if title:
+            return title, req_id
+
+    return "", req_id
+
+
 from job_monitor.models import Application, ProcessedEmail, ScanState, StatusHistory
 
 logger = structlog.get_logger(__name__)
@@ -128,6 +170,7 @@ def _get_or_create_application(
     owner_user_id: int,
     company: str,
     job_title: str,
+    req_id: str,
     email_subject: str,
     email_sender: str,
     email_date: Optional[datetime],
@@ -137,34 +180,26 @@ def _get_or_create_application(
     """Find an existing application or create a new one.
 
     Returns (application, created) where created=True for new rows.
-    Deduplicates by normalized_company + job_title (treats empty titles as equivalent).
+    Deduplicates by normalized_company + (job_title, req_id).
     Updates existing record if data has changed.
     """
     # Use normalized_company for matching to handle variations like "Qventus, Inc" vs "Qventus"
     normalized = normalize_company(company)
-    
-    # Try to find existing (normalized_company + job_title match)
-    # Handle NULL/empty job_title: treat all empty titles for same company as one
-    if job_title:
-        existing = (
-            session.query(Application)
-            .filter(
-                Application.owner_user_id == owner_user_id,
-                Application.normalized_company == normalized,
-                Application.job_title == job_title,
-            )
-            .first()
-        )
-    else:
-        existing = (
-            session.query(Application)
-            .filter(
-                Application.owner_user_id == owner_user_id,
-                Application.normalized_company == normalized,
-                (Application.job_title == None) | (Application.job_title == ""),  # noqa: E711
-            )
-            .first()
-        )
+    req_id = normalize_req_id(req_id or "")
+
+    base_query = session.query(Application).filter(
+        Application.owner_user_id == owner_user_id,
+        Application.normalized_company == normalized,
+    )
+    existing = base_query.filter(
+        *build_title_req_filters(Application, job_title, req_id)
+    ).first()
+    # Backward-compat: legacy rows may have empty req_id for the same title.
+    if existing is None and req_id:
+        existing = base_query.filter(
+            *build_title_req_filters(Application, job_title, None)
+        ).first()
+
     if existing:
         # Update fields - merge old into most recent
         if existing.company != company:
@@ -172,6 +207,8 @@ def _get_or_create_application(
             existing.normalized_company = normalized
         if job_title and existing.job_title != job_title:
             existing.job_title = job_title
+        if req_id and existing.req_id != req_id:
+            existing.req_id = req_id
         # Always update to most recent email info
         _ed = email_date.replace(tzinfo=None) if email_date and hasattr(email_date, 'tzinfo') and email_date.tzinfo else email_date
         _ad = existing.email_date.replace(tzinfo=None) if existing.email_date and hasattr(existing.email_date, 'tzinfo') and existing.email_date.tzinfo else existing.email_date
@@ -180,7 +217,7 @@ def _get_or_create_application(
             existing.email_subject = email_subject
             existing.email_sender = email_sender
         existing.updated_at = datetime.utcnow()
-        logger.info("application_merged", app_id=existing.id, company=company, job_title=job_title)
+        logger.info("application_merged", app_id=existing.id, company=company, job_title=job_title, req_id=req_id)
         return existing, False
 
     app = Application(
@@ -188,6 +225,7 @@ def _get_or_create_application(
         company=company,
         normalized_company=normalize_company(company),
         job_title=job_title,
+        req_id=req_id or None,
         email_subject=email_subject,
         email_sender=email_sender,
         email_date=email_date,
@@ -388,6 +426,24 @@ def _update_scan_state(
         )
 
 
+def _rollback_after_email_error(
+    session: Session,
+    *,
+    gmail_message_id: str,
+    exc: Exception,
+) -> None:
+    """Reset session state after a per-email failure so the scan can continue."""
+    try:
+        session.rollback()
+    except Exception as rollback_exc:
+        logger.error(
+            "email_error_rollback_failed",
+            gmail_message_id=gmail_message_id,
+            original_error=str(exc),
+            rollback_error=str(rollback_exc),
+        )
+
+
 def _process_single_email(
     session: Session,
     config: AppConfig,
@@ -496,7 +552,12 @@ def _process_single_email(
     # ── Step 4: Extract fields ────────────────────────────
     if llm_result is not None and llm_result.is_job_application:
         company = llm_result.company or extract_company(subject, sender)
-        job_title = _validate_job_title(llm_result.job_title) or _validate_job_title(extract_job_title(subject, body))
+        job_title, req_id = _extract_title_and_req_id(
+            subject,
+            body,
+            preferred_title=llm_result.job_title,
+            preferred_req_id=llm_result.req_id,
+        )
         # 如果 LLM 返回空或 "Unknown"，使用规则提取
         llm_status = llm_result.status
         if llm_status and llm_status.lower() != "unknown":
@@ -505,7 +566,11 @@ def _process_single_email(
             status = extract_status(subject, body)
     else:
         company = extract_company(subject, sender)
-        job_title = _validate_job_title(extract_job_title(subject, body))
+        job_title, req_id = _extract_title_and_req_id(
+            subject,
+            body,
+            preferred_title=extract_job_title(subject, body),
+        )
         status = extract_status(subject, body)
 
     if not company:
@@ -518,6 +583,7 @@ def _process_single_email(
             session, company,
             extracted_status=status,
             job_title=job_title,
+            req_id=req_id,
             email_date=email_date,
             llm_provider=llm_provider,
             email_subject=subject,
@@ -541,6 +607,7 @@ def _process_single_email(
                 owner_user_id=owner_user_id,
                 company=company,
                 job_title=job_title,
+                req_id=req_id,
                 email_subject=subject,
                 email_sender=sender,
                 email_date=email_date,
@@ -559,6 +626,9 @@ def _process_single_email(
                 changed = True
             if job_title and app.job_title != job_title:
                 app.job_title = job_title
+                changed = True
+            if req_id and app.req_id != req_id:
+                app.req_id = req_id
                 changed = True
             if email_date:
                 # Normalize both datetimes to naive UTC for comparison
@@ -588,6 +658,7 @@ def _process_single_email(
             owner_user_id=owner_user_id,
             company=company,
             job_title=job_title,
+            req_id=req_id,
             email_subject=subject,
             email_sender=sender,
             email_date=email_date,
@@ -800,6 +871,11 @@ def run_scan(
                 )
                 max_history_id = max(max_history_id, history_id)
             except Exception as exc:
+                _rollback_after_email_error(
+                    session,
+                    gmail_message_id=gmail_message_id,
+                    exc=exc,
+                )
                 error_msg = f"gmail_message_id={gmail_message_id}: {exc}"
                 logger.error("email_processing_error", gmail_message_id=gmail_message_id, error=str(exc))
                 summary.errors.append(error_msg)
@@ -815,6 +891,15 @@ def run_scan(
         cursor = max(max_history_id, latest_history_id)
         if cursor > 0:
             _update_scan_state(session, owner_user_id, mailbox_email, email_folder, cursor)
+
+    try:
+        with session.begin_nested():
+            merged = merge_owner_duplicate_applications(session, owner_user_id)
+        if merged > 0:
+            summary.applications_deleted += merged
+            logger.info("scan_deduped_applications", owner_user_id=owner_user_id, merged=merged)
+    except Exception as exc:
+        logger.warning("scan_dedupe_failed", owner_user_id=owner_user_id, error=str(exc))
 
     session.commit()
 
@@ -936,6 +1021,11 @@ def run_date_range_scan(
                     gmail_message_id_override=gmail_message_id,
                 )
             except Exception as exc:
+                _rollback_after_email_error(
+                    session,
+                    gmail_message_id=gmail_message_id,
+                    exc=exc,
+                )
                 error_msg = f"gmail_message_id={gmail_message_id}: {exc}"
                 logger.error("email_processing_error", gmail_message_id=gmail_message_id, error=str(exc))
                 summary.errors.append(error_msg)
@@ -951,6 +1041,15 @@ def run_date_range_scan(
         # This is intentional — scanning a historical date range (e.g. Aug 2025) should
         # not regress the cursor used by "Scan New" for incremental scanning.
         # Only run_scan() and run_incremental_scan() update the cursor.
+
+    try:
+        with session.begin_nested():
+            merged = merge_owner_duplicate_applications(session, owner_user_id)
+        if merged > 0:
+            summary.applications_deleted += merged
+            logger.info("scan_deduped_applications", owner_user_id=owner_user_id, merged=merged)
+    except Exception as exc:
+        logger.warning("scan_dedupe_failed", owner_user_id=owner_user_id, error=str(exc))
 
     session.commit()
 
@@ -1091,6 +1190,11 @@ def run_incremental_scan(
                 )
                 max_history_id = max(max_history_id, history_id)
             except Exception as exc:
+                _rollback_after_email_error(
+                    session,
+                    gmail_message_id=gmail_message_id,
+                    exc=exc,
+                )
                 error_msg = f"gmail_message_id={gmail_message_id}: {exc}"
                 logger.error("email_processing_error", gmail_message_id=gmail_message_id, error=str(exc))
                 summary.errors.append(error_msg)
@@ -1106,6 +1210,15 @@ def run_incremental_scan(
         cursor = max(max_history_id, latest_history_id)
         if cursor > last_history_id:
             _update_scan_state(session, owner_user_id, mailbox_email, email_folder, cursor)
+
+    try:
+        with session.begin_nested():
+            merged = merge_owner_duplicate_applications(session, owner_user_id)
+        if merged > 0:
+            summary.applications_deleted += merged
+            logger.info("scan_deduped_applications", owner_user_id=owner_user_id, merged=merged)
+    except Exception as exc:
+        logger.warning("scan_dedupe_failed", owner_user_id=owner_user_id, error=str(exc))
 
     session.commit()
 

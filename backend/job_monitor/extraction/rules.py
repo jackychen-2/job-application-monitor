@@ -133,6 +133,9 @@ def split_title_and_req_id(title: str) -> tuple[str, str]:
     value = _normalize_space(title or "")
     if not value:
         return "", ""
+    # Some templates produce tails like "Role - R166064 -"; trim trailing separators first.
+    value = re.sub(r"(?:\s*[-,:|]\s*)+$", "", value)
+    value = _normalize_space(value)
 
     paren_tail = re.search(
         rf"^(?P<title>.*?)\s*\((?P<req>{_REQ_ID_TOKEN})\)\s*$",

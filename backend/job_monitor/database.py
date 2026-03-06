@@ -101,6 +101,7 @@ def _enable_sqlite_wal(dbapi_conn: object, _connection_record: object) -> None:
     cursor = dbapi_conn.cursor()  # type: ignore[union-attr]
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA busy_timeout=30000")
     cursor.close()
 
 
@@ -111,6 +112,7 @@ def init_db(config: AppConfig) -> Engine:
     connect_args = {}
     if config.database_url.startswith("sqlite"):
         connect_args["check_same_thread"] = False
+        connect_args["timeout"] = 30
 
     _engine = create_engine(
         config.database_url,
