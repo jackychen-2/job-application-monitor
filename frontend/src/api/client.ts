@@ -8,14 +8,21 @@ import type {
   ApplicationCreate,
   ApplicationDetail,
   ApplicationListResponse,
+  ApplicationMergeEvent,
+  SplitApplicationRequest,
+  SplitApplicationResult,
   ApplicationUpdate,
   AuthUser,
   FlowData,
+  Journey,
+  JourneyCreateRequest,
+  JourneyUpdateRequest,
   LinkedEmail,
   PendingReviewEmail,
   ScanResult,
   ScanState,
   Stats,
+  UnmergeApplicationResult,
 } from "../types";
 
 const BASE = "/api";
@@ -102,6 +109,29 @@ export async function mergeApplications(targetId: number, sourceId: number): Pro
   return request<Application>(`/applications/${targetId}/merge`, {
     method: "POST",
     body: JSON.stringify({ source_application_id: sourceId }),
+  });
+}
+
+export async function getApplicationMergeEvents(id: number): Promise<ApplicationMergeEvent[]> {
+  return request<ApplicationMergeEvent[]>(`/applications/${id}/merge-events`);
+}
+
+export async function unmergeApplication(
+  targetId: number,
+  mergeEventId: number,
+): Promise<UnmergeApplicationResult> {
+  return request<UnmergeApplicationResult>(`/applications/${targetId}/unmerge/${mergeEventId}`, {
+    method: "POST",
+  });
+}
+
+export async function splitApplication(
+  sourceId: number,
+  data: SplitApplicationRequest,
+): Promise<SplitApplicationResult> {
+  return request<SplitApplicationResult>(`/applications/${sourceId}/split`, {
+    method: "POST",
+    body: JSON.stringify(data),
   });
 }
 
@@ -193,4 +223,30 @@ export async function getStats(): Promise<Stats> {
 
 export async function getFlowData(): Promise<FlowData> {
   return request<FlowData>("/stats/flow");
+}
+
+// ── Journeys ─────────────────────────────────────────────
+
+export async function listJourneys(): Promise<Journey[]> {
+  return request<Journey[]>("/journeys");
+}
+
+export async function createJourney(data: JourneyCreateRequest): Promise<Journey> {
+  return request<Journey>("/journeys", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function activateJourney(journeyId: number): Promise<Journey> {
+  return request<Journey>(`/journeys/${journeyId}/activate`, {
+    method: "POST",
+  });
+}
+
+export async function renameJourney(journeyId: number, data: JourneyUpdateRequest): Promise<Journey> {
+  return request<Journey>(`/journeys/${journeyId}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { listApplications, getStats, getFlowData } from "../api/client";
-import type { Application, FlowData, ScanResult, Stats } from "../types";
+import { createApplication, getFlowData, getStats, listApplications } from "../api/client";
+import type { Application, ApplicationCreate, FlowData, ScanResult, Stats } from "../types";
+import { STATUSES } from "../types";
 import StatsCards from "../components/StatsCards";
 import FilterBar from "../components/FilterBar";
 import ApplicationTable from "../components/ApplicationTable";
@@ -9,8 +10,10 @@ import ActivityHeatmap from "../components/ActivityHeatmap";
 import SankeyFlow from "../components/SankeyFlow";
 import CostChart from "../components/CostChart";
 import ReviewQueue from "../components/ReviewQueue";
+import { useJourney } from "../journey/JourneyContext";
 
 export default function Dashboard() {
+  const { activeJourney } = useJourney();
   const [applications, setApplications] = useState<Application[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -22,6 +25,17 @@ export default function Dashboard() {
   const [flowData, setFlowData] = useState<FlowData | null>(null);
   const [flowLoading, setFlowLoading] = useState(true);
   const [lastScan, setLastScan] = useState<ScanResult | null>(null);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [creatingApplication, setCreatingApplication] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [newApplication, setNewApplication] = useState<ApplicationCreate>({
+    company: "",
+    job_title: "",
+    req_id: "",
+    status: "已申请",
+    notes: "",
+    source: "manual",
+  });
   const pageSize = 20;
 
   const fetchApplications = useCallback(async () => {
@@ -42,7 +56,7 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [page, statusFilter, companySearch]);
+  }, [page, statusFilter, companySearch, activeJourney?.id]);
 
   const fetchStats = useCallback(async () => {
     setStatsLoading(true);
@@ -54,7 +68,7 @@ export default function Dashboard() {
     } finally {
       setStatsLoading(false);
     }
-  }, []);
+  }, [activeJourney?.id]);
 
   const fetchFlowData = useCallback(async () => {
     setFlowLoading(true);
@@ -66,7 +80,16 @@ export default function Dashboard() {
     } finally {
       setFlowLoading(false);
     }
-  }, []);
+  }, [activeJourney?.id]);
+
+  useEffect(() => {
+    setPage(1);
+    setApplications([]);
+    setTotal(0);
+    setStats(null);
+    setFlowData(null);
+    setLastScan(null);
+  }, [activeJourney?.id]);
 
   useEffect(() => {
     fetchApplications();
@@ -90,6 +113,59 @@ export default function Dashboard() {
     fetchFlowData();
   };
 
+  const openCreateModal = () => {
+    resetCreateModal();
+    setShowCreateModal(true);
+  };
+
+  const resetCreateModal = () => {
+    setNewApplication({
+      company: "",
+      job_title: "",
+      req_id: "",
+      status: "已申请",
+      notes: "",
+      source: "manual",
+    });
+    setCreateError(null);
+    setCreatingApplication(false);
+  };
+
+  const handleCreateApplication = async () => {
+    const company = (newApplication.company || "").trim();
+    if (!company) {
+      setCreateError("Company is required.");
+      return;
+    }
+
+    setCreatingApplication(true);
+    setCreateError(null);
+    try {
+      const created = await createApplication({
+        company,
+        job_title: (newApplication.job_title || "").trim() || undefined,
+        req_id: (newApplication.req_id || "").trim() || undefined,
+        status: newApplication.status || "已申请",
+        notes: (newApplication.notes || "").trim() || undefined,
+        source: "manual",
+      });
+      setShowCreateModal(false);
+      resetCreateModal();
+      setPage(1);
+      if (page === 1) {
+        fetchApplications();
+      }
+      fetchStats();
+      fetchFlowData();
+      console.info("application_created", { id: created.id });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setCreateError(message.includes("409") ? "Application already exists." : "Failed to create application.");
+    } finally {
+      setCreatingApplication(false);
+    }
+  };
+
   const totalPages = Math.ceil(total / pageSize);
 
   return (
@@ -104,7 +180,7 @@ export default function Dashboard() {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <ScanButton onScanComplete={handleScanComplete} />
+          <ScanButton key={activeJourney?.id ?? "journey-none"} onScanComplete={handleScanComplete} />
         </div>
       </div>
 
@@ -178,7 +254,7 @@ export default function Dashboard() {
       />
 
       {/* Review Queue (shows only if there are pending emails) */}
-      <ReviewQueue onResolved={handleRefresh} />
+      <ReviewQueue key={activeJourney?.id ?? "journey-none"} onResolved={handleRefresh} />
 
       {/* Filters + Table */}
       <div className="space-y-4">
@@ -187,6 +263,7 @@ export default function Dashboard() {
           companySearch={companySearch}
           onStatusChange={(s) => { setStatusFilter(s); setPage(1); }}
           onCompanyChange={(c) => { setCompanySearch(c); setPage(1); }}
+          onAddApplication={openCreateModal}
         />
         <ApplicationTable
           applications={applications}
@@ -217,6 +294,99 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+
+      {showCreateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+          <div className="w-full max-w-lg rounded-lg bg-white p-6 shadow-xl">
+            <h2 className="text-lg font-semibold text-gray-900">Create Application</h2>
+            <p className="mt-1 text-sm text-gray-500">Add an application manually.</p>
+
+            <div className="mt-4 grid grid-cols-1 gap-3">
+              <div>
+                <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-gray-500">
+                  Company
+                </label>
+                <input
+                  value={newApplication.company || ""}
+                  onChange={(e) => setNewApplication((prev) => ({ ...prev, company: e.target.value }))}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  placeholder="e.g. Stripe"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-gray-500">
+                  Job Title
+                </label>
+                <input
+                  value={newApplication.job_title || ""}
+                  onChange={(e) => setNewApplication((prev) => ({ ...prev, job_title: e.target.value }))}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  placeholder="e.g. Software Engineer"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-gray-500">
+                  Req ID
+                </label>
+                <input
+                  value={newApplication.req_id || ""}
+                  onChange={(e) => setNewApplication((prev) => ({ ...prev, req_id: e.target.value }))}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  placeholder="e.g. R0615432"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-gray-500">
+                  Status
+                </label>
+                <select
+                  value={newApplication.status || "已申请"}
+                  onChange={(e) => setNewApplication((prev) => ({ ...prev, status: e.target.value }))}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                >
+                  {STATUSES.map((status) => (
+                    <option key={status} value={status}>
+                      {status}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-gray-500">
+                  Notes
+                </label>
+                <textarea
+                  rows={3}
+                  value={newApplication.notes || ""}
+                  onChange={(e) => setNewApplication((prev) => ({ ...prev, notes: e.target.value }))}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  placeholder="Optional notes"
+                />
+              </div>
+              {createError && <p className="text-sm text-red-600">{createError}</p>}
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  setShowCreateModal(false);
+                  resetCreateModal();
+                }}
+                className="rounded-md px-4 py-2 text-sm text-gray-600 hover:text-gray-900"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateApplication}
+                disabled={creatingApplication}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {creatingApplication ? "Creating..." : "Create"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,8 +1,36 @@
 import { Outlet } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import { useJourney } from "../journey/JourneyContext";
 
 export default function Layout() {
   const { user, logoutUser } = useAuth();
+  const { loading, journeys, activeJourney, createJourney, activateJourney, renameJourney } = useJourney();
+
+  const handleCreateJourney = async () => {
+    const defaultName = `Journey ${new Date().toISOString().slice(0, 10)}`;
+    const name = window.prompt("Create a new journey", defaultName);
+    if (name === null) return;
+    try {
+      await createJourney(name.trim() || defaultName);
+    } catch (err) {
+      console.error("Failed to create journey:", err);
+      alert("Failed to create journey");
+    }
+  };
+
+  const handleRenameJourney = async () => {
+    if (!activeJourney) return;
+    const nextName = window.prompt("Rename journey", activeJourney.name);
+    if (nextName === null) return;
+    const cleaned = nextName.trim();
+    if (!cleaned) return;
+    try {
+      await renameJourney(activeJourney.id, cleaned);
+    } catch (err) {
+      console.error("Failed to rename journey:", err);
+      alert("Failed to rename journey");
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -17,6 +45,40 @@ export default function Layout() {
             <nav className="flex items-center gap-4">
               <a href="/" className="text-sm text-gray-600 hover:text-gray-900">Dashboard</a>
               <a href="/eval" className="text-sm text-gray-600 hover:text-gray-900">Evaluation</a>
+              <div className="flex items-center gap-2">
+                <select
+                  value={activeJourney?.id ?? ""}
+                  onChange={(e) => void activateJourney(Number(e.target.value))}
+                  disabled={loading || journeys.length === 0}
+                  className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700"
+                  title="Active Journey"
+                >
+                  {journeys.length === 0 ? (
+                    <option value="">No journeys</option>
+                  ) : (
+                    journeys.map((journey) => (
+                      <option key={journey.id} value={journey.id}>
+                        {journey.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+                <button
+                  onClick={() => void handleCreateJourney()}
+                  className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50"
+                  title="Create Journey"
+                >
+                  + Journey
+                </button>
+                <button
+                  onClick={() => void handleRenameJourney()}
+                  disabled={!activeJourney}
+                  className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  title="Rename Active Journey"
+                >
+                  Rename
+                </button>
+              </div>
               <span className="text-xs text-gray-500">{user?.email}</span>
               <button
                 onClick={() => void logoutUser()}

@@ -894,7 +894,11 @@ def run_scan(
 
     try:
         with session.begin_nested():
-            merged = merge_owner_duplicate_applications(session, owner_user_id)
+            merged = merge_owner_duplicate_applications(
+                session,
+                owner_user_id,
+                session.info.get("journey_id"),
+            )
         if merged > 0:
             summary.applications_deleted += merged
             logger.info("scan_deduped_applications", owner_user_id=owner_user_id, merged=merged)
@@ -1044,7 +1048,11 @@ def run_date_range_scan(
 
     try:
         with session.begin_nested():
-            merged = merge_owner_duplicate_applications(session, owner_user_id)
+            merged = merge_owner_duplicate_applications(
+                session,
+                owner_user_id,
+                session.info.get("journey_id"),
+            )
         if merged > 0:
             summary.applications_deleted += merged
             logger.info("scan_deduped_applications", owner_user_id=owner_user_id, merged=merged)
@@ -1213,7 +1221,11 @@ def run_incremental_scan(
 
     try:
         with session.begin_nested():
-            merged = merge_owner_duplicate_applications(session, owner_user_id)
+            merged = merge_owner_duplicate_applications(
+                session,
+                owner_user_id,
+                session.info.get("journey_id"),
+            )
         if merged > 0:
             summary.applications_deleted += merged
             logger.info("scan_deduped_applications", owner_user_id=owner_user_id, merged=merged)

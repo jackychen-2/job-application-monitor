@@ -1,13 +1,28 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { getApplication, updateApplication, deleteApplication, mergeApplications, listApplications } from "../api/client";
-import type { ApplicationDetail as AppDetail, Application } from "../types";
+import {
+  deleteApplication,
+  getApplication,
+  getApplicationMergeEvents,
+  listApplications,
+  mergeApplications,
+  splitApplication,
+  unmergeApplication,
+  updateApplication,
+} from "../api/client";
+import type {
+  Application,
+  ApplicationDetail as AppDetail,
+  ApplicationMergeEvent,
+} from "../types";
 import { STATUSES } from "../types";
 import StatusBadge from "../components/StatusBadge";
+import { useJourney } from "../journey/JourneyContext";
 
 export default function ApplicationDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { activeJourney } = useJourney();
   const [app, setApp] = useState<AppDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [editingStatus, setEditingStatus] = useState(false);
@@ -15,28 +30,45 @@ export default function ApplicationDetail() {
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [showMergeModal, setShowMergeModal] = useState(false);
+  const [showSplitModal, setShowSplitModal] = useState(false);
   const [applications, setApplications] = useState<Application[]>([]);
+  const [mergeEvents, setMergeEvents] = useState<ApplicationMergeEvent[]>([]);
   const [selectedMergeId, setSelectedMergeId] = useState<number | null>(null);
+  const [selectedSplitEmailIds, setSelectedSplitEmailIds] = useState<number[]>([]);
+  const [splitCompany, setSplitCompany] = useState("");
+  const [splitJobTitle, setSplitJobTitle] = useState("");
+  const [splitReqId, setSplitReqId] = useState("");
+  const [splitStatus, setSplitStatus] = useState("已申请");
+  const [splitNotes, setSplitNotes] = useState("");
+
+  const loadApplicationDetail = async (applicationId: number): Promise<void> => {
+    setLoading(true);
+    try {
+      const [data, events] = await Promise.all([
+        getApplication(applicationId),
+        getApplicationMergeEvents(applicationId),
+      ]);
+      setApp(data);
+      setNotes(data.notes ?? "");
+      setMergeEvents(events);
+    } catch {
+      navigate("/");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!id) return;
-    setLoading(true);
-    getApplication(Number(id))
-      .then((data) => {
-        setApp(data);
-        setNotes(data.notes ?? "");
-      })
-      .catch(() => navigate("/"))
-      .finally(() => setLoading(false));
-  }, [id, navigate]);
+    loadApplicationDetail(Number(id));
+  }, [id, navigate, activeJourney?.id]);
 
   const handleStatusChange = async () => {
     if (!app || !newStatus) return;
     setSaving(true);
     try {
       await updateApplication(app.id, { status: newStatus });
-      const updated = await getApplication(app.id);
-      setApp(updated);
+      await loadApplicationDetail(app.id);
       setEditingStatus(false);
     } finally {
       setSaving(false);
@@ -48,8 +80,7 @@ export default function ApplicationDetail() {
     setSaving(true);
     try {
       await updateApplication(app.id, { notes });
-      const updated = await getApplication(app.id);
-      setApp(updated);
+      await loadApplicationDetail(app.id);
     } finally {
       setSaving(false);
     }
@@ -68,8 +99,7 @@ export default function ApplicationDetail() {
     setSaving(true);
     try {
       await mergeApplications(app.id, selectedMergeId);
-      const updated = await getApplication(app.id);
-      setApp(updated);
+      await loadApplicationDetail(app.id);
       setShowMergeModal(false);
       setSelectedMergeId(null);
     } catch (err) {
@@ -80,10 +110,68 @@ export default function ApplicationDetail() {
     }
   };
 
+  const handleUnmerge = async (event: ApplicationMergeEvent) => {
+    if (!app || event.undone_at) return;
+    const sourceName = `${event.source_company || "Unknown"} — ${event.source_job_title || "Unknown"}`;
+    if (!window.confirm(`Unmerge ${sourceName}? This will restore moved emails/history to a new application record.`)) {
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await unmergeApplication(app.id, event.id);
+      await loadApplicationDetail(app.id);
+    } catch (err) {
+      console.error("Failed to unmerge:", err);
+      alert("Failed to unmerge this application");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const openMergeModal = async () => {
     const appsData = await listApplications({ page_size: 100 });
     setApplications(appsData.items.filter(a => a.id !== app?.id));
     setShowMergeModal(true);
+  };
+
+  const openSplitModal = () => {
+    if (!app || !app.linked_emails || app.linked_emails.length < 2) return;
+    setSplitCompany(app.company);
+    setSplitJobTitle(app.job_title || "");
+    setSplitReqId(app.req_id || "");
+    setSplitStatus(app.status || "已申请");
+    setSplitNotes(app.notes || "");
+    setSelectedSplitEmailIds([app.linked_emails[0].id]);
+    setShowSplitModal(true);
+  };
+
+  const handleSplit = async () => {
+    if (!app || selectedSplitEmailIds.length === 0) return;
+    setSaving(true);
+    try {
+      const result = await splitApplication(app.id, {
+        email_ids: selectedSplitEmailIds,
+        company: splitCompany,
+        job_title: splitJobTitle || undefined,
+        req_id: splitReqId || undefined,
+        status: splitStatus || undefined,
+        notes: splitNotes || undefined,
+      });
+      setShowSplitModal(false);
+      await loadApplicationDetail(app.id);
+      navigate(`/applications/${result.new_application_id}`);
+    } catch (err) {
+      console.error("Failed to split:", err);
+      const raw = err instanceof Error ? err.message : String(err);
+      const parsed =
+        raw.match(/"detail"\s*:\s*"([^"]+)"/)?.[1] ||
+        raw.match(/detail['"]?\s*:\s*['"]([^'"]+)['"]/)?.[1] ||
+        raw;
+      alert(parsed || "Failed to split this application");
+    } finally {
+      setSaving(false);
+    }
   };
 
   function formatDateTime(dateStr: string | null): string {
@@ -99,6 +187,12 @@ export default function ApplicationDetail() {
     } catch {
       return dateStr;
     }
+  }
+
+  function mergeSourceLabel(source: string): string {
+    if (source === "system_dedupe") return "System Auto-Merge";
+    if (source === "manual") return "Manual Merge";
+    return source;
   }
 
   if (loading) {
@@ -255,6 +349,62 @@ export default function ApplicationDetail() {
         )}
       </div>
 
+      {/* Merge History */}
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <h2 className="text-sm font-medium text-gray-700 mb-3">Merge History</h2>
+        {mergeEvents.length === 0 ? (
+          <div className="space-y-2">
+            <p className="text-sm text-gray-400">No merges yet</p>
+            {app.linked_emails.length >= 2 && (
+              <button
+                onClick={openSplitModal}
+                className="rounded-md border border-amber-300 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50"
+              >
+                Unmerge By Splitting Emails
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {mergeEvents.map((event) => (
+              <div key={event.id} className="rounded border border-gray-200 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium text-gray-900">
+                      {event.source_company || "Unknown"} — {event.source_job_title || "Unknown"}
+                    </div>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      {mergeSourceLabel(event.merge_source)} ·
+                      {" "}
+                      Req ID: {event.source_req_id || "—"} ·
+                      {" "}Merged at {formatDateTime(event.merged_at)}
+                    </div>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      Moved {event.moved_email_count} email{event.moved_email_count !== 1 ? "s" : ""}
+                      {" "}and {event.moved_history_count} history record{event.moved_history_count !== 1 ? "s" : ""}
+                    </div>
+                    {event.undone_at && (
+                      <div className="text-xs text-green-700 mt-1">
+                        Unmerged at {formatDateTime(event.undone_at)}
+                      </div>
+                    )}
+                  </div>
+                  {!event.undone_at && (
+                    <button
+                      onClick={() => handleUnmerge(event)}
+                      disabled={saving}
+                      className="rounded-md border border-amber-300 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-50"
+                    >
+                      Unmerge
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Status History */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
         <h2 className="text-sm font-medium text-gray-700 mb-3">Status History</h2>
@@ -284,6 +434,114 @@ export default function ApplicationDetail() {
           </div>
         )}
       </div>
+
+      {/* Split Modal (manual unmerge correction when no merge event exists) */}
+      {showSplitModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-2xl w-full mx-4">
+            <h3 className="text-lg font-bold mb-2">Unmerge By Splitting Emails</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Select emails to move into a new application record.
+            </p>
+
+            <div className="border rounded mb-4 max-h-48 overflow-y-auto">
+              {app.linked_emails.map((email) => {
+                const checked = selectedSplitEmailIds.includes(email.id);
+                return (
+                  <label key={email.id} className="flex items-start gap-2 px-3 py-2 border-b last:border-b-0 cursor-pointer hover:bg-gray-50">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedSplitEmailIds((prev) => [...prev, email.id]);
+                        } else {
+                          setSelectedSplitEmailIds((prev) => prev.filter((id) => id !== email.id));
+                        }
+                      }}
+                    />
+                    <div className="text-sm">
+                      <div className="font-medium text-gray-900">{email.subject || "(No subject)"}</div>
+                      <div className="text-xs text-gray-500">{formatDateTime(email.email_date)} · {email.sender || "Unknown"}</div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">New Company</label>
+                <input
+                  value={splitCompany}
+                  onChange={(e) => setSplitCompany(e.target.value)}
+                  className="w-full border rounded px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">New Job Title</label>
+                <input
+                  value={splitJobTitle}
+                  onChange={(e) => setSplitJobTitle(e.target.value)}
+                  className="w-full border rounded px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">New Req ID</label>
+                <input
+                  value={splitReqId}
+                  onChange={(e) => setSplitReqId(e.target.value)}
+                  className="w-full border rounded px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">New Status</label>
+                <select
+                  value={splitStatus}
+                  onChange={(e) => setSplitStatus(e.target.value)}
+                  className="w-full border rounded px-3 py-2 text-sm"
+                >
+                  {STATUSES.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="col-span-2">
+                <label className="block text-xs text-gray-500 mb-1">New Notes</label>
+                <textarea
+                  rows={2}
+                  value={splitNotes}
+                  onChange={(e) => setSplitNotes(e.target.value)}
+                  className="w-full border rounded px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  setShowSplitModal(false);
+                  setSelectedSplitEmailIds([]);
+                }}
+                className="px-4 py-2 text-gray-600 hover:text-gray-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSplit}
+                disabled={
+                  saving ||
+                  selectedSplitEmailIds.length === 0 ||
+                  selectedSplitEmailIds.length >= app.linked_emails.length
+                }
+                className="px-4 py-2 bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-50"
+              >
+                {saving ? "Splitting..." : "Split"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Merge Modal */}
       {showMergeModal && (

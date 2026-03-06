@@ -10,11 +10,31 @@ from sqlalchemy.orm import Session
 from job_monitor.auth.security import hash_token
 from job_monitor.config import AppConfig, get_config
 from job_monitor.database import get_db
-from job_monitor.models import AuthSession, User
+from job_monitor.models import AuthSession, Journey, User
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _ensure_active_journey(db: Session, user: User) -> int:
+    journeys = (
+        db.query(Journey)
+        .filter(Journey.owner_user_id == user.id)
+        .order_by(Journey.id.asc())
+        .all()
+    )
+    if not journeys:
+        default = Journey(owner_user_id=user.id, name="Default Journey")
+        db.add(default)
+        db.flush()
+        journeys = [default]
+
+    valid_ids = {j.id for j in journeys}
+    if user.active_journey_id not in valid_ids:
+        user.active_journey_id = journeys[0].id
+        db.flush()
+    return int(user.active_journey_id or journeys[0].id)
 
 
 def get_current_user(
@@ -43,8 +63,10 @@ def get_current_user(
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
+    active_journey_id = _ensure_active_journey(db, user)
     session_row.last_seen_at = _utcnow()
     db.info["owner_user_id"] = user.id
+    db.info["journey_id"] = active_journey_id
     return user
 
 
@@ -52,6 +74,7 @@ def get_owner_scoped_db(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Session:
-    """Return DB session scoped to current user ownership."""
+    """Return DB session scoped to current user ownership + active journey."""
     db.info["owner_user_id"] = current_user.id
+    db.info["journey_id"] = current_user.active_journey_id
     return db

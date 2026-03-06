@@ -73,6 +73,7 @@ def auth_me(current_user: User = Depends(get_current_user)):
         "id": current_user.id,
         "email": current_user.email,
         "display_name": current_user.display_name,
+        "active_journey_id": current_user.active_journey_id,
     }
 
 

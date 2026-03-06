@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from job_monitor.auth.api import router as auth_router
 from job_monitor.api.applications import router as applications_router
 from job_monitor.api.emails import router as emails_router
+from job_monitor.api.journeys import router as journeys_router
 from job_monitor.api.scan import router as scan_router
 from job_monitor.api.stats import router as stats_router
 from job_monitor.eval.api import router as eval_router
@@ -76,6 +77,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(applications_router)
     app.include_router(emails_router)
+    app.include_router(journeys_router)
     app.include_router(scan_router)
     app.include_router(stats_router)
     app.include_router(eval_router)

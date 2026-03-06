@@ -83,6 +83,49 @@ class MergeApplicationRequest(BaseModel):
     source_application_id: int
 
 
+class ApplicationMergeEventOut(BaseModel):
+    id: int
+    target_application_id: int
+    source_application_id: int
+    merge_source: str = "manual"
+    source_company: Optional[str] = None
+    source_job_title: Optional[str] = None
+    source_req_id: Optional[str] = None
+    source_status: Optional[str] = None
+    moved_email_count: int = 0
+    moved_history_count: int = 0
+    merged_at: datetime
+    undone_at: Optional[datetime] = None
+    undone_source_application_id: Optional[int] = None
+
+    model_config = {"from_attributes": True}
+
+
+class UnmergeApplicationOut(BaseModel):
+    merge_event_id: int
+    target_application_id: int
+    restored_source_application_id: int
+    restored_email_count: int
+    restored_history_count: int
+    undone_at: datetime
+
+
+class SplitApplicationRequest(BaseModel):
+    """Request to split selected emails from one application into a new application."""
+    email_ids: List[int] = Field(..., min_length=1)
+    company: Optional[str] = Field(None, min_length=1, max_length=200)
+    job_title: Optional[str] = Field(None, max_length=300)
+    req_id: Optional[str] = Field(None, max_length=80)
+    status: Optional[str] = Field(None, max_length=50)
+    notes: Optional[str] = None
+
+
+class SplitApplicationOut(BaseModel):
+    source_application_id: int
+    new_application_id: int
+    moved_email_count: int
+
+
 class ApplicationOut(BaseModel):
     id: int
     company: str
@@ -181,3 +224,25 @@ class StatsOut(BaseModel):
     total_llm_cost: float
     daily_llm_costs: List[DailyCost] = []
     daily_applications: List[DailyCount] = []
+
+
+# ── Journey schemas ───────────────────────────────────────
+
+
+class JourneyCreate(BaseModel):
+    name: Optional[str] = Field(None, max_length=200)
+
+
+class JourneyUpdate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+
+
+class JourneyOut(BaseModel):
+    id: int
+    name: str
+    owner_user_id: int
+    created_at: datetime
+    updated_at: datetime
+    is_active: bool
+
+    model_config = {"from_attributes": True}

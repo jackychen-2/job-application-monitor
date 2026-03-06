@@ -16,6 +16,46 @@ export interface Application {
   email_count: number;  // Number of linked emails in thread
 }
 
+export interface ApplicationMergeEvent {
+  id: number;
+  target_application_id: number;
+  source_application_id: number;
+  merge_source: string;
+  source_company: string | null;
+  source_job_title: string | null;
+  source_req_id: string | null;
+  source_status: string | null;
+  moved_email_count: number;
+  moved_history_count: number;
+  merged_at: string;
+  undone_at: string | null;
+  undone_source_application_id: number | null;
+}
+
+export interface UnmergeApplicationResult {
+  merge_event_id: number;
+  target_application_id: number;
+  restored_source_application_id: number;
+  restored_email_count: number;
+  restored_history_count: number;
+  undone_at: string;
+}
+
+export interface SplitApplicationRequest {
+  email_ids: number[];
+  company?: string;
+  job_title?: string;
+  req_id?: string;
+  status?: string;
+  notes?: string;
+}
+
+export interface SplitApplicationResult {
+  source_application_id: number;
+  new_application_id: number;
+  moved_email_count: number;
+}
+
 export interface StatusHistory {
   id: number;
   old_status: string | null;
@@ -137,11 +177,29 @@ export interface AuthUser {
   id: number;
   email: string;
   display_name: string | null;
+  active_journey_id: number | null;
 }
 
 export interface AuthState {
   loading: boolean;
   user: AuthUser | null;
+}
+
+export interface Journey {
+  id: number;
+  name: string;
+  owner_user_id: number;
+  created_at: string;
+  updated_at: string;
+  is_active: boolean;
+}
+
+export interface JourneyCreateRequest {
+  name?: string;
+}
+
+export interface JourneyUpdateRequest {
+  name: string;
 }
 
 /** Status value constants */
