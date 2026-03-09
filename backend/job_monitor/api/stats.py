@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import structlog
 from fastapi import APIRouter, Depends
 from sqlalchemy import func
@@ -13,6 +15,12 @@ from job_monitor.schemas import ApplicationOut, FlowData, StatsOut, StatusCount,
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/stats", tags=["stats"])
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 @router.get("", response_model=StatsOut)
@@ -53,6 +61,32 @@ def get_stats(db: Session = Depends(get_owner_scoped_db)) -> StatsOut:
     )
     daily_applications = [{"date": str(row.date), "count": int(row.count)} for row in daily_apps_rows]
 
+    now = datetime.now(timezone.utc)
+    current_hour = now.replace(minute=0, second=0, microsecond=0)
+    hour_start = current_hour - timedelta(hours=23)
+    hourly_buckets = {
+        hour_start + timedelta(hours=offset): 0
+        for offset in range(24)
+    }
+    recent_activity_rows = (
+        db.query(Application.email_date, Application.created_at)
+        .filter(func.coalesce(Application.email_date, Application.created_at) >= hour_start)
+        .all()
+    )
+    for email_date, created_at in recent_activity_rows:
+        activity_at = _as_utc(email_date) or _as_utc(created_at)
+        if activity_at is None or activity_at < hour_start:
+            continue
+        bucket = activity_at.replace(minute=0, second=0, microsecond=0)
+        if bucket > current_hour:
+            continue
+        if bucket in hourly_buckets:
+            hourly_buckets[bucket] += 1
+    hourly_applications_24h = [
+        {"timestamp": bucket.isoformat(), "count": count}
+        for bucket, count in sorted(hourly_buckets.items())
+    ]
+
     # Daily LLM cost history (for line chart)
     daily_costs_rows = (
         db.query(
@@ -74,6 +108,7 @@ def get_stats(db: Session = Depends(get_owner_scoped_db)) -> StatsOut:
         total_llm_cost=round(total_cost, 6),
         daily_llm_costs=daily_costs,
         daily_applications=daily_applications,
+        hourly_applications_24h=hourly_applications_24h,
     )
 
 

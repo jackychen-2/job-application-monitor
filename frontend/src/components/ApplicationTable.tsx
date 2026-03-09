@@ -15,7 +15,7 @@ interface Props {
 type EmailCache = Record<number, LinkedEmail[]>;
 
 function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "—";
+  if (!dateStr) return "-";
   try {
     const d = new Date(dateStr);
     return d.toLocaleDateString("en-US", {
@@ -28,7 +28,7 @@ function formatDate(dateStr: string | null): string {
   }
 }
 
-type EditField = { id: number; field: "status" | "job_title" | "req_id" | "company"; value: string };
+type EditField = { id: number; field: "status"; value: string };
 
 export default function ApplicationTable({ applications, loading, onRefresh }: Props) {
   const navigate = useNavigate();
@@ -66,7 +66,7 @@ export default function ApplicationTable({ applications, loading, onRefresh }: P
   };
 
   const formatDateTime = (dateStr: string | null): string => {
-    if (!dateStr) return "—";
+    if (!dateStr) return "-";
     try {
       return new Date(dateStr).toLocaleString("en-US", {
         month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"
@@ -95,10 +95,6 @@ export default function ApplicationTable({ applications, loading, onRefresh }: P
     }
   };
 
-  const startEdit = (id: number, field: EditField["field"], currentValue: string) => {
-    setEditing({ id, field, value: currentValue });
-  };
-
   if (loading) {
     return (
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8 text-center text-gray-400">
@@ -115,76 +111,29 @@ export default function ApplicationTable({ applications, loading, onRefresh }: P
     );
   }
 
-  const renderEditableCell = (
-    app: Application,
-    field: "job_title" | "req_id" | "company",
-    displayValue: string,
-    placeholder: string
-  ) => {
-    const isEditing = editing?.id === app.id && editing?.field === field;
-
-    if (isEditing) {
-      return (
-        <input
-          type="text"
-          value={editing.value}
-          onChange={(e) => setEditing({ ...editing, value: e.target.value })}
-          onKeyDown={handleKeyDown}
-          onBlur={handleSave}
-          autoFocus
-          className="w-full text-sm border border-indigo-300 rounded px-1.5 py-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-          placeholder={placeholder}
-        />
-      );
-    }
-
-    return (
-        <span
-          onClick={(e) => {
-            e.stopPropagation();
-            const current =
-              field === "job_title"
-                ? app.job_title
-                : field === "req_id"
-                  ? app.req_id
-                  : app.company;
-            startEdit(app.id, field, current || "");
-          }}
-        className="cursor-pointer hover:bg-indigo-50 hover:text-indigo-700 px-1 py-0.5 rounded transition-colors"
-        title="Click to edit"
-      >
-        {displayValue || <span className="text-gray-300 italic">Unknown</span>}
-      </span>
-    );
-  };
-
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
       <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
-              <th className="px-2 py-3 w-8"></th>
               <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 Company
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Job Title
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Req ID
               </th>
               <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 Status
               </th>
               <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Date
+                Last Activity
               </th>
               <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Email Subject
+                Role
+              </th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Preview
               </th>
               <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Actions
+                More
               </th>
             </tr>
           </thead>
@@ -200,38 +149,39 @@ export default function ApplicationTable({ applications, loading, onRefresh }: P
                     className={`hover:bg-gray-50 cursor-pointer transition-colors ${isExpanded ? 'bg-indigo-50/30' : ''}`}
                     onClick={() => navigate(`/applications/${app.id}`)}
                   >
-                    {/* Expand button */}
-                    <td className="px-2 py-3 text-center" onClick={(e) => e.stopPropagation()}>
-                      {app.email_count > 1 ? (
-                        <button
-                          onClick={(e) => toggleExpand(app.id, e)}
-                          className="text-gray-400 hover:text-indigo-600 transition-colors p-1"
-                          title={isExpanded ? "Collapse email chain" : "Expand email chain"}
-                        >
-                          {isExpanded ? "▼" : "▶"}
-                          <span className="ml-0.5 text-xs bg-indigo-100 text-indigo-700 rounded-full px-1.5">
-                            {app.email_count}
-                          </span>
-                        </button>
-                      ) : (
-                        <span className="text-gray-300 text-xs">—</span>
-                      )}
+                    <td className="px-4 py-4 align-top">
+                      <div className="flex items-start gap-3">
+                        {app.email_count > 1 ? (
+                          <button
+                            onClick={(e) => toggleExpand(app.id, e)}
+                            className="mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-full border border-gray-200 bg-white px-2 py-1 text-xs font-medium text-gray-500 transition-colors hover:border-indigo-200 hover:text-indigo-700"
+                            title={isExpanded ? "Collapse email chain" : "Expand email chain"}
+                          >
+                            <span>{isExpanded ? "v" : ">"}</span>
+                            <span>{app.email_count}</span>
+                          </button>
+                        ) : (
+                          <span className="block w-11 shrink-0" />
+                        )}
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-semibold text-gray-900">
+                            {app.company}
+                          </div>
+                          {app.req_id ? (
+                            <div className="mt-1 truncate text-xs text-gray-500">
+                              Req ID: {app.req_id}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
                     </td>
-                    <td className="px-4 py-3 text-sm font-medium text-gray-900 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                      {renderEditableCell(app, "company", app.company, "Enter company")}
-                    </td>
-                    <td className="px-4 py-3 text-sm text-gray-600 max-w-[200px]" onClick={(e) => e.stopPropagation()}>
-                      {renderEditableCell(app, "job_title", app.job_title || "", "Enter job title")}
-                    </td>
-                    <td className="px-4 py-3 text-sm text-gray-600 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                      {renderEditableCell(app, "req_id", app.req_id || "", "Enter req ID")}
-                    </td>
-                    <td className="px-4 py-3 text-sm" onClick={(e) => e.stopPropagation()}>
+                    <td className="px-4 py-4 align-top text-sm" onClick={(e) => e.stopPropagation()}>
                       {editing?.id === app.id && editing?.field === "status" ? (
                         <div className="flex items-center gap-1">
                           <select
                             value={editing.value}
                             onChange={(e) => setEditing({ ...editing, value: e.target.value })}
+                            onKeyDown={handleKeyDown}
                             onBlur={handleSave}
                             className="text-xs border rounded px-1 py-0.5"
                             autoFocus
@@ -243,36 +193,53 @@ export default function ApplicationTable({ applications, loading, onRefresh }: P
                         </div>
                       ) : (
                         <span
-                          onClick={() => startEdit(app.id, "status", app.status)}
+                          onClick={() => setEditing({ id: app.id, field: "status", value: app.status })}
                           title="Click to change status"
+                          className="inline-flex"
                         >
                           <StatusBadge status={app.status} />
                         </span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">
+                    <td className="px-4 py-4 align-top text-sm text-gray-500 whitespace-nowrap">
                       {formatDate(app.email_date || app.created_at)}
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-500 max-w-[250px] truncate" title={app.email_subject ?? ""}>
-                      {app.email_subject || "—"}
+                    <td className="px-4 py-4 align-top text-sm text-gray-600 max-w-[240px]" title={app.job_title ?? ""}>
+                      <div className={app.job_title ? "truncate" : "text-gray-400"}>
+                        {app.job_title || "-"}
+                      </div>
                     </td>
-                    <td className="px-4 py-3 text-right text-sm whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                      <button
-                        onClick={() => handleDelete(app.id, app.company)}
-                        className="text-red-400 hover:text-red-600 transition-colors"
-                        title="Delete"
+                    <td className="px-4 py-4 align-top text-sm text-gray-500 max-w-[280px]" title={app.email_subject ?? ""}>
+                      <div className={app.email_subject ? "truncate" : "text-gray-400"}>
+                        {app.email_subject || "-"}
+                      </div>
+                    </td>
+                    <td className="px-4 py-4 align-top text-right text-sm whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                      <details
+                        className="relative inline-block text-left"
+                        onClick={(e) => e.stopPropagation()}
                       >
-                        🗑️
-                      </button>
+                        <summary className="flex h-8 w-8 cursor-pointer list-none items-center justify-center rounded-md border border-transparent text-gray-400 transition-colors hover:border-gray-200 hover:bg-gray-50 hover:text-gray-600 [&::-webkit-details-marker]:hidden">
+                          ...
+                        </summary>
+                        <div className="absolute right-0 z-10 mt-2 w-32 rounded-md border border-gray-200 bg-white p-1 shadow-lg">
+                          <button
+                            onClick={() => handleDelete(app.id, app.company)}
+                            className="flex w-full items-center rounded px-3 py-2 text-left text-sm text-red-600 transition-colors hover:bg-red-50"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </details>
                     </td>
                   </tr>
                   {/* Expanded email chain row */}
                   {isExpanded && (
                     <tr key={`${app.id}-expanded`} className="bg-indigo-50/50">
-                      <td colSpan={8} className="px-4 py-3">
+                      <td colSpan={6} className="px-4 py-3">
                         <div className="ml-6 border-l-2 border-indigo-300 pl-4">
                           <div className="text-xs font-medium text-indigo-700 mb-2">
-                            📧 Application Timeline ({emails.length} emails)
+                            Application Timeline ({emails.length} emails)
                           </div>
                           {isLoadingEmails ? (
                             <div className="text-sm text-gray-400">Loading emails...</div>
@@ -295,7 +262,7 @@ export default function ApplicationTable({ applications, loading, onRefresh }: P
                                       </span>
                                     </div>
                                     <div className="text-xs text-gray-500">
-                                      From: {email.sender || "Unknown"}
+                                      From: {email.sender || "-"}
                                     </div>
                                   </div>
                                 </div>

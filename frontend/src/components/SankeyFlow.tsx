@@ -5,6 +5,8 @@ interface Props {
   flowData: FlowData | null;
   loading?: boolean;
   height?: number;
+  showSummary?: boolean;
+  title?: string;
 }
 
 const STAGE_ORDER: Record<string, number> = {
@@ -407,10 +409,16 @@ function SankeyTooltipContent({ active, payload }: TooltipContentProps) {
   );
 }
 
-export default function SankeyFlow({ flowData, loading, height = 340 }: Props) {
+export default function SankeyFlow({
+  flowData,
+  loading,
+  height = 340,
+  showSummary = true,
+  title = "Application Flow",
+}: Props) {
   if (loading || !flowData) {
     return (
-      <Shell>
+      <Shell title={title}>
         <Empty text={loading ? "Loading..." : "No data"} />
       </Shell>
     );
@@ -418,7 +426,7 @@ export default function SankeyFlow({ flowData, loading, height = 340 }: Props) {
 
   if (flowData.total === 0) {
     return (
-      <Shell>
+      <Shell title={title}>
         <Empty text="No application data yet" />
       </Shell>
     );
@@ -427,7 +435,7 @@ export default function SankeyFlow({ flowData, loading, height = 340 }: Props) {
   const sankeyData = buildSankeyData(flowData);
   if (!sankeyData) {
     return (
-      <Shell>
+      <Shell title={title}>
         <Empty text="No flow transitions yet" />
       </Shell>
     );
@@ -447,44 +455,46 @@ export default function SankeyFlow({ flowData, loading, height = 340 }: Props) {
   })();
 
   return (
-    <Shell>
-      <div className="w-full rounded-md bg-slate-50/70" style={{ height }}>
+    <Shell title={title}>
+      <div className="min-h-0 w-full flex-1 rounded-xl bg-slate-50/70" style={{ height }}>
         <ResponsiveContainer width="100%" height="100%">
           <Sankey
             data={sankeyData}
             node={NodeShape}
             link={LinkShape}
-            nodePadding={16}
-            nodeWidth={7}
+            nodePadding={14}
+            nodeWidth={8}
             linkCurvature={0.52}
             iterations={64}
             sort={true}
-            margin={{ top: 26, right: 100, bottom: 26, left: 90 }}
+            margin={{ top: 20, right: 84, bottom: 20, left: 72 }}
           >
             <Tooltip cursor={false} content={<SankeyTooltipContent />} />
           </Sankey>
         </ResponsiveContainer>
       </div>
-      <div className="mt-3 flex flex-wrap gap-2">
-        {statusSummary.map(([status, count]) => (
-          <span
-            key={status}
-            className="inline-flex items-center rounded-md border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-700"
-          >
-            <span className="font-medium">{status}</span>
-            <span className="mx-1 text-gray-300">:</span>
-            <span className="font-semibold">{count}</span>
-          </span>
-        ))}
-      </div>
+      {showSummary && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {statusSummary.map(([status, count]) => (
+            <span
+              key={status}
+              className="inline-flex items-center rounded-md border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-700"
+            >
+              <span className="font-medium">{status}</span>
+              <span className="mx-1 text-gray-300">:</span>
+              <span className="font-semibold">{count}</span>
+            </span>
+          ))}
+        </div>
+      )}
     </Shell>
   );
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
+function Shell({ children, title }: { children: React.ReactNode; title: string }) {
   return (
-    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-      <h2 className="text-sm font-medium text-gray-700 mb-3">Application Flow</h2>
+    <div className="flex h-full flex-col rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+      <h2 className="mb-4 text-lg font-semibold text-gray-900">{title}</h2>
       {children}
     </div>
   );

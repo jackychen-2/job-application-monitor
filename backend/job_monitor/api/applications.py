@@ -13,7 +13,6 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from job_monitor.auth.deps import get_owner_scoped_db
-from job_monitor.dedupe import merge_owner_duplicate_applications
 from job_monitor.extraction.rules import normalize_req_id
 from job_monitor.linking.resolver import normalize_company
 from job_monitor.models import (
@@ -40,6 +39,15 @@ from job_monitor.schemas import (
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/applications", tags=["applications"])
+
+ACTIVE_STATUSES = (
+    "Recruiter Reach-out",
+    "已申请",
+    "OA",
+    "面试",
+    "Offer",
+    "Onboarding",
+)
 
 
 def _serialize_datetime(value: datetime | None) -> str | None:
@@ -116,34 +124,14 @@ def list_applications(
     db: Session = Depends(get_owner_scoped_db),
 ) -> ApplicationListOut:
     """List applications with optional filtering, sorting, and pagination."""
-    owner_user_id = db.info.get("owner_user_id")
-    journey_id = db.info.get("journey_id")
-    if isinstance(owner_user_id, int):
-        try:
-            with db.begin_nested():
-                merged = merge_owner_duplicate_applications(
-                    db,
-                    owner_user_id,
-                    journey_id if isinstance(journey_id, int) else None,
-                )
-            if merged > 0:
-                logger.info(
-                    "applications_list_deduped",
-                    owner_user_id=owner_user_id,
-                    merged=merged,
-                )
-        except Exception as exc:
-            logger.warning(
-                "applications_list_dedupe_failed",
-                owner_user_id=owner_user_id,
-                error=str(exc),
-            )
-
     query = db.query(Application)
 
     # Filters
     if status:
-        query = query.filter(Application.status == status)
+        if status == "active":
+            query = query.filter(Application.status.in_(ACTIVE_STATUSES))
+        else:
+            query = query.filter(Application.status == status)
     if company:
         query = query.filter(Application.company.ilike(f"%{company}%"))
 

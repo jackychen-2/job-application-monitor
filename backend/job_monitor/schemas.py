@@ -202,6 +202,11 @@ class DailyCount(BaseModel):
     count: int
 
 
+class HourlyCount(BaseModel):
+    timestamp: str
+    count: int
+
+
 class StatusTransition(BaseModel):
     """A single status transition (edge in the Sankey diagram)."""
     from_status: str
@@ -224,6 +229,7 @@ class StatsOut(BaseModel):
     total_llm_cost: float
     daily_llm_costs: List[DailyCost] = []
     daily_applications: List[DailyCount] = []
+    hourly_applications_24h: List[HourlyCount] = []
 
 
 # ── Journey schemas ───────────────────────────────────────

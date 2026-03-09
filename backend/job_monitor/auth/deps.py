@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
@@ -12,9 +12,17 @@ from job_monitor.config import AppConfig, get_config
 from job_monitor.database import get_db
 from job_monitor.models import AuthSession, Journey, User
 
+_LAST_SEEN_UPDATE_INTERVAL = timedelta(minutes=1)
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 def _ensure_active_journey(db: Session, user: User) -> int:
@@ -64,7 +72,10 @@ def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     active_journey_id = _ensure_active_journey(db, user)
-    session_row.last_seen_at = _utcnow()
+    now = _utcnow()
+    last_seen_at = _as_utc(session_row.last_seen_at)
+    if last_seen_at is None or (now - last_seen_at) >= _LAST_SEEN_UPDATE_INTERVAL:
+        session_row.last_seen_at = now
     db.info["owner_user_id"] = user.id
     db.info["journey_id"] = active_journey_id
     return user

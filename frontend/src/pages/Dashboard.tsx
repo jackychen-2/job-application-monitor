@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { createApplication, getFlowData, getStats, listApplications } from "../api/client";
-import type { Application, ApplicationCreate, FlowData, ScanResult, Stats } from "../types";
+import { createApplication, getFlowData, getLastScanResult, getScanStatus, getStats, listApplications } from "../api/client";
+import type { Application, ApplicationCreate, FlowData, ScanResult, ScanState, Stats } from "../types";
 import { STATUSES } from "../types";
-import StatsCards from "../components/StatsCards";
 import FilterBar from "../components/FilterBar";
 import ApplicationTable from "../components/ApplicationTable";
 import ScanButton from "../components/ScanButton";
-import ActivityHeatmap from "../components/ActivityHeatmap";
+import PipelineProgressPanel from "../components/PipelineProgressPanel";
 import SankeyFlow from "../components/SankeyFlow";
 import CostChart from "../components/CostChart";
 import ReviewQueue from "../components/ReviewQueue";
@@ -25,6 +24,9 @@ export default function Dashboard() {
   const [flowData, setFlowData] = useState<FlowData | null>(null);
   const [flowLoading, setFlowLoading] = useState(true);
   const [lastScan, setLastScan] = useState<ScanResult | null>(null);
+  const [scanState, setScanState] = useState<ScanState | null>(null);
+  const [scanStateLoading, setScanStateLoading] = useState(true);
+  const [showScanErrors, setShowScanErrors] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [creatingApplication, setCreatingApplication] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -82,6 +84,31 @@ export default function Dashboard() {
     }
   }, [activeJourney?.id]);
 
+  const fetchLastScan = useCallback(async () => {
+    try {
+      const result = await getLastScanResult();
+      setLastScan(result);
+      if (!result?.errors.length) {
+        setShowScanErrors(false);
+      }
+    } catch (err) {
+      console.error("Failed to fetch last scan result:", err);
+    }
+  }, [activeJourney?.id]);
+
+  const fetchScanState = useCallback(async () => {
+    setScanStateLoading(true);
+    try {
+      const state = await getScanStatus();
+      setScanState(state);
+    } catch (err) {
+      console.error("Failed to fetch scan state:", err);
+      setScanState(null);
+    } finally {
+      setScanStateLoading(false);
+    }
+  }, [activeJourney?.id]);
+
   useEffect(() => {
     setPage(1);
     setApplications([]);
@@ -89,6 +116,9 @@ export default function Dashboard() {
     setStats(null);
     setFlowData(null);
     setLastScan(null);
+    setScanState(null);
+    setScanStateLoading(true);
+    setShowScanErrors(false);
   }, [activeJourney?.id]);
 
   useEffect(() => {
@@ -98,13 +128,17 @@ export default function Dashboard() {
   useEffect(() => {
     fetchStats();
     fetchFlowData();
-  }, [fetchStats, fetchFlowData]);
+    fetchLastScan();
+    fetchScanState();
+  }, [fetchStats, fetchFlowData, fetchLastScan, fetchScanState]);
 
   const handleScanComplete = (result: ScanResult) => {
     setLastScan(result);
+    setShowScanErrors(false);
     fetchApplications();
     fetchStats();
     fetchFlowData();
+    fetchScanState();
   };
 
   const handleRefresh = () => {
@@ -167,6 +201,13 @@ export default function Dashboard() {
   };
 
   const totalPages = Math.ceil(total / pageSize);
+  const hasImportedEmailData = Boolean(scanState?.last_scan_at) || (stats?.total_emails_scanned ?? 0) > 0;
+  const scanButtonMode =
+    scanStateLoading && scanState === null && stats === null
+      ? "loading"
+      : hasImportedEmailData
+        ? "default"
+        : "initial";
 
   return (
     <div className="space-y-6">
@@ -180,7 +221,11 @@ export default function Dashboard() {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <ScanButton key={activeJourney?.id ?? "journey-none"} onScanComplete={handleScanComplete} />
+          <ScanButton
+            key={activeJourney?.id ?? "journey-none"}
+            mode={scanButtonMode}
+            onScanComplete={handleScanComplete}
+          />
         </div>
       </div>
 
@@ -191,76 +236,84 @@ export default function Dashboard() {
             ? "bg-orange-50 border border-orange-200 text-orange-700"
             : "bg-indigo-50 border border-indigo-200 text-indigo-700"
         }`}>
-          {lastScan.cancelled ? (
-            <>
-              Scan was cancelled · LLM cost: <span className="font-semibold">${lastScan.total_estimated_cost.toFixed(4)}</span>
-            </>
-          ) : (
-            <>
-              Scan complete: {lastScan.emails_scanned} emails scanned, {lastScan.emails_matched} matched,{" "}
-              {lastScan.applications_created} new, {lastScan.applications_updated} updated
-              {lastScan.applications_deleted > 0 && `, ${lastScan.applications_deleted} deleted`}
-              {" · "}LLM cost: <span className="font-semibold">${lastScan.total_estimated_cost.toFixed(4)}</span>
-              {lastScan.errors.length > 0 && ` · ${lastScan.errors.length} error(s)`}
-            </>
-          )}
+          <div className="space-y-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="leading-6">
+                {lastScan.cancelled ? (
+                  <>
+                    Scan was cancelled · LLM cost: <span className="font-semibold">${lastScan.total_estimated_cost.toFixed(4)}</span>
+                    {lastScan.errors.length > 0 && ` · ${lastScan.errors.length} error(s)`}
+                  </>
+                ) : (
+                  <>
+                    Scan complete: {lastScan.emails_scanned} emails scanned, {lastScan.emails_matched} matched,{" "}
+                    {lastScan.applications_created} new, {lastScan.applications_updated} updated
+                    {lastScan.applications_deleted > 0 && `, ${lastScan.applications_deleted} deleted`}
+                    {" · "}LLM cost: <span className="font-semibold">${lastScan.total_estimated_cost.toFixed(4)}</span>
+                    {lastScan.errors.length > 0 && ` · ${lastScan.errors.length} error(s)`}
+                  </>
+                )}
+              </div>
+              {lastScan.errors.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowScanErrors((current) => !current)}
+                  className={`shrink-0 self-start rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                    lastScan.cancelled
+                      ? "border-orange-300 bg-white/80 text-orange-700 hover:bg-white"
+                      : "border-indigo-300 bg-white/80 text-indigo-700 hover:bg-white"
+                  }`}
+                >
+                  {showScanErrors ? "Hide errors" : `View ${lastScan.errors.length} errors`}
+                </button>
+              )}
+            </div>
+
+            {showScanErrors && lastScan.errors.length > 0 && (
+              <div className={`rounded-md border p-3 ${
+                lastScan.cancelled
+                  ? "border-orange-200 bg-white/70"
+                  : "border-indigo-200 bg-white/70"
+              }`}>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Error details
+                </div>
+                <ol className="space-y-2">
+                  {lastScan.errors.map((error, index) => (
+                    <li
+                      key={`${index}-${error}`}
+                      className="rounded-md bg-gray-900 px-3 py-2 font-mono text-xs leading-5 text-gray-100 whitespace-pre-wrap break-words"
+                    >
+                      {index + 1}. {error}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
-      {/* Applications + LLM cost (same area) */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-          <h2 className="text-sm font-medium text-gray-700 mb-3">Applications + LLM Cost</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 gap-3">
-            <div className="rounded-md border border-gray-200 bg-gray-50 px-4 py-3">
-              <div className="text-xs uppercase tracking-wide text-gray-500">Applications Tracked</div>
-              <div className={`mt-1 text-2xl font-bold ${statsLoading ? "animate-pulse text-gray-300" : "text-gray-900"}`}>
-                {statsLoading ? "—" : (stats?.total_applications ?? 0)}
-              </div>
-            </div>
-            <div className="rounded-md border border-gray-200 bg-gray-50 px-4 py-3">
-              <div className="text-xs uppercase tracking-wide text-gray-500">Total LLM Cost</div>
-              <div className={`mt-1 text-2xl font-bold ${statsLoading ? "animate-pulse text-gray-300" : "text-indigo-700"}`}>
-                {statsLoading ? "—" : `$${(stats?.total_llm_cost ?? 0).toFixed(4)}`}
-              </div>
-              <div className="mt-1 text-xs text-gray-500">
-                {statsLoading ? "" : `${stats?.total_emails_scanned ?? 0} emails scanned`}
-              </div>
-            </div>
-          </div>
-        </div>
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 xl:col-span-2">
-          <CostChart
-            data={stats?.daily_llm_costs ?? []}
-            totalCost={stats?.total_llm_cost ?? 0}
-          />
-        </div>
+      <div className="grid grid-cols-1 xl:grid-cols-[392px,minmax(0,1fr)] 2xl:grid-cols-[420px,minmax(0,1fr)] gap-6 items-start">
+        <PipelineProgressPanel stats={stats} loading={statsLoading} />
+        <SankeyFlow
+          flowData={flowData}
+          loading={flowLoading}
+          height={340}
+          showSummary={false}
+          title="Flow"
+        />
       </div>
-
-      {/* Sankey (single, larger section) */}
-      <SankeyFlow
-        flowData={flowData}
-        loading={flowLoading}
-        height={430}
-      />
-
-      {/* Status cards */}
-      <StatsCards stats={stats} loading={statsLoading} />
-
-      {/* Activity Heatmap (GitHub/LeetCode style) */}
-      <ActivityHeatmap
-        data={stats?.daily_applications ?? []}
-        totalApplications={stats?.total_applications ?? 0}
-      />
-
-      {/* Review Queue (shows only if there are pending emails) */}
-      <ReviewQueue key={activeJourney?.id ?? "journey-none"} onResolved={handleRefresh} />
 
       {/* Filters + Table */}
       <div className="space-y-4">
+        <div>
+          <h2 className="text-2xl font-semibold text-gray-900">Applications</h2>
+        </div>
         <FilterBar
           statusFilter={statusFilter}
           companySearch={companySearch}
+          total={total}
           onStatusChange={(s) => { setStatusFilter(s); setPage(1); }}
           onCompanyChange={(c) => { setCompanySearch(c); setPage(1); }}
           onAddApplication={openCreateModal}
@@ -293,6 +346,41 @@ export default function Dashboard() {
             </button>
           </div>
         )}
+      </div>
+
+      {/* Review Queue (shows only if there are pending emails) */}
+      <ReviewQueue key={activeJourney?.id ?? "journey-none"} onResolved={handleRefresh} />
+
+      {/* Insights */}
+      <div className="space-y-6">
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+            <h2 className="text-sm font-medium text-gray-700 mb-3">Applications + LLM Cost</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 gap-3">
+              <div className="rounded-md border border-gray-200 bg-gray-50 px-4 py-3">
+                <div className="text-xs uppercase tracking-wide text-gray-500">Applications Tracked</div>
+                <div className={`mt-1 text-2xl font-bold ${statsLoading ? "animate-pulse text-gray-300" : "text-gray-900"}`}>
+                  {statsLoading ? "—" : (stats?.total_applications ?? 0)}
+                </div>
+              </div>
+              <div className="rounded-md border border-gray-200 bg-gray-50 px-4 py-3">
+                <div className="text-xs uppercase tracking-wide text-gray-500">Total LLM Cost</div>
+                <div className={`mt-1 text-2xl font-bold ${statsLoading ? "animate-pulse text-gray-300" : "text-indigo-700"}`}>
+                  {statsLoading ? "—" : `$${(stats?.total_llm_cost ?? 0).toFixed(4)}`}
+                </div>
+                <div className="mt-1 text-xs text-gray-500">
+                  {statsLoading ? "" : `${stats?.total_emails_scanned ?? 0} emails scanned`}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 xl:col-span-2">
+            <CostChart
+              data={stats?.daily_llm_costs ?? []}
+              totalCost={stats?.total_llm_cost ?? 0}
+            />
+          </div>
+        </div>
       </div>
 
       {showCreateModal && (

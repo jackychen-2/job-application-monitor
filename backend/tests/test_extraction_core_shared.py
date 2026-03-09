@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timezone
 
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from job_monitor.config import AppConfig
@@ -14,8 +16,8 @@ from job_monitor.eval.models import CachedEmail, EvalRunResult
 from job_monitor.eval.runner import run_evaluation
 from job_monitor.extraction.core import run_core_classification_and_extraction
 from job_monitor.extraction.llm import LLMExtractionResult, LLMLinkConfirmResult
-from job_monitor.extraction.pipeline import ScanSummary, _process_single_email
-from job_monitor.models import Application, Base, ProcessedEmail
+from job_monitor.extraction.pipeline import ScanSummary, _process_single_email, run_scan
+from job_monitor.models import Application, Base, ProcessedEmail, ScanState
 
 
 class _StubLLMProvider:
@@ -256,5 +258,95 @@ def test_pipeline_and_eval_share_non_job_classification(monkeypatch) -> None:
         assert eval_result.predicted_non_job_reason == "social_invitation"
         assert eval_result.predicted_status is None
         assert eval_result.predicted_application_group_id is None
+    finally:
+        session.close()
+
+
+def test_run_scan_commits_each_email_before_later_sqlite_failure(monkeypatch) -> None:
+    session = _new_session()
+
+    class _FakeGmailClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def fetch_latest_message_ids(self, _count: int) -> tuple[list[str], int]:
+            return ["msg-1", "msg-2"], 2
+
+        def fetch_message(self, gmail_message_id: str):
+            uid = 1 if gmail_message_id == "msg-1" else 2
+            return uid, {"uid": uid}, f"thread-{uid}", None, uid
+
+    def _fake_parse_email_message(msg: dict[str, int], *, gmail_thread_id: str | None = None) -> ParsedEmailData:
+        uid = msg["uid"]
+        return ParsedEmailData(
+            subject=f"Opportunity #{uid}",
+            sender="recruiter@example.com",
+            date_raw="Fri, 27 Feb 2026 10:00:00 +0000",
+            date_pt="2026-02-27 02:00:00 PST",
+            date_dt=datetime(2026, 2, 27, 10, 0, tzinfo=timezone.utc),
+            body_text="We'd like to discuss a role.",
+            message_id=f"msg-{uid}@example.com",
+            gmail_thread_id=gmail_thread_id or f"thread-{uid}",
+        )
+
+    def _fake_process_single_email(
+        session: Session,
+        config: AppConfig,
+        llm_provider,
+        owner_user_id: int,
+        mailbox_email: str,
+        mailbox_folder: str,
+        uid: int,
+        parsed: ParsedEmailData,
+        summary: ScanSummary,
+        gmail_message_id_override: str | None = None,
+    ) -> None:
+        del config, llm_provider, mailbox_email, mailbox_folder, parsed, gmail_message_id_override
+        if uid == 2:
+            raise OperationalError(
+                "UPDATE applications",
+                {"id": 2},
+                sqlite3.OperationalError("database is locked"),
+            )
+
+        session.add(
+            Application(
+                owner_user_id=owner_user_id,
+                company="Acme",
+                normalized_company="acme",
+                job_title="Data Engineer",
+                status="已申请",
+                source="email",
+            )
+        )
+        summary.emails_matched += 1
+        summary.applications_created += 1
+
+    monkeypatch.setattr("job_monitor.extraction.pipeline.GmailClient", _FakeGmailClient)
+    monkeypatch.setattr("job_monitor.extraction.pipeline.parse_email_message", _fake_parse_email_message)
+    monkeypatch.setattr("job_monitor.extraction.pipeline._process_single_email", _fake_process_single_email)
+    monkeypatch.setattr("job_monitor.extraction.pipeline.merge_owner_duplicate_applications", lambda *_args, **_kwargs: 0)
+
+    try:
+        summary = run_scan(
+            _make_config(llm_enabled=False),
+            session,
+            owner_user_id=1,
+            mailbox_email="candidate@example.com",
+        )
+
+        assert summary.applications_created == 1
+        assert summary.emails_matched == 1
+        assert len(summary.errors) == 1
+        assert "database is locked" in summary.errors[0]
+        assert session.query(Application).count() == 1
+
+        assert session.query(ScanState).count() == 1
     finally:
         session.close()

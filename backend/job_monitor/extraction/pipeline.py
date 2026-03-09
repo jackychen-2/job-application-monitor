@@ -131,6 +131,18 @@ class ScanSummary:
             self.errors = []
 
 
+def _merge_scan_summary(target: ScanSummary, delta: ScanSummary) -> None:
+    """Accumulate counters from a successfully committed per-email summary."""
+    target.emails_matched += delta.emails_matched
+    target.applications_created += delta.applications_created
+    target.applications_updated += delta.applications_updated
+    target.applications_deleted += delta.applications_deleted
+    target.total_prompt_tokens += delta.total_prompt_tokens
+    target.total_completion_tokens += delta.total_completion_tokens
+    target.total_estimated_cost += delta.total_estimated_cost
+    target.errors.extend(delta.errors)
+
+
 def build_title_req_filters(model_cls: type, job_title: str | None, req_id: str | None) -> list:
     """Build dedup filters for (job_title, req_id), with fallback when req_id is absent.
 
@@ -439,6 +451,24 @@ def _rollback_after_email_error(
         logger.error(
             "email_error_rollback_failed",
             gmail_message_id=gmail_message_id,
+            original_error=str(exc),
+            rollback_error=str(rollback_exc),
+        )
+
+
+def _rollback_after_step_error(
+    session: Session,
+    *,
+    step: str,
+    exc: Exception,
+) -> None:
+    """Reset session state after a non-email scan step failure."""
+    try:
+        session.rollback()
+    except Exception as rollback_exc:
+        logger.error(
+            "scan_step_rollback_failed",
+            step=step,
             original_error=str(exc),
             rollback_error=str(rollback_exc),
         )
@@ -856,7 +886,8 @@ def run_scan(
                         "current_subject": parsed.subject[:100] if parsed.subject else "",
                         "status": "processing",
                     })
-                
+
+                email_summary = ScanSummary()
                 _process_single_email(
                     session,
                     config,
@@ -866,9 +897,11 @@ def run_scan(
                     email_folder,
                     uid,
                     parsed,
-                    summary,
+                    email_summary,
                     gmail_message_id_override=gmail_message_id,
                 )
+                session.commit()
+                _merge_scan_summary(summary, email_summary)
                 max_history_id = max(max_history_id, history_id)
             except Exception as exc:
                 _rollback_after_email_error(
@@ -890,22 +923,29 @@ def run_scan(
         # Update scan state with the latest history ID for incremental sync.
         cursor = max(max_history_id, latest_history_id)
         if cursor > 0:
-            _update_scan_state(session, owner_user_id, mailbox_email, email_folder, cursor)
+            try:
+                _update_scan_state(session, owner_user_id, mailbox_email, email_folder, cursor)
+                session.commit()
+            except Exception as exc:
+                _rollback_after_step_error(session, step="scan_state_update", exc=exc)
+                error_msg = f"scan_state_update: {exc}"
+                logger.warning("scan_state_update_failed", owner_user_id=owner_user_id, error=str(exc))
+                summary.errors.append(error_msg)
 
     try:
-        with session.begin_nested():
-            merged = merge_owner_duplicate_applications(
-                session,
-                owner_user_id,
-                session.info.get("journey_id"),
-            )
+        merged = merge_owner_duplicate_applications(
+            session,
+            owner_user_id,
+            session.info.get("journey_id"),
+        )
+        session.commit()
         if merged > 0:
             summary.applications_deleted += merged
             logger.info("scan_deduped_applications", owner_user_id=owner_user_id, merged=merged)
     except Exception as exc:
+        _rollback_after_step_error(session, step="scan_dedupe", exc=exc)
         logger.warning("scan_dedupe_failed", owner_user_id=owner_user_id, error=str(exc))
-
-    session.commit()
+        summary.errors.append(f"scan_dedupe: {exc}")
 
     # Send completion progress
     if progress_callback and not summary.cancelled:
@@ -1012,6 +1052,7 @@ def run_date_range_scan(
                         "status": "processing",
                     })
 
+                email_summary = ScanSummary()
                 _process_single_email(
                     session,
                     config,
@@ -1021,9 +1062,11 @@ def run_date_range_scan(
                     email_folder,
                     uid,
                     parsed,
-                    summary,
+                    email_summary,
                     gmail_message_id_override=gmail_message_id,
                 )
+                session.commit()
+                _merge_scan_summary(summary, email_summary)
             except Exception as exc:
                 _rollback_after_email_error(
                     session,
@@ -1047,19 +1090,19 @@ def run_date_range_scan(
         # Only run_scan() and run_incremental_scan() update the cursor.
 
     try:
-        with session.begin_nested():
-            merged = merge_owner_duplicate_applications(
-                session,
-                owner_user_id,
-                session.info.get("journey_id"),
-            )
+        merged = merge_owner_duplicate_applications(
+            session,
+            owner_user_id,
+            session.info.get("journey_id"),
+        )
+        session.commit()
         if merged > 0:
             summary.applications_deleted += merged
             logger.info("scan_deduped_applications", owner_user_id=owner_user_id, merged=merged)
     except Exception as exc:
+        _rollback_after_step_error(session, step="scan_dedupe", exc=exc)
         logger.warning("scan_dedupe_failed", owner_user_id=owner_user_id, error=str(exc))
-
-    session.commit()
+        summary.errors.append(f"scan_dedupe: {exc}")
 
     # Send completion progress
     if progress_callback and not summary.cancelled:
@@ -1142,7 +1185,14 @@ def run_incremental_scan(
         if not message_ids:
             logger.info("incremental_scan_no_new_emails", last_history_id=last_history_id)
             if latest_history_id > last_history_id:
-                _update_scan_state(session, owner_user_id, mailbox_email, email_folder, latest_history_id)
+                try:
+                    _update_scan_state(session, owner_user_id, mailbox_email, email_folder, latest_history_id)
+                    session.commit()
+                except Exception as exc:
+                    _rollback_after_step_error(session, step="scan_state_update", exc=exc)
+                    error_msg = f"scan_state_update: {exc}"
+                    logger.warning("scan_state_update_failed", owner_user_id=owner_user_id, error=str(exc))
+                    summary.errors.append(error_msg)
             if progress_callback:
                 progress_callback({
                     "processed": 0,
@@ -1183,7 +1233,8 @@ def run_incremental_scan(
                         "current_subject": parsed.subject[:100] if parsed.subject else "",
                         "status": "processing",
                     })
-                
+
+                email_summary = ScanSummary()
                 _process_single_email(
                     session,
                     config,
@@ -1193,9 +1244,11 @@ def run_incremental_scan(
                     email_folder,
                     uid,
                     parsed,
-                    summary,
+                    email_summary,
                     gmail_message_id_override=gmail_message_id,
                 )
+                session.commit()
+                _merge_scan_summary(summary, email_summary)
                 max_history_id = max(max_history_id, history_id)
             except Exception as exc:
                 _rollback_after_email_error(
@@ -1217,22 +1270,29 @@ def run_incremental_scan(
         # Update scan state with the latest Gmail history cursor.
         cursor = max(max_history_id, latest_history_id)
         if cursor > last_history_id:
-            _update_scan_state(session, owner_user_id, mailbox_email, email_folder, cursor)
+            try:
+                _update_scan_state(session, owner_user_id, mailbox_email, email_folder, cursor)
+                session.commit()
+            except Exception as exc:
+                _rollback_after_step_error(session, step="scan_state_update", exc=exc)
+                error_msg = f"scan_state_update: {exc}"
+                logger.warning("scan_state_update_failed", owner_user_id=owner_user_id, error=str(exc))
+                summary.errors.append(error_msg)
 
     try:
-        with session.begin_nested():
-            merged = merge_owner_duplicate_applications(
-                session,
-                owner_user_id,
-                session.info.get("journey_id"),
-            )
+        merged = merge_owner_duplicate_applications(
+            session,
+            owner_user_id,
+            session.info.get("journey_id"),
+        )
+        session.commit()
         if merged > 0:
             summary.applications_deleted += merged
             logger.info("scan_deduped_applications", owner_user_id=owner_user_id, merged=merged)
     except Exception as exc:
+        _rollback_after_step_error(session, step="scan_dedupe", exc=exc)
         logger.warning("scan_dedupe_failed", owner_user_id=owner_user_id, error=str(exc))
-
-    session.commit()
+        summary.errors.append(f"scan_dedupe: {exc}")
 
     # Send completion progress
     if progress_callback and not summary.cancelled:

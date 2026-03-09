@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from job_monitor.api.applications import (
     list_application_merge_events,
+    list_applications,
     merge_applications,
     split_application,
     unmerge_application,
@@ -332,6 +333,55 @@ def test_split_application_moves_selected_emails_to_new_record() -> None:
             .count()
             == 1
         )
+    finally:
+        session.close()
+
+
+def test_list_applications_active_filter_excludes_rejected_and_unknown() -> None:
+    session = _new_session()
+    try:
+        session.add_all(
+            [
+                Application(
+                    company="Stripe",
+                    normalized_company="stripe",
+                    status="已申请",
+                    source="manual",
+                ),
+                Application(
+                    company="OpenAI",
+                    normalized_company="openai",
+                    status="面试",
+                    source="manual",
+                ),
+                Application(
+                    company="Example Reject",
+                    normalized_company="example reject",
+                    status="拒绝",
+                    source="manual",
+                ),
+                Application(
+                    company="Example Unknown",
+                    normalized_company="example unknown",
+                    status="Unknown",
+                    source="manual",
+                ),
+            ]
+        )
+        session.commit()
+
+        result = list_applications(
+            status="active",
+            company=None,
+            page=1,
+            page_size=20,
+            sort_by="created_at",
+            sort_order="desc",
+            db=session,
+        )
+
+        assert result.total == 2
+        assert {item.status for item in result.items} == {"已申请", "面试"}
     finally:
         session.close()
 

@@ -151,6 +151,11 @@ export interface DailyCount {
   count: number;
 }
 
+export interface HourlyCount {
+  timestamp: string;
+  count: number;
+}
+
 export interface Stats {
   total_applications: number;
   status_breakdown: StatusCount[];
@@ -159,6 +164,7 @@ export interface Stats {
   total_llm_cost: number;
   daily_llm_costs: DailyCost[];
   daily_applications: DailyCount[];
+  hourly_applications_24h: HourlyCount[];
 }
 
 export interface StatusTransition {
