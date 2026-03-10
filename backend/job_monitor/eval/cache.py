@@ -10,7 +10,7 @@ import structlog
 from sqlalchemy.orm import Session
 
 from job_monitor.config import AppConfig
-from job_monitor.email.gmail_client import GmailClient
+from job_monitor.email.gmail_client import GmailClient, is_primary_inbox_message
 from job_monitor.email.parser import parse_email_message
 from job_monitor.eval.models import CachedEmail
 
@@ -50,7 +50,10 @@ def download_and_cache_emails(
 
         for idx, gmail_message_id in enumerate(message_ids, 1):
             try:
-                uid, msg, gmail_thread_id, _, _ = gmail.fetch_message(gmail_message_id)
+                uid, msg, gmail_thread_id, _, _, label_ids = gmail.fetch_message(gmail_message_id)
+                if not is_primary_inbox_message(label_ids):
+                    skipped_count += 1
+                    continue
                 if msg is None:
                     error_count += 1
                     continue

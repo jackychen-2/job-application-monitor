@@ -25,7 +25,8 @@ import type {
   UnmergeApplicationResult,
 } from "../types";
 
-const BASE = "/api";
+const configuredBase = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/+$/, "") ?? "";
+const BASE = configuredBase || "/api";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
