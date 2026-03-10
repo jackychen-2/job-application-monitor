@@ -119,9 +119,15 @@ export interface ApplicationUpdate {
 export interface ScanResult {
   emails_scanned: number;
   emails_matched: number;
+  skipped_social_or_promotions: number;
+  skipped_not_job_related: number;
+  skipped_message_unavailable: number;
+  non_job_reason_counts: Record<string, number>;
   applications_created: number;
   applications_updated: number;
   applications_deleted: number;
+  created_application_ids: number[];
+  updated_application_ids: number[];
   total_prompt_tokens: number;
   total_completion_tokens: number;
   total_estimated_cost: number;

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional, TypedDict
 
@@ -24,8 +24,8 @@ from sqlalchemy.orm import Session
 
 from job_monitor.config import AppConfig
 from job_monitor.dedupe import merge_owner_duplicate_applications
-from job_monitor.email.classifier import is_job_related
-from job_monitor.email.gmail_client import GmailClient, GmailHistoryExpiredError
+from job_monitor.email.classifier import detect_non_job_reason, is_job_related
+from job_monitor.email.gmail_client import GmailClient, GmailHistoryExpiredError, is_inbox_message
 from job_monitor.email.parser import ParsedEmailData, parse_email_message
 from job_monitor.extraction.llm import (
     LLMExtractionResult,
@@ -117,26 +117,46 @@ class ScanSummary:
 
     emails_scanned: int = 0
     emails_matched: int = 0
+    skipped_social_or_promotions: int = 0
+    skipped_not_job_related: int = 0
+    skipped_message_unavailable: int = 0
+    non_job_reason_counts: dict[str, int] = field(default_factory=dict)
     applications_created: int = 0
     applications_updated: int = 0
     applications_deleted: int = 0
+    created_application_ids: list[int] = field(default_factory=list)
+    updated_application_ids: list[int] = field(default_factory=list)
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     total_estimated_cost: float = 0.0
-    errors: list[str] = None  # type: ignore[assignment]
+    errors: list[str] = field(default_factory=list)
     cancelled: bool = False
 
-    def __post_init__(self) -> None:
-        if self.errors is None:
-            self.errors = []
+
+def _append_unique_application_id(bucket: list[int], application_id: int) -> None:
+    if application_id not in bucket:
+        bucket.append(application_id)
+
+
+def _increment_count(bucket: dict[str, int], key: str) -> None:
+    bucket[key] = bucket.get(key, 0) + 1
 
 
 def _merge_scan_summary(target: ScanSummary, delta: ScanSummary) -> None:
     """Accumulate counters from a successfully committed per-email summary."""
     target.emails_matched += delta.emails_matched
+    target.skipped_social_or_promotions += delta.skipped_social_or_promotions
+    target.skipped_not_job_related += delta.skipped_not_job_related
+    target.skipped_message_unavailable += delta.skipped_message_unavailable
+    for reason, count in delta.non_job_reason_counts.items():
+        target.non_job_reason_counts[reason] = target.non_job_reason_counts.get(reason, 0) + count
     target.applications_created += delta.applications_created
     target.applications_updated += delta.applications_updated
     target.applications_deleted += delta.applications_deleted
+    for application_id in delta.created_application_ids:
+        _append_unique_application_id(target.created_application_ids, application_id)
+    for application_id in delta.updated_application_ids:
+        _append_unique_application_id(target.updated_application_ids, application_id)
     target.total_prompt_tokens += delta.total_prompt_tokens
     target.total_completion_tokens += delta.total_completion_tokens
     target.total_estimated_cost += delta.total_estimated_cost
@@ -188,10 +208,10 @@ def _get_or_create_application(
     email_date: Optional[datetime],
     status: str,
     source: str = "email",
-) -> tuple[Application, bool]:
+) -> tuple[Application, bool, bool]:
     """Find an existing application or create a new one.
 
-    Returns (application, created) where created=True for new rows.
+    Returns (application, created, changed_existing) where created=True for new rows.
     Deduplicates by normalized_company + (job_title, req_id).
     Updates existing record if data has changed.
     """
@@ -214,13 +234,17 @@ def _get_or_create_application(
 
     if existing:
         # Update fields - merge old into most recent
+        changed_existing = False
         if existing.company != company:
             existing.company = company
             existing.normalized_company = normalized
+            changed_existing = True
         if job_title and existing.job_title != job_title:
             existing.job_title = job_title
+            changed_existing = True
         if req_id and existing.req_id != req_id:
             existing.req_id = req_id
+            changed_existing = True
         # Always update to most recent email info
         _ed = email_date.replace(tzinfo=None) if email_date and hasattr(email_date, 'tzinfo') and email_date.tzinfo else email_date
         _ad = existing.email_date.replace(tzinfo=None) if existing.email_date and hasattr(existing.email_date, 'tzinfo') and existing.email_date.tzinfo else existing.email_date
@@ -228,9 +252,11 @@ def _get_or_create_application(
             existing.email_date = email_date
             existing.email_subject = email_subject
             existing.email_sender = email_sender
-        existing.updated_at = datetime.utcnow()
+            changed_existing = True
+        if changed_existing:
+            existing.updated_at = datetime.utcnow()
         logger.info("application_merged", app_id=existing.id, company=company, job_title=job_title, req_id=req_id)
-        return existing, False
+        return existing, False, changed_existing
 
     app = Application(
         owner_user_id=owner_user_id,
@@ -257,7 +283,7 @@ def _get_or_create_application(
             change_source=f"email_scan",
         )
     )
-    return app, True
+    return app, True, False
 
 
 def _update_status_if_changed(
@@ -527,6 +553,7 @@ def _process_single_email(
 
     llm_result: Optional[LLMExtractionResult] = None
     llm_used = False
+    non_job_reason = detect_non_job_reason(sender, subject, body)
 
     # ── Step 2: LLM classification + extraction ──────────
     if llm_provider is not None:
@@ -547,6 +574,9 @@ def _process_single_email(
     if llm_result is not None:
         if not llm_result.is_job_application:
             logger.info("email_skipped_llm", uid=uid)
+            summary.skipped_not_job_related += 1
+            if non_job_reason:
+                _increment_count(summary.non_job_reason_counts, non_job_reason)
             _cleanup_orphaned_app(
                 session,
                 owner_user_id=owner_user_id,
@@ -566,6 +596,9 @@ def _process_single_email(
                 logger.info("email_skipped_rules_fallback", uid=uid)
             else:
                 logger.info("email_skipped_rules", uid=uid)
+            summary.skipped_not_job_related += 1
+            if non_job_reason:
+                _increment_count(summary.non_job_reason_counts, non_job_reason)
             _cleanup_orphaned_app(
                 session,
                 owner_user_id=owner_user_id,
@@ -632,7 +665,7 @@ def _process_single_email(
         if app is None:
             # Fallback: linked app was deleted, create new
             logger.warning("linked_app_not_found", application_id=linked_app_id)
-            app, created = _get_or_create_application(
+            app, created, changed = _get_or_create_application(
                 session,
                 owner_user_id=owner_user_id,
                 company=company,
@@ -645,6 +678,7 @@ def _process_single_email(
             )
             if created:
                 summary.applications_created += 1
+                _append_unique_application_id(summary.created_application_ids, app.id)
                 logger.info("created_new_application", uid=uid, company=company, title=job_title)
         else:
             created = False
@@ -677,13 +711,15 @@ def _process_single_email(
                 change_source=f"email_uid_{uid}",
                 email_date=email_date,
             ):
-                summary.applications_updated += 1
                 changed = True
             if changed:
                 app.updated_at = datetime.utcnow()
                 logger.info("application_updated_rescan", app_id=app.id, company=company, title=job_title)
+            if changed:
+                summary.applications_updated += 1
+                _append_unique_application_id(summary.updated_application_ids, app.id)
     else:
-        app, created = _get_or_create_application(
+        app, created, changed = _get_or_create_application(
             session,
             owner_user_id=owner_user_id,
             company=company,
@@ -696,18 +732,20 @@ def _process_single_email(
         )
         if created:
             summary.applications_created += 1
+            _append_unique_application_id(summary.created_application_ids, app.id)
             logger.info("created_new_application", uid=uid, company=company, title=job_title)
         else:
-            updated = _update_status_if_changed(
+            changed = _update_status_if_changed(
                 session,
                 app,
                 status,
                 owner_user_id=owner_user_id,
                 change_source=f"email_uid_{uid}",
                 email_date=email_date,
-            )
-            if updated:
+            ) or changed
+            if changed:
                 summary.applications_updated += 1
+                _append_unique_application_id(summary.updated_application_ids, app.id)
 
     # ── Step 6: 清理孤立的旧Application ───────────────────
     # 如果这封邮件之前关联到不同的app，清理旧的（如果没有其他邮件引用）
@@ -873,8 +911,14 @@ def run_scan(
             logger.info("processing_email", index=idx, total=len(message_ids), gmail_message_id=gmail_message_id)
 
             try:
-                uid, msg, gmail_thread_id, _, history_id = gmail.fetch_message(gmail_message_id)
+                uid, msg, gmail_thread_id, _, history_id, label_ids = gmail.fetch_message(gmail_message_id)
+                if not is_inbox_message(label_ids):
+                    logger.info("email_skipped_social_or_promotions", gmail_message_id=gmail_message_id)
+                    summary.skipped_social_or_promotions += 1
+                    max_history_id = max(max_history_id, history_id)
+                    continue
                 if msg is None:
+                    summary.skipped_message_unavailable += 1
                     continue
                 parsed = parse_email_message(msg, gmail_thread_id=gmail_thread_id)
                 
@@ -1038,8 +1082,13 @@ def run_date_range_scan(
             logger.info("processing_email", index=idx, total=len(message_ids), gmail_message_id=gmail_message_id)
 
             try:
-                uid, msg, gmail_thread_id, _, _ = gmail.fetch_message(gmail_message_id)
+                uid, msg, gmail_thread_id, _, _, label_ids = gmail.fetch_message(gmail_message_id)
+                if not is_inbox_message(label_ids):
+                    logger.info("email_skipped_social_or_promotions", gmail_message_id=gmail_message_id)
+                    summary.skipped_social_or_promotions += 1
+                    continue
                 if msg is None:
+                    summary.skipped_message_unavailable += 1
                     continue
                 parsed = parse_email_message(msg, gmail_thread_id=gmail_thread_id)
 
@@ -1220,8 +1269,14 @@ def run_incremental_scan(
             logger.info("processing_email", index=idx, total=len(message_ids), gmail_message_id=gmail_message_id)
 
             try:
-                uid, msg, gmail_thread_id, _, history_id = gmail.fetch_message(gmail_message_id)
+                uid, msg, gmail_thread_id, _, history_id, label_ids = gmail.fetch_message(gmail_message_id)
+                if not is_inbox_message(label_ids):
+                    logger.info("email_skipped_social_or_promotions", gmail_message_id=gmail_message_id)
+                    summary.skipped_social_or_promotions += 1
+                    max_history_id = max(max_history_id, history_id)
+                    continue
                 if msg is None:
+                    summary.skipped_message_unavailable += 1
                     continue
                 parsed = parse_email_message(msg, gmail_thread_id=gmail_thread_id)
                 

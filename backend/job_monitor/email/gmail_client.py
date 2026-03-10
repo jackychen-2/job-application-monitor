@@ -16,6 +16,12 @@ from job_monitor.config import AppConfig
 
 logger = structlog.get_logger(__name__)
 
+_TRACKABLE_INBOX_QUERY = "in:inbox -category:social -category:promotions"
+_FILTERED_INBOX_LABELS = {
+    "CATEGORY_SOCIAL",
+    "CATEGORY_PROMOTIONS",
+}
+
 
 class GmailHistoryExpiredError(RuntimeError):
     """Raised when startHistoryId is too old and Gmail no longer has the history window."""
@@ -45,6 +51,23 @@ def _to_gmail_date(date_yyyy_mm_dd: str) -> str:
 def _to_gmail_before_date_inclusive(before_yyyy_mm_dd: str) -> str:
     dt = datetime.strptime(before_yyyy_mm_dd, "%Y-%m-%d") + timedelta(days=1)
     return dt.strftime("%Y/%m/%d")
+
+
+def _merge_gmail_query(*parts: Optional[str]) -> str | None:
+    tokens = [part.strip() for part in parts if part and part.strip()]
+    if not tokens:
+        return None
+    return " ".join(tokens)
+
+
+def is_inbox_message(label_ids: list[str] | None) -> bool:
+    """Best-effort check for inbox messages excluding Social/Promotions tabs."""
+    labels = set(label_ids or [])
+    return "INBOX" in labels and labels.isdisjoint(_FILTERED_INBOX_LABELS)
+
+
+# Backward-compatible alias for older imports. Semantics are production filter rules.
+is_primary_inbox_message = is_inbox_message
 
 
 class GmailClient:
@@ -155,7 +178,7 @@ class GmailClient:
         return ids
 
     def fetch_latest_message_ids(self, count: int) -> tuple[list[str], int]:
-        ids = self._list_message_ids(query=None, max_count=count)
+        ids = self._list_message_ids(query=_TRACKABLE_INBOX_QUERY, max_count=count)
         # Gmail list returns newest-first; process oldest->newest for stable progression.
         ids.reverse()
         return ids, self.get_latest_history_id()
@@ -171,7 +194,7 @@ class GmailClient:
         if before_date:
             parts.append(f"before:{_to_gmail_before_date_inclusive(before_date)}")
 
-        query = " ".join(parts) if parts else None
+        query = _merge_gmail_query(_TRACKABLE_INBOX_QUERY, " ".join(parts) if parts else None)
         ids = self._list_message_ids(query=query, max_count=None)
         ids.reverse()
         return ids, self.get_latest_history_id()
@@ -231,13 +254,24 @@ class GmailClient:
 
         return ids, latest_history_id
 
-    def fetch_message(self, gmail_message_id: str) -> tuple[int, Message | None, str | None, str, int]:
+    def fetch_message(
+        self,
+        gmail_message_id: str,
+    ) -> tuple[int, Message | None, str | None, str, int, list[str]]:
         data = self._get(f"/users/me/messages/{gmail_message_id}", params={"format": "raw"})
+        label_ids = [str(label_id) for label_id in (data.get("labelIds") or []) if label_id]
 
         raw = data.get("raw")
         if not raw:
             logger.warning("gmail_message_missing_raw", message_id=gmail_message_id)
-            return _stable_uid_from_gmail_id(gmail_message_id), None, None, gmail_message_id, int(data.get("historyId") or 0)
+            return (
+                _stable_uid_from_gmail_id(gmail_message_id),
+                None,
+                None,
+                gmail_message_id,
+                int(data.get("historyId") or 0),
+                label_ids,
+            )
 
         padded = raw + "=" * (-len(raw) % 4)
         payload = base64.urlsafe_b64decode(padded.encode("utf-8"))
@@ -246,4 +280,4 @@ class GmailClient:
         thread_id = data.get("threadId")
         history_id = int(data.get("historyId") or 0)
         uid = _stable_uid_from_gmail_id(gmail_message_id)
-        return uid, msg, thread_id, gmail_message_id, history_id
+        return uid, msg, thread_id, gmail_message_id, history_id, label_ids

@@ -38,7 +38,6 @@ _user_scan_last_result: dict[tuple[int, int], ScanResultOut] = {}
 _user_scan_progress: dict[tuple[int, int], dict] = {}
 
 # SSE-specific in-memory state keyed by (user_id, journey_id)
-_user_sse_scan_locks: dict[tuple[int, int], threading.Lock] = {}
 _user_sse_scan_running: dict[tuple[int, int], bool] = {}
 _user_sse_cancel_requested: dict[tuple[int, int], bool] = {}
 
@@ -57,8 +56,11 @@ def _get_scan_lock(scope: tuple[int, int]) -> threading.Lock:
 
 
 def _get_sse_scan_lock(scope: tuple[int, int]) -> threading.Lock:
-    with _state_lock:
-        return _user_sse_scan_locks.setdefault(scope, threading.Lock())
+    return _get_scan_lock(scope)
+
+
+def _any_scan_running(scope: tuple[int, int]) -> bool:
+    return _user_scan_running.get(scope, False) or _user_sse_scan_running.get(scope, False)
 
 
 def _set_user_progress(scope: tuple[int, int], info: ProgressInfo) -> None:
@@ -69,9 +71,15 @@ def _to_result(summary: ScanSummary) -> ScanResultOut:
     return ScanResultOut(
         emails_scanned=summary.emails_scanned,
         emails_matched=summary.emails_matched,
+        skipped_social_or_promotions=summary.skipped_social_or_promotions,
+        skipped_not_job_related=summary.skipped_not_job_related,
+        skipped_message_unavailable=summary.skipped_message_unavailable,
+        non_job_reason_counts=summary.non_job_reason_counts,
         applications_created=summary.applications_created,
         applications_updated=summary.applications_updated,
         applications_deleted=summary.applications_deleted,
+        created_application_ids=summary.created_application_ids,
+        updated_application_ids=summary.updated_application_ids,
         total_prompt_tokens=summary.total_prompt_tokens,
         total_completion_tokens=summary.total_completion_tokens,
         total_estimated_cost=summary.total_estimated_cost,
@@ -140,9 +148,15 @@ def _run_scan_background(
         _user_scan_last_result[scope] = ScanResultOut(
             emails_scanned=0,
             emails_matched=0,
+            skipped_social_or_promotions=0,
+            skipped_not_job_related=0,
+            skipped_message_unavailable=0,
+            non_job_reason_counts={},
             applications_created=0,
             applications_updated=0,
             applications_deleted=0,
+            created_application_ids=[],
+            updated_application_ids=[],
             total_prompt_tokens=0,
             total_completion_tokens=0,
             total_estimated_cost=0.0,
@@ -172,6 +186,9 @@ def trigger_scan(
         oauth_access_token, mailbox_email = get_valid_google_access_token(db, current_user.id, config)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Google mailbox not connected: {exc}") from exc
+    # Persist any auth/token refresh writes before the background worker starts
+    # so SQLite does not keep the request transaction open while the scan writes.
+    db.commit()
 
     scope = _scan_scope(current_user)
     lock = _get_scan_lock(scope)
@@ -230,8 +247,7 @@ def get_last_scan_result(current_user: User = Depends(get_current_user)) -> Scan
 def get_scan_running(current_user: User = Depends(get_current_user)) -> dict:
     """Check whether the current user has any scan running."""
     scope = _scan_scope(current_user)
-    running = _user_scan_running.get(scope, False) or _user_sse_scan_running.get(scope, False)
-    return {"running": running}
+    return {"running": _any_scan_running(scope)}
 
 
 @router.get("/progress", response_model=dict)
@@ -242,7 +258,7 @@ def get_scan_progress(current_user: User = Depends(get_current_user)) -> dict:
     if progress is not None:
         return progress
 
-    running = _user_scan_running.get(scope, False) or _user_sse_scan_running.get(scope, False)
+    running = _any_scan_running(scope)
     if running:
         return {"type": "progress", "processed": 0, "total": 0, "current_subject": "", "status": "processing"}
     return {"type": "idle", "processed": 0, "total": 0, "current_subject": "", "status": "idle"}
@@ -401,11 +417,15 @@ async def stream_scan(
         oauth_access_token, mailbox_email = get_valid_google_access_token(db, current_user.id, config)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Google mailbox not connected: {exc}") from exc
+    # Streaming responses keep dependency cleanup open until the stream ends.
+    # Commit now to release any SQLite write lock from auth/journey/token updates
+    # before the background scan thread starts writing.
+    db.commit()
 
     scope = _scan_scope(current_user)
     lock = _get_sse_scan_lock(scope)
     if not lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="An SSE scan is already in progress for this journey")
+        raise HTTPException(status_code=409, detail="A scan is already in progress for this journey")
 
     progress_queue: queue.Queue = queue.Queue(maxsize=100)
 

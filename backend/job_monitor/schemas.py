@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -165,9 +165,15 @@ class ApplicationListOut(BaseModel):
 class ScanResultOut(BaseModel):
     emails_scanned: int
     emails_matched: int
+    skipped_social_or_promotions: int = 0
+    skipped_not_job_related: int = 0
+    skipped_message_unavailable: int = 0
+    non_job_reason_counts: Dict[str, int] = Field(default_factory=dict)
     applications_created: int
     applications_updated: int
     applications_deleted: int = 0
+    created_application_ids: List[int] = Field(default_factory=list)
+    updated_application_ids: List[int] = Field(default_factory=list)
     total_prompt_tokens: int
     total_completion_tokens: int
     total_estimated_cost: float

@@ -262,6 +262,77 @@ def test_pipeline_and_eval_share_non_job_classification(monkeypatch) -> None:
         session.close()
 
 
+def test_pipeline_records_non_job_skip_reason_in_summary() -> None:
+    session = _new_session()
+    try:
+        parsed = ParsedEmailData(
+            subject="You have an invitation",
+            sender="invitations@linkedin.com",
+            date_raw="Fri, 27 Feb 2026 10:00:00 +0000",
+            date_pt="2026-02-27 02:00:00 PST",
+            date_dt=datetime(2026, 2, 27, 10, 0, tzinfo=timezone.utc),
+            body_text="I'd like to add you to my professional network on LinkedIn.",
+            message_id="skip-msg-1@example.com",
+            gmail_thread_id="skip-thread-1",
+        )
+        summary = ScanSummary()
+
+        _process_single_email(
+            session=session,
+            config=_make_config(llm_enabled=False),
+            llm_provider=None,
+            owner_user_id=1,
+            mailbox_email="candidate@example.com",
+            mailbox_folder="INBOX",
+            uid=1,
+            parsed=parsed,
+            summary=summary,
+        )
+
+        assert summary.emails_matched == 0
+        assert summary.skipped_not_job_related == 1
+        assert summary.non_job_reason_counts == {"social_invitation": 1}
+    finally:
+        session.close()
+
+
+def test_run_scan_counts_social_or_promotions_skips(monkeypatch) -> None:
+    session = _new_session()
+
+    class _FakeGmailClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def fetch_latest_message_ids(self, _count: int) -> tuple[list[str], int]:
+            return ["msg-1"], 1
+
+        def fetch_message(self, _gmail_message_id: str):
+            return 1, {"uid": 1}, "thread-1", None, 1, ["CATEGORY_PROMOTIONS"]
+
+    monkeypatch.setattr("job_monitor.extraction.pipeline.GmailClient", _FakeGmailClient)
+    monkeypatch.setattr("job_monitor.extraction.pipeline.merge_owner_duplicate_applications", lambda *_args, **_kwargs: 0)
+
+    try:
+        summary = run_scan(
+            _make_config(llm_enabled=False),
+            session,
+            owner_user_id=1,
+            mailbox_email="candidate@example.com",
+        )
+
+        assert summary.emails_scanned == 1
+        assert summary.emails_matched == 0
+        assert summary.skipped_social_or_promotions == 1
+    finally:
+        session.close()
+
+
 def test_run_scan_commits_each_email_before_later_sqlite_failure(monkeypatch) -> None:
     session = _new_session()
 
@@ -280,7 +351,7 @@ def test_run_scan_commits_each_email_before_later_sqlite_failure(monkeypatch) ->
 
         def fetch_message(self, gmail_message_id: str):
             uid = 1 if gmail_message_id == "msg-1" else 2
-            return uid, {"uid": uid}, f"thread-{uid}", None, uid
+            return uid, {"uid": uid}, f"thread-{uid}", None, uid, ["INBOX"]
 
     def _fake_parse_email_message(msg: dict[str, int], *, gmail_thread_id: str | None = None) -> ParsedEmailData:
         uid = msg["uid"]

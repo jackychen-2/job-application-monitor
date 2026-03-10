@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   deleteApplication,
   getApplication,
@@ -21,6 +21,7 @@ import { useJourney } from "../journey/JourneyContext";
 
 export default function ApplicationDetail() {
   const { id } = useParams<{ id: string }>();
+  const location = useLocation();
   const navigate = useNavigate();
   const { activeJourney } = useJourney();
   const [app, setApp] = useState<AppDetail | null>(null);
@@ -40,6 +41,23 @@ export default function ApplicationDetail() {
   const [splitReqId, setSplitReqId] = useState("");
   const [splitStatus, setSplitStatus] = useState("已申请");
   const [splitNotes, setSplitNotes] = useState("");
+  const storedDashboardTarget = window.sessionStorage.getItem("dashboard:returnTo") || "/";
+  const backTarget = typeof (location.state as { from?: string } | null)?.from === "string"
+    ? (location.state as { from?: string }).from ?? storedDashboardTarget
+    : storedDashboardTarget;
+
+  const handleBack = () => {
+    const historyIndex = window.history.state && typeof window.history.state.idx === "number"
+      ? window.history.state.idx
+      : 0;
+
+    if (historyIndex > 0) {
+      navigate(-1);
+      return;
+    }
+
+    navigate(backTarget, { replace: true });
+  };
 
   const loadApplicationDetail = async (applicationId: number): Promise<void> => {
     setLoading(true);
@@ -52,7 +70,7 @@ export default function ApplicationDetail() {
       setNotes(data.notes ?? "");
       setMergeEvents(events);
     } catch {
-      navigate("/");
+      navigate(backTarget, { replace: true });
     } finally {
       setLoading(false);
     }
@@ -90,7 +108,7 @@ export default function ApplicationDetail() {
     if (!app) return;
     if (window.confirm(`Delete application at ${app.company}?`)) {
       await deleteApplication(app.id);
-      navigate("/");
+      handleBack();
     }
   };
 
@@ -160,7 +178,11 @@ export default function ApplicationDetail() {
       });
       setShowSplitModal(false);
       await loadApplicationDetail(app.id);
-      navigate(`/applications/${result.new_application_id}`);
+      navigate(`/applications/${result.new_application_id}`, {
+        state: {
+          from: `${location.pathname}${location.search}`,
+        },
+      });
     } catch (err) {
       console.error("Failed to split:", err);
       const raw = err instanceof Error ? err.message : String(err);
@@ -206,10 +228,10 @@ export default function ApplicationDetail() {
     <div className="max-w-3xl mx-auto space-y-6">
       {/* Back link */}
       <button
-        onClick={() => navigate("/")}
+        onClick={handleBack}
         className="text-sm text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
       >
-        ← Back to Dashboard
+        ← Back
       </button>
 
       {/* Header */}
