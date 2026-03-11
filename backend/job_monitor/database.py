@@ -193,8 +193,12 @@ def init_db(config: AppConfig) -> Engine:
 
     logger.info("database_initialized", url=database_url)
 
-    # Re-process data with latest non-LLM logic on startup
-    _cleanup_on_startup()
+    # Startup cleanup is expensive and should be opt-in so auth and initial page
+    # loads are not blocked by maintenance work.
+    if config.startup_cleanup_enabled:
+        _cleanup_on_startup()
+    else:
+        logger.info("startup_cleanup_skipped")
 
     return _engine
 

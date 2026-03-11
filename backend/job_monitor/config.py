@@ -35,6 +35,7 @@ class AppConfig(BaseSettings):
     scan_job_batch_size: int = 5
     scan_job_continue_enabled: bool = True
     scan_job_continue_secret: SecretStr = SecretStr("")
+    startup_cleanup_enabled: bool = False
 
     # ── LLM ───────────────────────────────────────────────
     llm_enabled: bool = True
@@ -69,7 +70,7 @@ class AppConfig(BaseSettings):
     log_file: Optional[str] = None
 
     # ── Validators ────────────────────────────────────────
-    @field_validator("llm_enabled", mode="before")
+    @field_validator("llm_enabled", "startup_cleanup_enabled", mode="before")
     @classmethod
     def parse_bool(cls, v: object) -> bool:
         if isinstance(v, str):

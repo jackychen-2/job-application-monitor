@@ -10,7 +10,11 @@ import structlog
 from sqlalchemy.orm import Session
 
 from job_monitor.config import AppConfig
-from job_monitor.email.gmail_client import GmailClient, is_primary_inbox_message
+from job_monitor.email.gmail_client import (
+    GmailClient,
+    GmailMessageNotFoundError,
+    is_primary_inbox_message,
+)
 from job_monitor.email.parser import parse_email_message
 from job_monitor.eval.models import CachedEmail
 
@@ -111,6 +115,9 @@ def download_and_cache_emails(
                     session.flush()
                     logger.info("cache_download_progress", new=new_count, total=total, index=idx)
 
+            except GmailMessageNotFoundError:
+                logger.info("cache_download_message_unavailable", gmail_message_id=gmail_message_id)
+                skipped_count += 1
             except Exception as exc:
                 logger.warning("cache_download_error", gmail_message_id=gmail_message_id, error=str(exc))
                 error_count += 1

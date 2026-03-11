@@ -11,6 +11,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from job_monitor.config import AppConfig
+from job_monitor.email.gmail_client import GmailMessageNotFoundError
 from job_monitor.email.parser import ParsedEmailData
 from job_monitor.eval.models import CachedEmail, EvalRunResult
 from job_monitor.eval.runner import run_evaluation
@@ -329,6 +330,43 @@ def test_run_scan_counts_social_or_promotions_skips(monkeypatch) -> None:
         assert summary.emails_scanned == 1
         assert summary.emails_matched == 0
         assert summary.skipped_social_or_promotions == 1
+    finally:
+        session.close()
+
+
+def test_run_scan_treats_missing_gmail_message_as_unavailable(monkeypatch) -> None:
+    session = _new_session()
+
+    class _FakeGmailClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def fetch_latest_message_ids(self, _count: int) -> tuple[list[str], int]:
+            return ["missing"], 7
+
+        def fetch_message(self, _gmail_message_id: str):
+            raise GmailMessageNotFoundError("missing")
+
+    monkeypatch.setattr("job_monitor.extraction.pipeline.GmailClient", _FakeGmailClient)
+    monkeypatch.setattr("job_monitor.extraction.pipeline.merge_owner_duplicate_applications", lambda *_args, **_kwargs: 0)
+
+    try:
+        summary = run_scan(
+            _make_config(llm_enabled=False),
+            session,
+            owner_user_id=1,
+            mailbox_email="candidate@example.com",
+        )
+
+        assert summary.emails_scanned == 1
+        assert summary.skipped_message_unavailable == 1
+        assert summary.errors == []
     finally:
         session.close()
 

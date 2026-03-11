@@ -13,7 +13,12 @@ from sqlalchemy.orm import Session
 
 from job_monitor.config import AppConfig
 from job_monitor.dedupe import merge_owner_duplicate_applications
-from job_monitor.email.gmail_client import GmailClient, GmailHistoryExpiredError, is_inbox_message
+from job_monitor.email.gmail_client import (
+    GmailClient,
+    GmailHistoryExpiredError,
+    GmailMessageNotFoundError,
+    is_inbox_message,
+)
 from job_monitor.email.parser import parse_email_message
 from job_monitor.extraction.llm import LLMProvider, create_llm_provider
 from job_monitor.extraction.pipeline import (
@@ -41,6 +46,22 @@ BACKGROUND_DISPATCH_TIMEOUT = httpx.Timeout(connect=5.0, read=0.2, write=5.0, po
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _mark_claimed_message_skipped(
+    session: Session,
+    job: ScanJob,
+    claimed_message_id: int,
+    summary: ScanSummary,
+) -> None:
+    claimed_row = session.get(ScanJobMessage, claimed_message_id)
+    if claimed_row is None:
+        raise RuntimeError("Claimed scan job message disappeared")
+    claimed_row.status = "skipped"
+    claimed_row.processed_at = _utcnow()
+    claimed_row.error_message = None
+    _apply_summary_to_job(job, summary, current_subject="")
+    session.commit()
 
 
 def clamp_requested_max_emails(requested_max_emails: int | None) -> int:
@@ -738,34 +759,22 @@ def run_scan_job_step(
                         job.history_latest_id = history_id
 
                     if not is_inbox_message(label_ids):
-                        claimed_row = session.get(ScanJobMessage, message.id)
-                        if claimed_row is None:
-                            raise RuntimeError("Claimed scan job message disappeared")
-                        claimed_row.status = "skipped"
-                        claimed_row.processed_at = _utcnow()
-                        claimed_row.error_message = None
-                        _apply_summary_to_job(
+                        _mark_claimed_message_skipped(
+                            session,
                             job,
+                            message.id,
                             ScanSummary(skipped_social_or_promotions=1),
-                            current_subject="",
                         )
-                        session.commit()
                         processed_in_step += 1
                         continue
 
                     if raw_message is None:
-                        claimed_row = session.get(ScanJobMessage, message.id)
-                        if claimed_row is None:
-                            raise RuntimeError("Claimed scan job message disappeared")
-                        claimed_row.status = "skipped"
-                        claimed_row.processed_at = _utcnow()
-                        claimed_row.error_message = None
-                        _apply_summary_to_job(
+                        _mark_claimed_message_skipped(
+                            session,
                             job,
+                            message.id,
                             ScanSummary(skipped_message_unavailable=1),
-                            current_subject="",
                         )
-                        session.commit()
                         processed_in_step += 1
                         continue
 
@@ -796,6 +805,19 @@ def run_scan_job_step(
                         current_subject=(parsed.subject[:100] if parsed.subject else ""),
                     )
                     session.commit()
+                    processed_in_step += 1
+                except GmailMessageNotFoundError:
+                    logger.info(
+                        "scan_job_message_unavailable",
+                        scan_job_id=job.id,
+                        gmail_message_id=message.gmail_message_id,
+                    )
+                    _mark_claimed_message_skipped(
+                        session,
+                        job,
+                        message.id,
+                        ScanSummary(skipped_message_unavailable=1),
+                    )
                     processed_in_step += 1
                 except Exception as exc:
                     _rollback_after_email_error(

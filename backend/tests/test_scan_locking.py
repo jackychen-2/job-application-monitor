@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from job_monitor.config import AppConfig
-from job_monitor.email.gmail_client import GmailHistoryExpiredError
+from job_monitor.email.gmail_client import GmailHistoryExpiredError, GmailMessageNotFoundError
 from job_monitor.models import Base, Journey, ScanJobMessage, ScanState, User
 from job_monitor.scan_jobs import (
     create_scan_job,
@@ -28,6 +28,7 @@ class FakeGmailClient:
     latest_history_id: int = 0
     raise_history_expired: bool = False
     message_payloads: dict[str, tuple[int, EmailMessage | None, str | None, str, int, list[str]]] = {}
+    message_errors: dict[str, Exception] = {}
 
     def __init__(self, config: AppConfig, *, oauth_access_token: str) -> None:
         del config, oauth_access_token
@@ -67,6 +68,8 @@ class FakeGmailClient:
         return ids, self.latest_history_id
 
     def fetch_message(self, gmail_message_id: str) -> tuple[int, EmailMessage | None, str | None, str, int, list[str]]:
+        if gmail_message_id in self.message_errors:
+            raise self.message_errors[gmail_message_id]
         return self.message_payloads[gmail_message_id]
 
 
@@ -134,6 +137,7 @@ def _patch_scan_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeGmailClient.latest_history_id = 0
     FakeGmailClient.raise_history_expired = False
     FakeGmailClient.message_payloads = {}
+    FakeGmailClient.message_errors = {}
     monkeypatch.setattr(scan_jobs, "GmailClient", FakeGmailClient)
     monkeypatch.setattr(scan_jobs, "_process_single_email", _fake_process_single_email)
 
@@ -346,6 +350,68 @@ def test_stale_processing_messages_are_reclaimed() -> None:
         assert job.status == "completed"
         assert recovered is not None
         assert recovered.status == "done"
+    finally:
+        session.close()
+
+
+def test_missing_gmail_message_is_skipped_as_unavailable() -> None:
+    session = _new_session()
+    try:
+        user, journey = _bootstrap_scope(session)
+        session.add(
+            ScanState(
+                owner_user_id=user.id,
+                journey_id=journey.id,
+                email_account="user@example.com",
+                email_folder="INBOX",
+                last_uid=5,
+            )
+        )
+        session.commit()
+
+        FakeGmailClient.message_ids_after_history = ["missing", "m2"]
+        FakeGmailClient.latest_history_id = 20
+        FakeGmailClient.message_errors = {
+            "missing": GmailMessageNotFoundError("missing"),
+        }
+        FakeGmailClient.message_payloads = {
+            "m2": (102, _message("Second"), "thread-2", "m2", 20, ["INBOX"]),
+        }
+
+        job, _ = create_incremental_scan_job(
+            session,
+            _config(batch_size=2),
+            user.id,
+            journey.id,
+            "user@example.com",
+            "token",
+        )
+
+        job, processed_in_step, done = run_scan_job_step(
+            session,
+            _config(batch_size=2),
+            user.id,
+            journey.id,
+            job.id,
+            "token",
+        )
+
+        skipped = (
+            session.query(ScanJobMessage)
+            .filter(ScanJobMessage.scan_job_id == job.id, ScanJobMessage.gmail_message_id == "missing")
+            .one()
+        )
+        state = session.query(ScanState).filter(ScanState.owner_user_id == user.id).first()
+
+        assert processed_in_step == 2
+        assert done is True
+        assert job.status == "completed"
+        assert job.skipped_message_unavailable == 1
+        assert job.errors_json == "[]"
+        assert skipped.status == "skipped"
+        assert skipped.error_message is None
+        assert state is not None
+        assert state.last_uid == 20
     finally:
         session.close()
 

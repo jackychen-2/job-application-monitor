@@ -480,13 +480,19 @@ export default function ApplicationTable({
                       <td className="whitespace-nowrap px-4 py-4 align-top text-sm text-gray-500">
                         {formatDate(app.email_date || app.created_at)}
                       </td>
-                      <td className="max-w-[240px] px-4 py-4 align-top text-sm text-gray-600" title={app.job_title ?? ""}>
-                        <div className={app.job_title ? "truncate" : "text-gray-400"}>
+                      <td
+                        className="max-w-[320px] px-4 py-4 align-top text-sm text-gray-600 xl:max-w-[380px]"
+                        title={app.job_title ?? ""}
+                      >
+                        <div className={app.job_title ? "break-words leading-6 whitespace-normal" : "text-gray-400"}>
                           {app.job_title || "-"}
                         </div>
                       </td>
-                      <td className="max-w-[280px] px-4 py-4 align-top text-sm text-gray-500" title={app.email_subject ?? ""}>
-                        <div className={app.email_subject ? "truncate" : "text-gray-400"}>
+                      <td
+                        className="max-w-[420px] px-4 py-4 align-top text-sm text-gray-500 xl:max-w-[520px]"
+                        title={app.email_subject ?? ""}
+                      >
+                        <div className={app.email_subject ? "break-words leading-6 whitespace-normal" : "text-gray-400"}>
                           {app.email_subject || "-"}
                         </div>
                       </td>

@@ -36,6 +36,18 @@ class GmailApiError(RuntimeError):
         super().__init__(message)
 
 
+class GmailMessageNotFoundError(GmailApiError):
+    """Raised when a Gmail message ID no longer resolves to a message resource."""
+
+    def __init__(self, gmail_message_id: str) -> None:
+        self.gmail_message_id = gmail_message_id
+        super().__init__(
+            status_code=404,
+            reason="notFound",
+            message=f"Gmail message not found: {gmail_message_id}",
+        )
+
+
 def _stable_uid_from_gmail_id(gmail_message_id: str) -> int:
     """Map Gmail message ID to stable signed 63-bit int for legacy uid column compatibility."""
     digest = hashlib.sha256(gmail_message_id.encode("utf-8")).digest()
@@ -265,7 +277,12 @@ class GmailClient:
         self,
         gmail_message_id: str,
     ) -> tuple[int, Message | None, str | None, str, int, list[str]]:
-        data = self._get(f"/users/me/messages/{gmail_message_id}", params={"format": "raw"})
+        try:
+            data = self._get(f"/users/me/messages/{gmail_message_id}", params={"format": "raw"})
+        except GmailApiError as exc:
+            if exc.status_code == 404 and exc.reason == "notFound":
+                raise GmailMessageNotFoundError(gmail_message_id) from exc
+            raise
         label_ids = [str(label_id) for label_id in (data.get("labelIds") or []) if label_id]
 
         raw = data.get("raw")

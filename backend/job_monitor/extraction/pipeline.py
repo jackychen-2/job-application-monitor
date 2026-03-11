@@ -25,7 +25,12 @@ from sqlalchemy.orm import Session
 from job_monitor.config import AppConfig
 from job_monitor.dedupe import merge_owner_duplicate_applications
 from job_monitor.email.classifier import detect_non_job_reason, is_job_related
-from job_monitor.email.gmail_client import GmailClient, GmailHistoryExpiredError, is_inbox_message
+from job_monitor.email.gmail_client import (
+    GmailClient,
+    GmailHistoryExpiredError,
+    GmailMessageNotFoundError,
+    is_inbox_message,
+)
 from job_monitor.email.parser import ParsedEmailData, parse_email_message
 from job_monitor.extraction.llm import (
     LLMExtractionResult,
@@ -947,6 +952,9 @@ def run_scan(
                 session.commit()
                 _merge_scan_summary(summary, email_summary)
                 max_history_id = max(max_history_id, history_id)
+            except GmailMessageNotFoundError:
+                logger.info("email_skipped_message_unavailable", gmail_message_id=gmail_message_id)
+                summary.skipped_message_unavailable += 1
             except Exception as exc:
                 _rollback_after_email_error(
                     session,
@@ -1116,6 +1124,9 @@ def run_date_range_scan(
                 )
                 session.commit()
                 _merge_scan_summary(summary, email_summary)
+            except GmailMessageNotFoundError:
+                logger.info("email_skipped_message_unavailable", gmail_message_id=gmail_message_id)
+                summary.skipped_message_unavailable += 1
             except Exception as exc:
                 _rollback_after_email_error(
                     session,
@@ -1305,6 +1316,9 @@ def run_incremental_scan(
                 session.commit()
                 _merge_scan_summary(summary, email_summary)
                 max_history_id = max(max_history_id, history_id)
+            except GmailMessageNotFoundError:
+                logger.info("email_skipped_message_unavailable", gmail_message_id=gmail_message_id)
+                summary.skipped_message_unavailable += 1
             except Exception as exc:
                 _rollback_after_email_error(
                     session,
