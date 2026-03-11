@@ -375,6 +375,11 @@ export default function Dashboard() {
       });
       setShowCreateModal(false);
       resetCreateModal();
+      setApplications((prev) => {
+        const next = [created, ...prev.filter((app) => app.id !== created.id)];
+        return next.slice(0, pageSize);
+      });
+      setTotal((prev) => prev + (applications.some((app) => app.id === created.id) ? 0 : 1));
       updateDashboardSearch({ page: 1 });
       if (page === 1) {
         fetchApplications();

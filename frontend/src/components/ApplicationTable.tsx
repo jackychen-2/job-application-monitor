@@ -4,8 +4,8 @@ import type { Application, LinkedEmail } from "../types";
 import StatusBadge from "./StatusBadge";
 import {
   deleteApplication,
+  getMergeCandidates,
   getApplicationEmails,
-  listApplications,
   mergeApplications,
   splitApplication,
   updateApplication,
@@ -22,6 +22,22 @@ interface Props {
 
 type EmailCache = Record<number, LinkedEmail[]>;
 type EditField = { id: number; field: "status"; value: string };
+
+function mergeApplicationOptions(localApps: Application[], remoteApps: Application[]): Application[] {
+  const merged = new Map<number, Application>();
+  for (const app of localApps) {
+    merged.set(app.id, app);
+  }
+  for (const app of remoteApps) {
+    merged.set(app.id, app);
+  }
+
+  return Array.from(merged.values()).sort((left, right) => {
+    const leftTs = Date.parse(left.email_date || left.created_at || "") || 0;
+    const rightTs = Date.parse(right.email_date || right.created_at || "") || 0;
+    return rightTs - leftTs;
+  });
+}
 
 function formatDate(dateStr: string | null): string {
   if (!dateStr) return "-";
@@ -206,18 +222,19 @@ export default function ApplicationTable({
   const openMergeModal = async (app: Application) => {
     setOpenMenuId(null);
     setMergeModalApp(app);
-    setMergeOptions([]);
+    const localOptions = applications.filter((candidate) => candidate.id !== app.id);
+    setMergeOptions(localOptions);
     setSelectedMergeId(null);
     setMergeOptionsLoading(true);
 
     try {
-      const appsData = await listApplications({
-        page: 1,
-        page_size: 500,
-        sort_by: "email_date",
-        sort_order: "desc",
-      });
-      setMergeOptions(appsData.items.filter((candidate) => candidate.id !== app.id));
+      const mergeTargets = await getMergeCandidates(app.id);
+      setMergeOptions(
+        mergeApplicationOptions(
+          localOptions,
+          mergeTargets,
+        ),
+      );
     } catch (err) {
       console.error("Failed to load merge targets:", err);
       alert("Failed to load applications for merge");

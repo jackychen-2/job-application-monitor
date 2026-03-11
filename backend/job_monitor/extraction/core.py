@@ -88,10 +88,10 @@ def derive_predicted_email_category(
     is_trackable_job: bool,
 ) -> Optional[str]:
     """Derive category in one place for prod/eval consistency."""
-    if llm_result and llm_result.email_category:
-        return llm_result.email_category
     if is_trackable_job:
         return "job_application"
+    if llm_result and llm_result.email_category:
+        return llm_result.email_category
     return "not_job_related"
 
 
@@ -120,6 +120,34 @@ def _status_flags(status: str) -> tuple[bool, bool, bool]:
         "codility",
     }
     return is_recruiter_reach_out, is_onboarding, is_oa
+
+
+_STRONG_RULE_FALLBACK_HINTS: tuple[str, ...] = (
+    "application response",
+    "thank you for applying",
+    "received your application",
+    "we received your application",
+    "application received",
+    "application for",
+    "applied for",
+    "applied to",
+)
+
+
+def _has_strong_rule_fallback_signal(
+    *,
+    subject: str,
+    body: str,
+    sender: str,
+    validate_job_title: TitleValidator,
+) -> bool:
+    searchable = f"{subject}\n{body}".lower()
+    if not any(hint in searchable for hint in _STRONG_RULE_FALLBACK_HINTS):
+        return False
+
+    extracted_title = validate_job_title(extract_job_title(subject, body))
+    extracted_company = extract_company(subject, sender)
+    return bool(extracted_title) or (bool(extracted_company) and extracted_company != "Unknown")
 
 
 def run_core_classification_and_extraction(
@@ -187,6 +215,7 @@ def run_core_classification_and_extraction(
     is_recruiter_reach_out = False
     is_onboarding = False
     is_oa = False
+    rule_fallback_applied = False
     if llm_result is not None:
         is_recruiter_reach_out, is_onboarding, is_oa = _status_flags(llm_result.status)
         has_role_signal = bool((llm_result.base_title or llm_result.job_title).strip())
@@ -195,12 +224,23 @@ def run_core_classification_and_extraction(
         # one concrete job signal (role/company). Hard non-job rules still run first.
         recruiter_outreach_trackable = is_recruiter_reach_out and (has_role_signal or has_company_signal)
         pred_is_job = llm_result.is_job_application or recruiter_outreach_trackable
+        if not pred_is_job:
+            rule_based_is_job = is_job_related(subject, sender, body)
+            if rule_based_is_job and _has_strong_rule_fallback_signal(
+                subject=subject,
+                body=body,
+                sender=sender,
+                validate_job_title=validate_job_title,
+            ):
+                pred_is_job = True
+                rule_fallback_applied = True
         _emit(
             decision_logger,
             "classification",
             f"LLM result: is_job_application={llm_result.is_job_application} "
             f"email_category={llm_result.email_category!r} "
             f"recruiter_outreach_trackable={recruiter_outreach_trackable} "
+            f"rule_fallback_applied={rule_fallback_applied} "
             f"trackable={pred_is_job} "
             f"(confidence={llm_result.confidence:.2f})",
             "success" if pred_is_job else "warn",

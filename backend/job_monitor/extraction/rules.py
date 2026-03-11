@@ -289,10 +289,88 @@ def _clean_title(text: str) -> str:
         value,
         flags=re.IGNORECASE,
     ).strip()
-    return value
+    return normalize_job_title_candidate(value)
 
 
 _ROLE_KEYWORDS = {"engineer", "developer", "manager", "analyst", "scientist", "designer", "intern"}
+_ROLE_HINTS = _ROLE_KEYWORDS | {
+    "architect",
+    "associate",
+    "consultant",
+    "coordinator",
+    "director",
+    "lead",
+    "officer",
+    "principal",
+    "product manager",
+    "program manager",
+    "recruiter",
+    "researcher",
+    "specialist",
+    "technician",
+}
+_ASSESSMENT_ONLY_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        r"^(?:your\s+)?technical skills assessment(?:\s*\([^)]+\))?(?:\s+invitation)?$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:your\s+)?online assessment(?:\s*\([^)]+\))?(?:\s+invitation)?$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:your\s+)?coding challenge(?:\s*\([^)]+\))?(?:\s+invitation)?$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:your\s+)?(?:hackerrank|codesignal|codility)\b.*\b(?:assessment|challenge|test|invitation)\b.*$",
+        re.IGNORECASE,
+    ),
+]
+_ASSESSMENT_TITLE_SUFFIX_RE = re.compile(
+    r"^(?P<title>.+?)\s+"
+    r"(?:(?:technical\s+skills|online)\s+assessment|coding\s+challenge|assessment|challenge|test)"
+    r"(?:\s*\([^)]+\))?(?:\s+invitation)?$",
+    re.IGNORECASE,
+)
+
+
+def _has_role_hint(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(hint in lowered for hint in _ROLE_HINTS)
+
+
+def normalize_job_title_candidate(text: str) -> str:
+    """Normalize extracted title text and drop common OA/event names."""
+    value = _clean_text(text)
+    if not value:
+        return ""
+
+    value = re.sub(r"^(?:your|the)\s+", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s+invitation$", "", value, flags=re.IGNORECASE)
+    value = _clean_text(value)
+
+    matched = _ASSESSMENT_TITLE_SUFFIX_RE.match(value)
+    if matched:
+        prefix = _clean_text(matched.group("title"))
+        prefix = re.sub(r"^(?:hackerrank|codesignal|codility)\s+", "", prefix, flags=re.IGNORECASE)
+        prefix = re.sub(r"\s+(?:hackerrank|codesignal|codility)$", "", prefix, flags=re.IGNORECASE)
+        prefix = _clean_text(prefix)
+        if prefix and _has_role_hint(prefix):
+            return prefix
+
+    if any(pattern.match(value) for pattern in _ASSESSMENT_ONLY_PATTERNS):
+        return ""
+
+    lowered = value.lower()
+    if (
+        any(token in lowered for token in ("assessment", "challenge", "test", "invitation"))
+        and any(vendor in lowered for vendor in ("hackerrank", "codesignal", "codility"))
+        and not _has_role_hint(value)
+    ):
+        return ""
+
+    return value
 
 
 def extract_job_title(subject: str, body: str) -> str:

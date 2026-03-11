@@ -127,8 +127,43 @@ export async function listApplications(params: {
   return request<ApplicationListResponse>(`/applications?${qs}`);
 }
 
+export async function listAllApplications(params: {
+  status?: string;
+  company?: string;
+  sort_by?: string;
+  sort_order?: string;
+  maxItems?: number;
+} = {}): Promise<Application[]> {
+  const pageSize = 100;
+  const maxItems = params.maxItems ?? 1000;
+  const items: Application[] = [];
+  let page = 1;
+
+  while (items.length < maxItems) {
+    const response = await listApplications({
+      ...params,
+      page,
+      page_size: pageSize,
+    });
+    items.push(...response.items);
+
+    if (response.items.length < pageSize || items.length >= response.total) {
+      break;
+    }
+    page += 1;
+  }
+
+  return items.slice(0, maxItems);
+}
+
 export async function getApplication(id: number): Promise<ApplicationDetail> {
   return request<ApplicationDetail>(`/applications/${id}`);
+}
+
+export async function getMergeCandidates(excludeId?: number): Promise<Application[]> {
+  const qs = new URLSearchParams();
+  if (excludeId != null) qs.set("exclude_id", String(excludeId));
+  return request<Application[]>(`/applications/merge-candidates?${qs.toString()}`);
 }
 
 export async function createApplication(data: ApplicationCreate): Promise<Application> {

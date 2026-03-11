@@ -17,6 +17,7 @@ venv/
 
 # Environment
 .env
+backend/.env.vercel.prod
 
 # IDE
 .vscode/

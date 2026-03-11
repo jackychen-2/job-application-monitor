@@ -11,6 +11,7 @@ from fastapi import Response
 from job_monitor.config import AppConfig
 
 _SESSION_HINT_COOKIE = "job_monitor_session_hint"
+_OAUTH_STATE_COOKIE = "job_monitor_oauth_state"
 
 
 def utcnow() -> datetime:
@@ -54,6 +55,28 @@ def set_session_cookie(response: Response, token: str, config: AppConfig) -> Non
         path="/",
     )
     _set_session_hint_cookie(response, config)
+
+
+def set_oauth_state_cookie(response: Response, state: str, config: AppConfig) -> None:
+    response.set_cookie(
+        key=_OAUTH_STATE_COOKIE,
+        value=state,
+        max_age=10 * 60,
+        httponly=True,
+        secure=config.auth_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+
+
+def clear_oauth_state_cookie(response: Response, config: AppConfig) -> None:
+    response.delete_cookie(
+        key=_OAUTH_STATE_COOKIE,
+        path="/",
+        httponly=True,
+        secure=config.auth_cookie_secure,
+        samesite="lax",
+    )
 
 
 def clear_session_cookie(response: Response, config: AppConfig) -> None:

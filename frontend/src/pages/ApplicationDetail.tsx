@@ -4,7 +4,7 @@ import {
   deleteApplication,
   getApplication,
   getApplicationMergeEvents,
-  listApplications,
+  getMergeCandidates,
   mergeApplications,
   splitApplication,
   unmergeApplication,
@@ -148,8 +148,8 @@ export default function ApplicationDetail() {
   };
 
   const openMergeModal = async () => {
-    const appsData = await listApplications({ page_size: 100 });
-    setApplications(appsData.items.filter(a => a.id !== app?.id));
+    const appsData = await getMergeCandidates(app?.id);
+    setApplications(appsData);
     setShowMergeModal(true);
   };
 

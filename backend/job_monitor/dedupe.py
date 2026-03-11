@@ -33,6 +33,10 @@ _DASH_TRANSLATION = str.maketrans({
 })
 
 
+def _is_manual_source(source: str | None) -> bool:
+    return (source or "").strip().lower().startswith("manual")
+
+
 def _to_naive(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None
@@ -100,6 +104,23 @@ def _serialize_application_snapshot(app: Application) -> dict[str, str | None]:
         "created_at": _serialize_datetime(app.created_at),
         "updated_at": _serialize_datetime(app.updated_at),
     }
+
+
+def _refresh_application_email_summary(session: Session, app: Application) -> None:
+    latest = (
+        session.query(ProcessedEmail)
+        .filter(
+            ProcessedEmail.application_id == app.id,
+            ProcessedEmail.is_job_related == True,  # noqa: E712
+        )
+        .order_by(ProcessedEmail.email_date.desc())
+        .first()
+    )
+    if latest is None:
+        return
+    app.email_date = latest.email_date
+    app.email_subject = latest.subject
+    app.email_sender = latest.sender
 
 
 def merge_owner_duplicate_applications(
@@ -171,18 +192,42 @@ def merge_owner_duplicate_applications(
         if len(candidates) < 2:
             continue
 
-        keep = max(
-            candidates,
-            key=lambda app: (
-                email_counts.get(app.id, 0),
-                _to_naive(app.email_date) or datetime.min,
-                _to_naive(app.updated_at) or datetime.min,
-                app.id,
-            ),
-        )
+        manual_candidates = [app for app in candidates if _is_manual_source(app.source)]
+        if len(manual_candidates) > 1:
+            logger.info(
+                "application_duplicate_group_skipped_multiple_manual",
+                owner_user_id=owner_user_id,
+                journey_id=journey_id,
+                dedup_key=f"{key[0]}|{key[1]}|{key[2]}",
+                application_ids=[app.id for app in manual_candidates],
+            )
+            continue
+
+        if manual_candidates:
+            keep = manual_candidates[0]
+        else:
+            keep = max(
+                candidates,
+                key=lambda app: (
+                    email_counts.get(app.id, 0),
+                    _to_naive(app.email_date) or datetime.min,
+                    _to_naive(app.updated_at) or datetime.min,
+                    app.id,
+                ),
+            )
 
         for duplicate in candidates:
             if duplicate.id == keep.id:
+                continue
+            if _is_manual_source(duplicate.source):
+                logger.info(
+                    "application_duplicate_skipped_manual",
+                    owner_user_id=owner_user_id,
+                    journey_id=journey_id,
+                    kept_id=keep.id,
+                    skipped_manual_id=duplicate.id,
+                    dedup_key=f"{key[0]}|{key[1]}|{key[2]}",
+                )
                 continue
 
             source_email_query = session.query(ProcessedEmail.id).filter(
@@ -271,6 +316,8 @@ def merge_owner_duplicate_applications(
             if journey_id is not None:
                 sh_query = sh_query.filter(StatusHistory.journey_id == journey_id)
             sh_query.update({StatusHistory.application_id: keep.id}, synchronize_session=False)
+
+            _refresh_application_email_summary(session, keep)
 
             session.delete(duplicate)
             merged += 1

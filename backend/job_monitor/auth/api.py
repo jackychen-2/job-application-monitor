@@ -7,8 +7,21 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from job_monitor.auth.deps import get_current_user
-from job_monitor.auth.oauth_google import build_google_authorize_url, upsert_user_from_google_oauth
-from job_monitor.auth.security import clear_session_cookie, generate_session_token, hash_token, session_expiry, set_session_cookie, utcnow
+from job_monitor.auth.oauth_google import (
+    build_google_authorize_url,
+    generate_oauth_state,
+    upsert_user_from_google_oauth,
+)
+from job_monitor.auth.security import (
+    clear_oauth_state_cookie,
+    clear_session_cookie,
+    generate_session_token,
+    hash_token,
+    session_expiry,
+    set_oauth_state_cookie,
+    set_session_cookie,
+    utcnow,
+)
 from job_monitor.config import AppConfig, get_config
 from job_monitor.database import get_db
 from job_monitor.models import AuthSession, User
@@ -32,8 +45,11 @@ def google_start(config: AppConfig = Depends(get_config)):
             status_code=500,
             detail=f"Google OAuth is not configured. Missing: {', '.join(missing)}",
         )
-    auth_url = build_google_authorize_url(config)
-    return RedirectResponse(url=auth_url, status_code=302)
+    state = generate_oauth_state()
+    auth_url = build_google_authorize_url(config, state=state)
+    response = RedirectResponse(url=auth_url, status_code=302)
+    set_oauth_state_cookie(response, state, config)
+    return response
 
 
 @router.get("/google/callback")
@@ -44,8 +60,15 @@ def google_callback(
     db: Session = Depends(get_db),
     config: AppConfig = Depends(get_config),
 ):
+    expected_state = request.cookies.get("job_monitor_oauth_state")
     try:
-        user = upsert_user_from_google_oauth(code=code, state=state, session=db, config=config)
+        user = upsert_user_from_google_oauth(
+            code=code,
+            state=state,
+            expected_state=expected_state,
+            session=db,
+            config=config,
+        )
     except Exception as exc:  # pragma: no cover - external provider interactions
         raise HTTPException(status_code=400, detail=f"Google OAuth failed: {exc}") from exc
 
@@ -63,6 +86,7 @@ def google_callback(
     db.commit()
 
     response = RedirectResponse(url=config.frontend_url, status_code=302)
+    clear_oauth_state_cookie(response, config)
     set_session_cookie(response, raw_session_token, config)
     return response
 

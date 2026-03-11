@@ -129,7 +129,7 @@ def test_dedupe_only_within_selected_journey() -> None:
                     job_title="SWE",
                     req_id="R1",
                     status="已申请",
-                    source="manual",
+                    source="email",
                 ),
                 Application(
                     owner_user_id=user.id,
@@ -139,7 +139,7 @@ def test_dedupe_only_within_selected_journey() -> None:
                     job_title="SWE",
                     req_id="R1",
                     status="OA",
-                    source="manual",
+                    source="email",
                 ),
                 Application(
                     owner_user_id=user.id,

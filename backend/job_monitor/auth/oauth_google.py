@@ -21,9 +21,6 @@ _GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
-# state -> expiry (UTC)
-_oauth_state_store: dict[str, datetime] = {}
-
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -38,10 +35,11 @@ def _as_utc(dt: datetime | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def build_google_authorize_url(config: AppConfig) -> str:
-    state = secrets.token_urlsafe(24)
-    _oauth_state_store[state] = _utcnow() + timedelta(minutes=10)
+def generate_oauth_state() -> str:
+    return secrets.token_urlsafe(24)
 
+
+def build_google_authorize_url(config: AppConfig, state: str) -> str:
     params = {
         "client_id": config.google_client_id,
         "redirect_uri": config.google_redirect_uri,
@@ -55,11 +53,10 @@ def build_google_authorize_url(config: AppConfig) -> str:
     return f"{_GOOGLE_AUTH_URL}?{urlencode(params)}"
 
 
-def validate_oauth_state(state: str) -> bool:
-    expiry = _oauth_state_store.pop(state, None)
-    if expiry is None:
+def validate_oauth_state(state: str, expected_state: str | None) -> bool:
+    if not expected_state or not state:
         return False
-    return _utcnow() <= expiry
+    return secrets.compare_digest(state, expected_state)
 
 
 def _exchange_code_for_tokens(code: str, config: AppConfig) -> dict[str, Any]:
@@ -97,9 +94,15 @@ def _fetch_google_userinfo(access_token: str) -> dict[str, Any]:
     return data
 
 
-def upsert_user_from_google_oauth(code: str, state: str, session: Session, config: AppConfig) -> User:
+def upsert_user_from_google_oauth(
+    code: str,
+    state: str,
+    expected_state: str | None,
+    session: Session,
+    config: AppConfig,
+) -> User:
     """Validate OAuth callback and upsert user + Google account."""
-    if not validate_oauth_state(state):
+    if not validate_oauth_state(state, expected_state):
         raise RuntimeError("Invalid or expired OAuth state")
 
     token_payload = _exchange_code_for_tokens(code, config)

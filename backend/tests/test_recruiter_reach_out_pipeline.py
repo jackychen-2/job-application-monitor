@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from job_monitor.config import AppConfig
 from job_monitor.email.parser import ParsedEmailData
 from job_monitor.extraction.llm import LLMExtractionResult, LLMLinkConfirmResult
-from job_monitor.extraction.pipeline import ScanSummary, _process_single_email
+from job_monitor.extraction.pipeline import ScanSummary, _cleanup_orphaned_app, _process_single_email
 from job_monitor.extraction.rules import extract_status, split_title_and_req_id
 from job_monitor.models import Application, Base, ProcessedEmail
 
@@ -551,9 +551,43 @@ def test_req_id_match_but_title_mismatch_direct_links_without_llm() -> None:
         apps = session.query(Application).order_by(Application.id.asc()).all()
         assert len(apps) == 1
         assert apps[0].status == "OA"
+        assert apps[0].job_title == "Senior Backend Engineer"
 
         second = session.query(ProcessedEmail).filter(ProcessedEmail.uid == 63).one()
         assert second.link_method == "company_req_id"
+    finally:
+        session.close()
+
+
+def test_req_id_link_backfills_empty_existing_title() -> None:
+    session = _new_session()
+    try:
+        session.add(
+            Application(
+                company="Meta",
+                normalized_company="meta",
+                job_title="",
+                req_id="R0615432",
+                status="已申请",
+                source="email",
+            )
+        )
+        session.commit()
+
+        _process_single_email(
+            session=session,
+            config=_make_config(),
+            llm_provider=_StubLLMProviderNoConfirm(_make_follow_up_with_same_req_result()),
+            uid=63_1,
+            parsed=_make_parsed(63_1),
+            summary=ScanSummary(),
+        )
+        session.commit()
+
+        apps = session.query(Application).order_by(Application.id.asc()).all()
+        assert len(apps) == 1
+        assert apps[0].job_title == "Senior Backend Engineer"
+        assert apps[0].status == "OA"
     finally:
         session.close()
 
@@ -678,6 +712,50 @@ def test_same_message_id_relink_cleans_up_old_orphan_application() -> None:
         assert len(apps) == 1
         assert apps[0].company == "Stripe"
         assert emails[0].application_id == apps[0].id
+    finally:
+        session.close()
+
+
+def test_orphan_cleanup_preserves_manual_application() -> None:
+    session = _new_session()
+    try:
+        app = Application(
+            owner_user_id=1,
+            company="Amazon",
+            normalized_company="amazon",
+            job_title="Database Engineer",
+            req_id="3199345",
+            status="Recruiter Reach-out",
+            source="manual",
+        )
+        session.add(app)
+        session.flush()
+
+        session.add(
+            StatusHistory(
+                owner_user_id=1,
+                application_id=app.id,
+                old_status=None,
+                new_status="Recruiter Reach-out",
+                change_source="manual",
+            )
+        )
+        session.commit()
+
+        summary = ScanSummary()
+        _cleanup_orphaned_app(
+            session,
+            owner_user_id=1,
+            app_id=app.id,
+            exclude_uid=999,
+            summary=summary,
+        )
+        session.commit()
+
+        kept = session.get(Application, app.id)
+        assert kept is not None
+        assert kept.source == "manual"
+        assert summary.applications_deleted == 0
     finally:
         session.close()
 

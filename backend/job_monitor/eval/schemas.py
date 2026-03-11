@@ -118,7 +118,7 @@ CORRECTION_ERROR_TYPES: dict[str, list[dict]] = {
     "classification": [
         {"key": "false_pos_newsletter",     "label": "Newsletter / job alert",       "desc": "Email is a digest or newsletter, not an application confirmation"},
         {"key": "false_pos_verification",   "label": "Security / verification email","desc": "OTP, password reset, or identity verification"},
-        {"key": "false_pos_recruiter",      "label": "Recruiter cold outreach",      "desc": "Recruiter reach out — no application was submitted (should be 'not_job_related' with status 'Recruiter Reach-out')"},
+        {"key": "false_pos_recruiter",      "label": "Recruiter cold outreach",      "desc": "Recruiter reach out about a specific role should be tracked as 'job_application' with status 'Recruiter Reach-out'"},
         {"key": "false_neg_no_keywords",    "label": "Job email missing keywords",   "desc": "Genuine job email but lacked any signal keywords"},
         {"key": "recruiter_misclassified",  "label": "Recruiter reach out missed",   "desc": "Pipeline classified as job_application or not_job_related, but this is a recruiter reach out"},
     ],

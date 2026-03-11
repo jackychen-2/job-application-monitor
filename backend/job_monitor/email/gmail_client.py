@@ -6,6 +6,7 @@ import base64
 import email as email_lib
 import hashlib
 from datetime import datetime, timedelta
+from email.message import EmailMessage
 from email.message import Message
 from typing import Any, Optional
 
@@ -80,6 +81,74 @@ def is_inbox_message(label_ids: list[str] | None) -> bool:
 
 # Backward-compatible alias for older imports. Semantics are production filter rules.
 is_primary_inbox_message = is_inbox_message
+
+
+def _decode_gmail_body_data(data: str | None) -> str:
+    if not data:
+        return ""
+    padded = data + "=" * (-len(data) % 4)
+    try:
+        return base64.urlsafe_b64decode(padded.encode("utf-8")).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _extract_text_from_payload(payload: dict[str, Any] | None) -> tuple[str, str]:
+    if not isinstance(payload, dict):
+        return "", "plain"
+
+    mime_type = str(payload.get("mimeType") or "").lower()
+    body = payload.get("body") if isinstance(payload.get("body"), dict) else {}
+    data = body.get("data") if isinstance(body, dict) else None
+
+    if mime_type == "text/plain":
+        text = _decode_gmail_body_data(data)
+        if text:
+            return text, "plain"
+    if mime_type == "text/html":
+        text = _decode_gmail_body_data(data)
+        if text:
+            return text, "html"
+
+    plain_text = ""
+    html_text = ""
+    for part in payload.get("parts") or []:
+        text, subtype = _extract_text_from_payload(part if isinstance(part, dict) else None)
+        if not text:
+            continue
+        if subtype == "plain":
+            plain_text = f"{plain_text}\n{text}".strip() if plain_text else text
+        else:
+            html_text = f"{html_text}\n{text}".strip() if html_text else text
+
+    if plain_text:
+        return plain_text, "plain"
+    if html_text:
+        return html_text, "html"
+    return "", "plain"
+
+
+def _build_message_from_full_payload(data: dict[str, Any], gmail_message_id: str) -> Message | None:
+    payload = data.get("payload")
+    if not isinstance(payload, dict):
+        return None
+
+    msg = EmailMessage()
+    for header in payload.get("headers") or []:
+        if not isinstance(header, dict):
+            continue
+        name = str(header.get("name") or "").strip()
+        value = str(header.get("value") or "").strip()
+        if name and value:
+            msg[name] = value
+
+    body_text, subtype = _extract_text_from_payload(payload)
+    if body_text:
+        msg.set_content(body_text, subtype=subtype)
+    else:
+        logger.warning("gmail_message_full_missing_body", message_id=gmail_message_id)
+
+    return msg
 
 
 class GmailClient:
@@ -288,13 +357,15 @@ class GmailClient:
         raw = data.get("raw")
         if not raw:
             logger.warning("gmail_message_missing_raw", message_id=gmail_message_id)
+            full_data = self._get(f"/users/me/messages/{gmail_message_id}", params={"format": "full"})
+            fallback_msg = _build_message_from_full_payload(full_data, gmail_message_id)
             return (
                 _stable_uid_from_gmail_id(gmail_message_id),
-                None,
-                None,
+                fallback_msg,
+                str(full_data.get("threadId") or data.get("threadId") or "") or None,
                 gmail_message_id,
-                int(data.get("historyId") or 0),
-                label_ids,
+                int(full_data.get("historyId") or data.get("historyId") or 0),
+                [str(label_id) for label_id in (full_data.get("labelIds") or label_ids) if label_id],
             )
 
         padded = raw + "=" * (-len(raw) % 4)

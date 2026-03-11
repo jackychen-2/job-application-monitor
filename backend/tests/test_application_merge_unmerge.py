@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from job_monitor.api.applications import (
     list_application_merge_events,
     list_applications,
+    list_merge_candidates,
     merge_applications,
     split_application,
     unmerge_application,
@@ -143,6 +146,70 @@ def test_merge_then_unmerge_restores_source_and_locks_dedupe() -> None:
         session.close()
 
 
+def test_merge_refreshes_target_email_summary_to_latest_moved_email() -> None:
+    session = _new_session()
+    try:
+        target = Application(
+            company="Temu",
+            normalized_company="temu",
+            job_title="Data Engineer",
+            status="已申请",
+            source="email",
+            email_subject="Opportunity at Temu - Data Engineer",
+            email_sender="inmail-hit-reply@linkedin.com",
+        )
+        source = Application(
+            company="Temu",
+            normalized_company="temu",
+            job_title="Data Engineer",
+            status="已申请",
+            source="manual",
+        )
+        session.add_all([target, source])
+        session.flush()
+
+        session.add_all(
+            [
+                ProcessedEmail(
+                    uid=2001,
+                    email_account="candidate@example.com",
+                    email_folder="INBOX",
+                    gmail_message_id="temu-old@example.com",
+                    subject="Opportunity at Temu - Data Engineer",
+                    sender="inmail-hit-reply@linkedin.com",
+                    email_date=datetime(2026, 3, 10, 7, 35),
+                    is_job_related=True,
+                    application_id=target.id,
+                ),
+                ProcessedEmail(
+                    uid=2002,
+                    email_account="candidate@example.com",
+                    email_folder="INBOX",
+                    gmail_message_id="temu-new@example.com",
+                    subject="Your application was viewed by Temu",
+                    sender="jobs-noreply@linkedin.com",
+                    email_date=datetime(2026, 3, 10, 16, 54),
+                    is_job_related=True,
+                    application_id=source.id,
+                ),
+            ]
+        )
+        session.commit()
+
+        merge_applications(
+            target.id,
+            MergeApplicationRequest(source_application_id=source.id),
+            session,
+        )
+
+        refreshed = session.get(Application, target.id)
+        assert refreshed is not None
+        assert refreshed.email_subject == "Your application was viewed by Temu"
+        assert refreshed.email_sender == "jobs-noreply@linkedin.com"
+    finally:
+        session.close()
+
+
 def test_system_dedupe_merge_can_be_unmerged() -> None:
     session = _new_session()
     try:
@@ -244,6 +311,104 @@ def test_system_dedupe_merge_can_be_unmerged() -> None:
         assert restored_source.dedupe_locked is True
         assert restored.restored_email_count == 1
         assert restored.restored_history_count == 1
+    finally:
+        session.close()
+
+
+def test_system_dedupe_prefers_manual_app_and_merges_email_duplicate() -> None:
+    session = _new_session()
+    try:
+        manual_app = Application(
+            owner_user_id=1,
+            journey_id=10,
+            company="Visa",
+            normalized_company="visa",
+            job_title="Data Engineer",
+            req_id="R1",
+            status="已申请",
+            source="manual",
+        )
+        email_app = Application(
+            owner_user_id=1,
+            journey_id=10,
+            company="Visa",
+            normalized_company="visa",
+            job_title="Data Engineer",
+            req_id="R1",
+            status="OA",
+            source="email",
+        )
+        session.add_all([manual_app, email_app])
+        session.flush()
+
+        session.add(
+            ProcessedEmail(
+                owner_user_id=1,
+                journey_id=10,
+                uid=2100,
+                email_account="candidate@example.com",
+                email_folder="INBOX",
+                gmail_message_id="visa-oa@example.com",
+                subject="Visa OA",
+                sender="jobs@visa.com",
+                is_job_related=True,
+                application_id=email_app.id,
+            )
+        )
+        session.commit()
+
+        merged = merge_owner_duplicate_applications(session, owner_user_id=1, journey_id=10)
+        session.commit()
+
+        assert merged == 1
+        apps = session.query(Application).order_by(Application.id.asc()).all()
+        assert len(apps) == 1
+        assert apps[0].id == manual_app.id
+        assert apps[0].source == "manual"
+        assert (
+            session.query(ProcessedEmail)
+            .filter(ProcessedEmail.application_id == manual_app.id)
+            .count()
+            == 1
+        )
+    finally:
+        session.close()
+
+
+def test_system_dedupe_skips_multiple_manual_duplicates() -> None:
+    session = _new_session()
+    try:
+        session.add_all(
+            [
+                Application(
+                    owner_user_id=1,
+                    journey_id=10,
+                    company="Meta",
+                    normalized_company="meta",
+                    job_title="SWE",
+                    req_id="R1",
+                    status="已申请",
+                    source="manual",
+                ),
+                Application(
+                    owner_user_id=1,
+                    journey_id=10,
+                    company="Meta\u200b",
+                    normalized_company="meta",
+                    job_title="SWE",
+                    req_id="R1",
+                    status="OA",
+                    source="manual_split",
+                ),
+            ]
+        )
+        session.commit()
+
+        merged = merge_owner_duplicate_applications(session, owner_user_id=1, journey_id=10)
+        session.commit()
+
+        assert merged == 0
+        assert session.query(Application).filter(Application.owner_user_id == 1).count() == 2
     finally:
         session.close()
 
@@ -382,6 +547,33 @@ def test_list_applications_active_filter_excludes_rejected_and_unknown() -> None
 
         assert result.total == 2
         assert {item.status for item in result.items} == {"已申请", "面试"}
+    finally:
+        session.close()
+
+
+def test_list_merge_candidates_excludes_target_and_includes_manual_apps() -> None:
+    session = _new_session()
+    try:
+        target = Application(
+            company="Amazon",
+            normalized_company="amazon",
+            status="Recruiter Reach-out",
+            source="email",
+        )
+        manual = Application(
+            company="Manual Placeholder",
+            normalized_company="manual placeholder",
+            status="已申请",
+            source="manual",
+        )
+        session.add_all([target, manual])
+        session.commit()
+
+        result = list_merge_candidates(exclude_id=target.id, db=session)
+
+        assert [item.id for item in result] == [manual.id]
+        assert result[0].company == "Manual Placeholder"
+        assert result[0].source == "manual"
     finally:
         session.close()
 

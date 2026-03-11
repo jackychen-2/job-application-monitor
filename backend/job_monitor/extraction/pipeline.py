@@ -24,7 +24,6 @@ from sqlalchemy.orm import Session
 
 from job_monitor.config import AppConfig
 from job_monitor.dedupe import merge_owner_duplicate_applications
-from job_monitor.email.classifier import detect_non_job_reason, is_job_related
 from job_monitor.email.gmail_client import (
     GmailClient,
     GmailHistoryExpiredError,
@@ -32,25 +31,22 @@ from job_monitor.email.gmail_client import (
     is_inbox_message,
 )
 from job_monitor.email.parser import ParsedEmailData, parse_email_message
+from job_monitor.extraction.core import run_core_classification_and_extraction
 from job_monitor.extraction.llm import (
     LLMExtractionResult,
     LLMProvider,
     create_llm_provider,
-    extract_with_timeout,
 )
 from job_monitor.extraction.rules import (
-    extract_company,
     extract_job_req_id,
     extract_job_title,
-    extract_status,
+    normalize_job_title_candidate,
     normalize_req_id,
     split_title_and_req_id,
 )
 from job_monitor.linking.resolver import (
-    is_message_already_processed,
     normalize_company,
     resolve_by_company,
-    LinkResult,
 )
 
 # Garbage titles that should be replaced with empty string
@@ -61,9 +57,13 @@ _INVALID_TITLES = {
 }
 
 
+def _is_manual_source(source: str | None) -> bool:
+    return (source or "").strip().lower().startswith("manual")
+
+
 def _validate_job_title(title: str) -> str:
     """Return the title if valid, or empty string for garbage values."""
-    cleaned = title.strip()
+    cleaned = normalize_job_title_candidate(title)
     if not cleaned:
         return ""
     if len(cleaned) < 3:
@@ -77,6 +77,25 @@ def _validate_job_title(title: str) -> str:
     if ". " in cleaned or cleaned[0].islower():
         return ""
     return cleaned
+
+
+def _normalize_stored_title_for_rescan(existing_title: str | None, incoming_title: str | None) -> str | None:
+    """Decide whether a rescan should repair an already stored title.
+
+    We only clear/replace legacy titles that normalize to empty, such as
+    assessment event names accidentally stored as job titles.
+    """
+    current_raw = (existing_title or "").strip()
+    if not current_raw:
+        cleaned_incoming = _validate_job_title(incoming_title or "")
+        return cleaned_incoming or None
+
+    current_clean = _validate_job_title(current_raw)
+    if current_clean:
+        return None
+
+    cleaned_incoming = _validate_job_title(incoming_title or "")
+    return cleaned_incoming
 
 
 def _extract_title_and_req_id(
@@ -244,7 +263,7 @@ def _get_or_create_application(
             existing.company = company
             existing.normalized_company = normalized
             changed_existing = True
-        if job_title and existing.job_title != job_title:
+        if job_title and not (existing.job_title or "").strip():
             existing.job_title = job_title
             changed_existing = True
         if req_id and existing.req_id != req_id:
@@ -367,6 +386,16 @@ def _cleanup_orphaned_app(
     if other_refs == 0:
         app = session.query(Application).get(app_id)
         if app:
+            if _is_manual_source(app.source):
+                logger.info(
+                    "application_orphan_cleanup_skipped_manual",
+                    app_id=app_id,
+                    uid=exclude_uid,
+                    company=app.company,
+                    job_title=app.job_title,
+                    source=app.source,
+                )
+                return
             session.query(StatusHistory).filter(
                 StatusHistory.application_id == app_id
             ).delete()
@@ -556,93 +585,88 @@ def _process_single_email(
     link_method: str = "new"
     needs_review: bool = False
 
-    llm_result: Optional[LLMExtractionResult] = None
-    llm_used = False
-    non_job_reason = detect_non_job_reason(sender, subject, body)
+    # ── Step 2~4: Shared classification + extraction ─────
+    logger.info("core_extracting", uid=uid)
+    core_prediction = run_core_classification_and_extraction(
+        sender=sender,
+        subject=subject,
+        body=body,
+        llm_provider=llm_provider,
+        llm_timeout_sec=config.llm_timeout_sec,
+        validate_job_title=_validate_job_title,
+    )
+    classification = core_prediction.classification
+    llm_result = classification.llm_result
+    llm_used = classification.llm_used
+    non_job_reason = classification.non_job_reason
 
-    # ── Step 2: LLM classification + extraction ──────────
-    if llm_provider is not None:
-        llm_used = True
-        try:
-            logger.info("llm_extracting", uid=uid)
-            llm_result = extract_with_timeout(
-                llm_provider, sender, subject, body, timeout_sec=config.llm_timeout_sec
-            )
-            summary.total_prompt_tokens += llm_result.prompt_tokens
-            summary.total_completion_tokens += llm_result.completion_tokens
-            summary.total_estimated_cost += llm_result.estimated_cost_usd
-        except Exception as exc:
-            logger.warning("llm_fallback", uid=uid, error=str(exc))
-            llm_result = None
-
-    # ── Step 3: Determine if job-related ──────────────────
     if llm_result is not None:
-        if not llm_result.is_job_application:
-            logger.info("email_skipped_llm", uid=uid)
-            summary.skipped_not_job_related += 1
-            if non_job_reason:
-                _increment_count(summary.non_job_reason_counts, non_job_reason)
-            _cleanup_orphaned_app(
-                session,
-                owner_user_id=owner_user_id,
-                app_id=previous_app_id,
-                exclude_uid=uid,
-                summary=summary,
-            )
-            _record_processed(
-                session, uid, mailbox_email, mailbox_folder, owner_user_id, parsed, is_job=False, app_id=None, llm_used=True,
-                llm_result=llm_result,
-                gmail_message_id=gmail_message_id,
-            )
-            return
-    else:
-        if not is_job_related(subject, sender):
-            if llm_used:
-                logger.info("email_skipped_rules_fallback", uid=uid)
-            else:
-                logger.info("email_skipped_rules", uid=uid)
-            summary.skipped_not_job_related += 1
-            if non_job_reason:
-                _increment_count(summary.non_job_reason_counts, non_job_reason)
-            _cleanup_orphaned_app(
-                session,
-                owner_user_id=owner_user_id,
-                app_id=previous_app_id,
-                exclude_uid=uid,
-                summary=summary,
-            )
-            _record_processed(
-                session, uid, mailbox_email, mailbox_folder, owner_user_id, parsed, is_job=False, app_id=None, llm_used=False,
-                gmail_message_id=gmail_message_id,
-            )
-            return
+        summary.total_prompt_tokens += llm_result.prompt_tokens
+        summary.total_completion_tokens += llm_result.completion_tokens
+        summary.total_estimated_cost += llm_result.estimated_cost_usd
 
-    # ── Step 4: Extract fields ────────────────────────────
-    if llm_result is not None and llm_result.is_job_application:
-        company = llm_result.company or extract_company(subject, sender)
-        job_title, req_id = _extract_title_and_req_id(
-            subject,
-            body,
-            preferred_title=llm_result.job_title,
-            preferred_req_id=llm_result.req_id,
+    if not classification.is_trackable_job:
+        logger.info(
+            "email_skipped_not_trackable",
+            uid=uid,
+            non_job_reason=non_job_reason,
+            predicted_email_category=classification.predicted_email_category,
         )
-        # 如果 LLM 返回空或 "Unknown"，使用规则提取
-        llm_status = llm_result.status
-        if llm_status and llm_status.lower() != "unknown":
-            status = llm_status
-        else:
-            status = extract_status(subject, body)
-    else:
-        company = extract_company(subject, sender)
-        job_title, req_id = _extract_title_and_req_id(
-            subject,
-            body,
-            preferred_title=extract_job_title(subject, body),
+        summary.skipped_not_job_related += 1
+        if non_job_reason:
+            _increment_count(summary.non_job_reason_counts, non_job_reason)
+        _cleanup_orphaned_app(
+            session,
+            owner_user_id=owner_user_id,
+            app_id=previous_app_id,
+            exclude_uid=uid,
+            summary=summary,
         )
-        status = extract_status(subject, body)
+        _record_processed(
+            session,
+            uid,
+            mailbox_email,
+            mailbox_folder,
+            owner_user_id,
+            parsed,
+            is_job=False,
+            app_id=None,
+            llm_used=llm_used,
+            llm_result=llm_result,
+            gmail_message_id=gmail_message_id,
+        )
+        return
 
-    if not company:
-        company = "Unknown"
+    extraction = core_prediction.extraction
+    if extraction is None:
+        logger.warning("trackable_email_missing_extraction", uid=uid)
+        summary.skipped_not_job_related += 1
+        _cleanup_orphaned_app(
+            session,
+            owner_user_id=owner_user_id,
+            app_id=previous_app_id,
+            exclude_uid=uid,
+            summary=summary,
+        )
+        _record_processed(
+            session,
+            uid,
+            mailbox_email,
+            mailbox_folder,
+            owner_user_id,
+            parsed,
+            is_job=False,
+            app_id=None,
+            llm_used=llm_used,
+            llm_result=llm_result,
+            gmail_message_id=gmail_message_id,
+        )
+        return
+
+    company = extraction.company or "Unknown"
+    job_title = extraction.job_title
+    req_id = extraction.req_id
+    status = extraction.status
 
     # ── Step 4.5: Company-based linking (fallback) ────────
     # If thread linking didn't find a match, try company name
@@ -693,7 +717,7 @@ def _process_single_email(
                 app.company = company
                 app.normalized_company = normalize_company(company)
                 changed = True
-            if job_title and app.job_title != job_title:
+            if job_title and not (app.job_title or "").strip():
                 app.job_title = job_title
                 changed = True
             if req_id and app.req_id != req_id:

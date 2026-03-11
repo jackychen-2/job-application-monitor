@@ -70,6 +70,34 @@ def _make_recruiter_result() -> LLMExtractionResult:
     )
 
 
+def _make_aws_recruiter_response_result() -> LLMExtractionResult:
+    return LLMExtractionResult(
+        is_job_application=False,
+        email_category="not_job_related",
+        company="Amazon",
+        job_title="Database Engineer - 3199345",
+        base_title="Database Engineer",
+        req_id="3199345",
+        title_with_req_id="Database Engineer - 3199345",
+        status="Recruiter Reach-out",
+        confidence=0.95,
+    )
+
+
+def _make_aws_false_negative_result() -> LLMExtractionResult:
+    return LLMExtractionResult(
+        is_job_application=False,
+        email_category="not_job_related",
+        company="Amazon",
+        job_title="Database Engineer - 3199345",
+        base_title="Database Engineer",
+        req_id="3199345",
+        title_with_req_id="Database Engineer - 3199345",
+        status="Unknown",
+        confidence=0.31,
+    )
+
+
 def _make_job_application_result() -> LLMExtractionResult:
     return LLMExtractionResult(
         is_job_application=True,
@@ -84,6 +112,31 @@ def _make_job_application_result() -> LLMExtractionResult:
     )
 
 
+def _make_oa_assessment_result(*, company: str = "Visa", job_title: str = "") -> LLMExtractionResult:
+    return LLMExtractionResult(
+        is_job_application=True,
+        email_category="job_application",
+        company=company,
+        job_title=job_title,
+        base_title=job_title,
+        req_id="",
+        title_with_req_id=job_title,
+        status="OA",
+        confidence=0.95,
+    )
+
+
+def test_validate_title_drops_assessment_only_phrase() -> None:
+    assert _validate_title("Technical Skills Assessment (Coding - Advanced)") == ""
+
+
+def test_validate_title_keeps_role_before_assessment_suffix() -> None:
+    assert (
+        _validate_title("Software Engineer Technical Skills Assessment (Coding - Advanced) Invitation")
+        == "Software Engineer"
+    )
+
+
 def test_core_llm_recruiter_outreach_is_trackable() -> None:
     prediction = run_core_classification_and_extraction(
         sender="recruiter@example.com",
@@ -95,7 +148,7 @@ def test_core_llm_recruiter_outreach_is_trackable() -> None:
     )
 
     assert prediction.classification.is_trackable_job is True
-    assert prediction.classification.predicted_email_category == "not_job_related"
+    assert prediction.classification.predicted_email_category == "job_application"
     assert prediction.classification.non_job_reason is None
     assert prediction.extraction is not None
     assert prediction.extraction.status == "Recruiter Reach-out"
@@ -153,6 +206,28 @@ def test_core_rule_fallback_extracts_fields() -> None:
     assert prediction.extraction is not None
     assert prediction.extraction.status == "已申请"
     assert prediction.extraction.company in {"Acme", "Unknown"}
+
+
+def test_core_strong_rule_fallback_overrides_llm_false_negative() -> None:
+    prediction = run_core_classification_and_extraction(
+        sender="VoTran, Anh <anhttran@amazon.com>",
+        subject="AWS Application Response - Database Engineer Job ID: 3199345 | East Palo Alto, CA (preferred) or Redmond, WA",
+        body=(
+            "Thank you for applying for the Database Engineer role on the Amazon "
+            "Redshift Team at Amazon! I'd love to set up some time to connect."
+        ),
+        llm_provider=_StubLLMProvider(_make_aws_false_negative_result()),
+        llm_timeout_sec=3,
+        validate_job_title=_validate_title,
+    )
+
+    assert prediction.classification.is_trackable_job is True
+    assert prediction.classification.predicted_email_category == "job_application"
+    assert prediction.extraction is not None
+    assert prediction.extraction.company == "Amazon"
+    assert prediction.extraction.job_title == "Database Engineer"
+    assert prediction.extraction.req_id == "3199345"
+    assert prediction.extraction.status == "已申请"
 
 
 def test_eval_runner_persists_non_job_reason_and_decision_log(monkeypatch) -> None:
@@ -215,6 +290,9 @@ def test_pipeline_and_eval_share_non_job_classification(monkeypatch) -> None:
             session=session,
             config=config,
             llm_provider=_StubLLMProvider(_make_job_application_result()),
+            owner_user_id=1,
+            mailbox_email="candidate@example.com",
+            mailbox_folder="INBOX",
             uid=1,
             parsed=parsed,
             summary=ScanSummary(),
@@ -293,6 +371,164 @@ def test_pipeline_records_non_job_skip_reason_in_summary() -> None:
         assert summary.emails_matched == 0
         assert summary.skipped_not_job_related == 1
         assert summary.non_job_reason_counts == {"social_invitation": 1}
+    finally:
+        session.close()
+
+
+def test_pipeline_tracks_aws_recruiter_response_as_recruiter_reach_out() -> None:
+    session = _new_session()
+    try:
+        parsed = ParsedEmailData(
+            subject="AWS Application Response - Database Engineer Job ID: 3199345 | East Palo Alto, CA (preferred) or Redmond, WA",
+            sender="VoTran, Anh <anhttran@amazon.com>",
+            date_raw="Tue, 10 Mar 2026 11:56:00 -0700",
+            date_pt="2026-03-10 11:56:00 PDT",
+            date_dt=datetime(2026, 3, 10, 18, 56, tzinfo=timezone.utc),
+            body_text=(
+                "Hi Guangyuan,\n\n"
+                "Thank you for applying for the Database Engineer role on the Amazon "
+                "Redshift Team at Amazon! I'd love to set up some time to connect.\n\n"
+                "Can you briefly describe your experience with relational and/or "
+                "cloud-based database systems?\n"
+            ),
+            message_id="aws-msg-1@example.com",
+            gmail_thread_id="aws-thread-1",
+        )
+        summary = ScanSummary()
+
+        _process_single_email(
+            session=session,
+            config=_make_config(llm_enabled=True),
+            llm_provider=_StubLLMProvider(_make_aws_recruiter_response_result()),
+            owner_user_id=1,
+            mailbox_email="candidate@example.com",
+            mailbox_folder="INBOX",
+            uid=1,
+            parsed=parsed,
+            summary=summary,
+        )
+        session.commit()
+
+        app = session.query(Application).one()
+        processed = session.query(ProcessedEmail).one()
+
+        assert app.company == "Amazon"
+        assert app.job_title == "Database Engineer"
+        assert app.req_id == "3199345"
+        assert app.status == "Recruiter Reach-out"
+        assert processed.is_job_related is True
+        assert processed.application_id == app.id
+        assert summary.emails_matched == 1
+        assert summary.skipped_not_job_related == 0
+    finally:
+        session.close()
+
+
+def test_pipeline_strong_rule_fallback_tracks_aws_false_negative() -> None:
+    session = _new_session()
+    try:
+        parsed = ParsedEmailData(
+            subject="AWS Application Response - Database Engineer Job ID: 3199345 | East Palo Alto, CA (preferred) or Redmond, WA",
+            sender="VoTran, Anh <anhttran@amazon.com>",
+            date_raw="Tue, 10 Mar 2026 11:56:00 -0700",
+            date_pt="2026-03-10 11:56:00 PDT",
+            date_dt=datetime(2026, 3, 10, 18, 56, tzinfo=timezone.utc),
+            body_text=(
+                "Hi Guangyuan,\n\n"
+                "Thank you for applying for the Database Engineer role on the Amazon "
+                "Redshift Team at Amazon! I'd love to set up some time to connect.\n"
+            ),
+            message_id="aws-msg-2@example.com",
+            gmail_thread_id="aws-thread-2",
+        )
+        summary = ScanSummary()
+
+        _process_single_email(
+            session=session,
+            config=_make_config(llm_enabled=True),
+            llm_provider=_StubLLMProvider(_make_aws_false_negative_result()),
+            owner_user_id=1,
+            mailbox_email="candidate@example.com",
+            mailbox_folder="INBOX",
+            uid=2,
+            parsed=parsed,
+            summary=summary,
+        )
+        session.commit()
+
+        app = session.query(Application).one()
+
+        assert app.company == "Amazon"
+        assert app.job_title == "Database Engineer"
+        assert app.req_id == "3199345"
+        assert app.status == "已申请"
+        assert summary.emails_matched == 1
+        assert summary.skipped_not_job_related == 0
+    finally:
+        session.close()
+
+
+def test_pipeline_does_not_backfill_assessment_name_as_job_title() -> None:
+    session = _new_session()
+    try:
+        summary = ScanSummary()
+
+        applied_email = ParsedEmailData(
+            subject="Visa has received your application",
+            sender="Visa <notification@smartrecruiters.com>",
+            date_raw="Mon, 2 Mar 2026 06:08:00 -0800",
+            date_pt="2026-03-02 06:08:00 PST",
+            date_dt=datetime(2026, 3, 2, 14, 8, tzinfo=timezone.utc),
+            body_text="Thank you for applying. We will review your application.",
+            message_id="visa-msg-1@example.com",
+            gmail_thread_id="visa-thread-1",
+        )
+        oa_email = ParsedEmailData(
+            subject="Your HackerRank Visa Technical Skills Assessment (Coding - Advanced) Invitation",
+            sender="Visa Talent Team <support@hackerrankforwork.com>",
+            date_raw="Mon, 9 Mar 2026 04:38:00 -0700",
+            date_pt="2026-03-09 04:38:00 PDT",
+            date_dt=datetime(2026, 3, 9, 11, 38, tzinfo=timezone.utc),
+            body_text="Please complete the HackerRank assessment to continue.",
+            message_id="visa-msg-2@example.com",
+            gmail_thread_id="visa-thread-2",
+        )
+
+        _process_single_email(
+            session=session,
+            config=_make_config(llm_enabled=True),
+            llm_provider=_StubLLMProvider(_make_oa_assessment_result(company="Visa", job_title="")),
+            owner_user_id=1,
+            mailbox_email="candidate@example.com",
+            mailbox_folder="INBOX",
+            uid=1,
+            parsed=applied_email,
+            summary=summary,
+        )
+        _process_single_email(
+            session=session,
+            config=_make_config(llm_enabled=True),
+            llm_provider=_StubLLMProvider(
+                _make_oa_assessment_result(
+                    company="Visa",
+                    job_title="Technical Skills Assessment (Coding - Advanced)",
+                )
+            ),
+            owner_user_id=1,
+            mailbox_email="candidate@example.com",
+            mailbox_folder="INBOX",
+            uid=2,
+            parsed=oa_email,
+            summary=summary,
+        )
+        session.commit()
+
+        apps = session.query(Application).all()
+        assert len(apps) == 1
+        assert apps[0].company == "Visa"
+        assert apps[0].job_title == ""
+        assert apps[0].status == "OA"
+        assert apps[0].email_subject == oa_email.subject
     finally:
         session.close()
 

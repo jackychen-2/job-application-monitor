@@ -113,6 +113,29 @@ def _refresh_application_email_summary(db: Session, app: Application) -> None:
     app.email_sender = latest.sender
 
 
+def _serialize_applications_with_email_counts(db: Session, apps: list[Application]) -> list[ApplicationOut]:
+    app_ids = [app.id for app in apps]
+    email_counts: dict[int, int] = {}
+    if app_ids:
+        counts = (
+            db.query(ProcessedEmail.application_id, func.count(ProcessedEmail.id))
+            .filter(
+                ProcessedEmail.application_id.in_(app_ids),
+                ProcessedEmail.is_job_related == True,  # noqa: E712
+            )
+            .group_by(ProcessedEmail.application_id)
+            .all()
+        )
+        email_counts = {app_id: count for app_id, count in counts}
+
+    items_out: list[ApplicationOut] = []
+    for app in apps:
+        app_dict = ApplicationOut.model_validate(app).model_dump()
+        app_dict["email_count"] = email_counts.get(app.id, 0)
+        items_out.append(ApplicationOut(**app_dict))
+    return items_out
+
+
 @router.get("", response_model=ApplicationListOut)
 def list_applications(
     status: Optional[str] = Query(None, description="Filter by status"),
@@ -154,34 +177,29 @@ def list_applications(
     offset = (page - 1) * page_size
     items = query.offset(offset).limit(page_size).all()
 
-    # Get email counts for each application (for expandable rows)
-    app_ids = [app.id for app in items]
-    email_counts = {}
-    if app_ids:
-        counts = (
-            db.query(ProcessedEmail.application_id, func.count(ProcessedEmail.id))
-            .filter(
-                ProcessedEmail.application_id.in_(app_ids),
-                ProcessedEmail.is_job_related == True,  # noqa: E712
-            )
-            .group_by(ProcessedEmail.application_id)
-            .all()
-        )
-        email_counts = {app_id: count for app_id, count in counts}
-
-    # Build response with email_count
-    items_out = []
-    for app in items:
-        app_dict = ApplicationOut.model_validate(app).model_dump()
-        app_dict["email_count"] = email_counts.get(app.id, 0)
-        items_out.append(ApplicationOut(**app_dict))
-
     return ApplicationListOut(
-        items=items_out,
+        items=_serialize_applications_with_email_counts(db, items),
         total=total,
         page=page,
         page_size=page_size,
     )
+
+
+@router.get("/merge-candidates", response_model=list[ApplicationOut])
+def list_merge_candidates(
+    exclude_id: Optional[int] = Query(None, description="Optional application id to exclude from merge choices"),
+    db: Session = Depends(get_owner_scoped_db),
+) -> list[ApplicationOut]:
+    """Return all applications in the active scope for merge dropdowns."""
+    query = db.query(Application)
+    if exclude_id is not None:
+        query = query.filter(Application.id != exclude_id)
+
+    items = query.order_by(
+        func.coalesce(Application.email_date, Application.created_at).desc()
+    ).all()
+    logger.info("merge_candidates_listed", exclude_id=exclude_id, count=len(items))
+    return _serialize_applications_with_email_counts(db, items)
 
 
 @router.get("/{application_id}", response_model=ApplicationDetailOut)
@@ -419,6 +437,7 @@ def merge_applications(
 
     # Delete the source application
     target.dedupe_locked = False
+    _refresh_application_email_summary(db, target)
     db.delete(source)
     db.commit()
     db.refresh(target)
@@ -546,6 +565,8 @@ def unmerge_application(
     target.dedupe_locked = True
     merge_event.undone_at = datetime.now(timezone.utc)
     merge_event.undone_source_application_id = restored_source.id
+    _refresh_application_email_summary(db, target)
+    _refresh_application_email_summary(db, restored_source)
     db.commit()
 
     logger.info(
