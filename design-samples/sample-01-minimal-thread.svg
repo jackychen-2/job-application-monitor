@@ -1,0 +1,40 @@
+<svg width="1400" height="900" viewBox="0 0 1400 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1400" height="900" fill="#F6F4EF"/>
+  <rect x="72" y="72" width="1256" height="756" rx="40" fill="#FBFAF7" stroke="#E3DED2"/>
+  <text x="130" y="170" fill="#162032" font-size="28" font-family="SF Pro Display, Inter, Arial, sans-serif" font-weight="600">Sample 01</text>
+  <text x="130" y="222" fill="#162032" font-size="84" font-family="SF Pro Display, Inter, Arial, sans-serif" font-weight="700" letter-spacing="-2">OfferThread</text>
+  <text x="130" y="278" fill="#5B6472" font-size="30" font-family="SF Pro Text, Inter, Arial, sans-serif" font-weight="500">Quiet, premium, Apple-like restraint with one precise accent.</text>
+  <g transform="translate(132 360)">
+    <rect x="0" y="0" width="190" height="190" rx="42" fill="#162032"/>
+    <path d="M44 96C44 74 61 58 83 58H87C108 58 126 74 126 96C126 116 112 124 101 132C90 140 82 149 82 165C82 183 97 198 115 198H122" stroke="#D0FF71" stroke-width="10" stroke-linecap="round"/>
+    <path d="M110 54H143L160 71V143C160 160 146 174 129 174H110C93 174 79 160 79 143V85C79 68 93 54 110 54Z" fill="#F7F8FB"/>
+    <path d="M143 54L160 71H143V54Z" fill="#D8DFEC"/>
+    <path d="M101 101H136" stroke="#162032" stroke-width="7" stroke-linecap="round"/>
+    <path d="M101 119H136" stroke="#162032" stroke-width="7" stroke-linecap="round" opacity="0.45"/>
+  </g>
+  <g transform="translate(400 404)">
+    <path d="M16 82C16 49 42 24 75 24H85C117 24 144 49 144 82C144 112 124 124 106 136C88 147 74 159 74 183C74 211 96 234 124 234H136" stroke="#A7CE2D" stroke-width="10" stroke-linecap="round"/>
+    <circle cx="16" cy="82" r="10" fill="#A7CE2D"/>
+    <circle cx="74" cy="183" r="10" fill="#A7CE2D"/>
+    <circle cx="136" cy="234" r="10" fill="#A7CE2D"/>
+    <path d="M124 8H196L228 40V170C228 205 199 234 164 234H124C89 234 60 205 60 170V72C60 37 89 8 124 8Z" fill="#162032"/>
+    <path d="M196 8L228 40H196V8Z" fill="#2A3650"/>
+    <path d="M104 91H182" stroke="#F8FAFE" stroke-width="10" stroke-linecap="round"/>
+    <path d="M104 120H182" stroke="#F8FAFE" stroke-width="10" stroke-linecap="round" opacity="0.55"/>
+    <path d="M114 153L131 170L170 131" stroke="#D0FF71" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <g transform="translate(936 180)">
+    <rect x="0" y="0" width="262" height="262" rx="56" fill="#162032"/>
+    <path d="M52 130C52 100 76 76 106 76H110C140 76 164 100 164 130C164 156 147 167 132 177C117 186 106 195 106 216C106 241 126 262 151 262H160" stroke="#D0FF71" stroke-width="12" stroke-linecap="round"/>
+    <path d="M142 72H190L213 95V180C213 204 193 224 169 224H142C118 224 98 204 98 180V116C98 92 118 72 142 72Z" fill="#F7F8FB"/>
+    <path d="M190 72L213 95H190V72Z" fill="#D8DFEC"/>
+  </g>
+  <text x="936" y="488" fill="#162032" font-size="28" font-family="SF Pro Display, Inter, Arial, sans-serif" font-weight="600">Tab icon</text>
+  <text x="936" y="528" fill="#5B6472" font-size="24" font-family="SF Pro Text, Inter, Arial, sans-serif" font-weight="500">Single accent, no extra detail.</text>
+  <g transform="translate(130 644)">
+    <rect x="0" y="0" width="146" height="46" rx="23" fill="#162032"/>
+    <rect x="164" y="0" width="146" height="46" rx="23" fill="#A7CE2D"/>
+    <rect x="328" y="0" width="146" height="46" rx="23" fill="#E3DED2"/>
+  </g>
+  <text x="130" y="744" fill="#5B6472" font-size="24" font-family="SF Pro Text, Inter, Arial, sans-serif" font-weight="500">Palette: graphite, electric lime, warm stone</text>
+</svg>

@@ -1,15 +1,14 @@
-"""Scan trigger and status endpoints."""
+"""Scan job endpoints, SSE streaming, and background job continuation."""
+
+# ruff: noqa: B008
 
 from __future__ import annotations
 
 import asyncio
 import json
-import queue
-import threading
-from typing import AsyncGenerator, Optional
+from datetime import datetime, timezone
 
-import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -17,201 +16,415 @@ from job_monitor.auth.deps import get_current_user
 from job_monitor.auth.oauth_google import get_valid_google_access_token
 from job_monitor.config import AppConfig, get_config
 from job_monitor.database import get_db, get_session_factory
-from job_monitor.extraction.pipeline import (
-    ProgressInfo,
-    ScanSummary,
-    run_date_range_scan,
-    run_incremental_scan,
-    run_scan,
+from job_monitor.models import ScanJob, ScanState, User
+from job_monitor.scan_jobs import (
+    ACTIVE_SCAN_JOB_STATUSES,
+    MAX_REQUESTED_MAX_EMAILS,
+    SCAN_JOB_MODES,
+    TERMINAL_SCAN_JOB_STATUSES,
+    create_scan_job as create_scan_job_record,
+    dispatch_scan_job_continuation,
+    get_active_scan_job,
+    get_latest_terminal_scan_job,
+    get_scan_job,
+    process_scan_job,
+    request_scan_job_cancel,
+    run_scan_job_step,
+    scan_job_to_scan_result,
+    serialize_scan_job,
 )
-from job_monitor.models import ScanState, User
-from job_monitor.schemas import ScanResultOut, ScanStateOut
+from job_monitor.schemas import (
+    CreateScanJobOut,
+    ScanJobOut,
+    ScanJobStepOut,
+    ScanResultOut,
+    ScanStateOut,
+)
 
-logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/scan", tags=["scan"])
 
-# In-memory state keyed by (user_id, journey_id)
-_user_scan_locks: dict[tuple[int, int], threading.Lock] = {}
-_user_scan_running: dict[tuple[int, int], bool] = {}
-_user_scan_cancel_requested: dict[tuple[int, int], bool] = {}
-_user_scan_last_result: dict[tuple[int, int], ScanResultOut] = {}
-_user_scan_progress: dict[tuple[int, int], dict] = {}
-
-# SSE-specific in-memory state keyed by (user_id, journey_id)
-_user_sse_scan_running: dict[tuple[int, int], bool] = {}
-_user_sse_cancel_requested: dict[tuple[int, int], bool] = {}
-
-_state_lock = threading.Lock()
+SSE_POLL_INTERVAL_SECONDS = 1.0
 
 
-def _scan_scope(user: User) -> tuple[int, int]:
-    if user.active_journey_id is None:
+def _require_active_journey(current_user: User) -> int:
+    if current_user.active_journey_id is None:
         raise HTTPException(status_code=400, detail="No active journey")
-    return (user.id, int(user.active_journey_id))
+    return int(current_user.active_journey_id)
 
 
-def _get_scan_lock(scope: tuple[int, int]) -> threading.Lock:
-    with _state_lock:
-        return _user_scan_locks.setdefault(scope, threading.Lock())
+def _parse_date_input(value: str | None, field_name: str) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    try:
+        datetime.strptime(normalized, "%Y-%m-%d")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must be YYYY-MM-DD",
+        ) from exc
+    return normalized
 
 
-def _get_sse_scan_lock(scope: tuple[int, int]) -> threading.Lock:
-    return _get_scan_lock(scope)
+def _resolve_scan_mode(
+    *,
+    mode: str | None,
+    incremental: bool | None = None,
+    scan_all: bool = False,
+    since_date: str | None = None,
+    before_date: str | None = None,
+) -> str:
+    normalized_mode = (mode or "").strip().lower() or None
+    if normalized_mode is None:
+        if since_date or before_date:
+            normalized_mode = "date_range"
+        elif scan_all or incremental is False:
+            normalized_mode = "full"
+        else:
+            normalized_mode = "incremental"
+
+    if normalized_mode not in SCAN_JOB_MODES:
+        allowed = ", ".join(SCAN_JOB_MODES)
+        raise HTTPException(status_code=400, detail=f"mode must be one of: {allowed}")
+
+    if normalized_mode == "date_range":
+        if not since_date and not before_date:
+            raise HTTPException(
+                status_code=400,
+                detail="date_range scans require since_date and/or before_date",
+            )
+        if since_date and before_date and since_date > before_date:
+            raise HTTPException(
+                status_code=400,
+                detail="since_date must be before or equal to before_date",
+            )
+    elif since_date or before_date:
+        raise HTTPException(
+            status_code=400,
+            detail="since_date/before_date are only supported for date_range scans",
+        )
+
+    return normalized_mode
 
 
-def _any_scan_running(scope: tuple[int, int]) -> bool:
-    return _user_scan_running.get(scope, False) or _user_sse_scan_running.get(scope, False)
+def _json_default(value: object) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
 
 
-def _set_user_progress(scope: tuple[int, int], info: ProgressInfo) -> None:
-    _user_scan_progress[scope] = {"type": "progress", **info}
-
-
-def _to_result(summary: ScanSummary) -> ScanResultOut:
-    return ScanResultOut(
-        emails_scanned=summary.emails_scanned,
-        emails_matched=summary.emails_matched,
-        skipped_social_or_promotions=summary.skipped_social_or_promotions,
-        skipped_not_job_related=summary.skipped_not_job_related,
-        skipped_message_unavailable=summary.skipped_message_unavailable,
-        non_job_reason_counts=summary.non_job_reason_counts,
-        applications_created=summary.applications_created,
-        applications_updated=summary.applications_updated,
-        applications_deleted=summary.applications_deleted,
-        created_application_ids=summary.created_application_ids,
-        updated_application_ids=summary.updated_application_ids,
-        total_prompt_tokens=summary.total_prompt_tokens,
-        total_completion_tokens=summary.total_completion_tokens,
-        total_estimated_cost=summary.total_estimated_cost,
-        errors=summary.errors,
-        cancelled=summary.cancelled,
+def _streaming_response(generator: object) -> StreamingResponse:
+    return StreamingResponse(
+        generator,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
-def _run_scan_background(
-    config: AppConfig,
-    user_id: int,
+async def _stream_job_events(
+    request: Request,
+    owner_user_id: int,
     journey_id: int,
-    mailbox_email: str,
-    oauth_access_token: str,
-    max_emails: int,
-    incremental: bool = False,
-) -> None:
-    """Run scan in background thread for one user."""
-    scope = (user_id, journey_id)
-    lock = _get_scan_lock(scope)
+    job_id: int,
+):
+    session_factory = get_session_factory()
+    last_payload: str | None = None
 
-    def should_cancel() -> bool:
-        return _user_scan_cancel_requested.get(scope, False)
+    while True:
+        if await request.is_disconnected():
+            break
 
-    def progress_callback(info: ProgressInfo) -> None:
-        _set_user_progress(scope, info)
-
-    try:
-        _user_scan_running[scope] = True
-        _user_scan_cancel_requested[scope] = False
-
-        session_factory = get_session_factory()
         session = session_factory()
-        session.info["owner_user_id"] = user_id
-        session.info["journey_id"] = journey_id
-
         try:
-            cfg = config.model_copy(update={"max_scan_emails": max_emails})
-            if incremental:
-                logger.info("incremental_scan_triggered_via_api", user_id=user_id, journey_id=journey_id)
-                summary = run_incremental_scan(
-                    cfg,
-                    session,
-                    owner_user_id=user_id,
-                    mailbox_email=mailbox_email,
-                    oauth_access_token=oauth_access_token,
-                    should_cancel=should_cancel,
-                    progress_callback=progress_callback,
-                )
-            else:
-                logger.info("scan_triggered_via_api", user_id=user_id, journey_id=journey_id, max_emails=max_emails)
-                summary = run_scan(
-                    cfg,
-                    session,
-                    owner_user_id=user_id,
-                    mailbox_email=mailbox_email,
-                    oauth_access_token=oauth_access_token,
-                    should_cancel=should_cancel,
-                    progress_callback=progress_callback,
-                )
-            _user_scan_last_result[scope] = _to_result(summary)
+            job = get_scan_job(session, owner_user_id, journey_id, job_id)
+            if job is None:
+                payload = json.dumps({"detail": "Scan job not found"}, separators=(",", ":"))
+                yield f"event: error\ndata: {payload}\n\n"
+                break
+            payload = json.dumps(serialize_scan_job(job), default=_json_default, separators=(",", ":"))
+            terminal = job.status in TERMINAL_SCAN_JOB_STATUSES
         finally:
             session.close()
-    except Exception as exc:
-        logger.error("background_scan_error", user_id=user_id, journey_id=journey_id, error=str(exc))
-        _user_scan_last_result[scope] = ScanResultOut(
-            emails_scanned=0,
-            emails_matched=0,
-            skipped_social_or_promotions=0,
-            skipped_not_job_related=0,
-            skipped_message_unavailable=0,
-            non_job_reason_counts={},
-            applications_created=0,
-            applications_updated=0,
-            applications_deleted=0,
-            created_application_ids=[],
-            updated_application_ids=[],
-            total_prompt_tokens=0,
-            total_completion_tokens=0,
-            total_estimated_cost=0.0,
-            errors=[str(exc)],
-            cancelled=False,
+
+        if payload != last_payload:
+            yield f"event: job\ndata: {payload}\n\n"
+            last_payload = payload
+        else:
+            yield ": keepalive\n\n"
+
+        if terminal:
+            yield f"event: done\ndata: {payload}\n\n"
+            break
+
+        await asyncio.sleep(SSE_POLL_INTERVAL_SECONDS)
+
+
+def _maybe_dispatch_background(job_payload: dict, config: AppConfig) -> None:
+    if job_payload["status"] in TERMINAL_SCAN_JOB_STATUSES:
+        return
+    dispatch_scan_job_continuation(config, int(job_payload["id"]))
+
+
+def _create_job(
+    current_user: User,
+    db: Session,
+    config: AppConfig,
+    *,
+    mode: str,
+    max_emails: int | None,
+    since_date: str | None,
+    before_date: str | None,
+) -> tuple[dict, bool]:
+    journey_id = _require_active_journey(current_user)
+    try:
+        oauth_access_token, mailbox_email = get_valid_google_access_token(
+            db,
+            current_user.id,
+            config,
         )
-    finally:
-        _user_scan_running[scope] = False
-        _user_scan_progress.pop(scope, None)
-        if lock.locked():
-            lock.release()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Google mailbox not connected: {exc}") from exc
+
+    job, reused = create_scan_job_record(
+        db,
+        config,
+        owner_user_id=current_user.id,
+        journey_id=journey_id,
+        mailbox_email=mailbox_email,
+        oauth_access_token=oauth_access_token,
+        mode=mode,
+        requested_max_emails=max_emails,
+        since_date=since_date,
+        before_date=before_date,
+    )
+    payload = serialize_scan_job(job)
+    _maybe_dispatch_background(payload, config)
+    return payload, reused
+
+
+def _active_job_or_404(db: Session, current_user: User, job_id: int) -> dict:
+    journey_id = _require_active_journey(current_user)
+    job = get_scan_job(db, current_user.id, journey_id, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Scan job not found")
+    return serialize_scan_job(job)
+
+
+def _require_worker_secret(
+    authorization: str | None,
+    config: AppConfig,
+) -> None:
+    expected = config.scan_job_continue_secret.get_secret_value().strip()
+    if not expected:
+        expected = config.token_encryption_key.get_secret_value().strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="Background scan worker secret is not configured")
+    if authorization != f"Bearer {expected}":
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 
 @router.post("", response_model=dict)
 def trigger_scan(
-    max_emails: int = 100,
-    incremental: bool = False,
+    max_emails: int | None = Query(50, ge=0, le=MAX_REQUESTED_MAX_EMAILS),
+    incremental: bool = Query(True),
+    scan_all: bool = Query(False),
+    mode: str | None = Query(None),
+    since_date: str | None = Query(None),
+    before_date: str | None = Query(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     config: AppConfig = Depends(get_config),
 ) -> dict:
-    """Trigger a background scan for the current user mailbox."""
-    if current_user.active_journey_id is None:
-        raise HTTPException(status_code=400, detail="No active journey")
+    normalized_since = _parse_date_input(since_date, "since_date")
+    normalized_before = _parse_date_input(before_date, "before_date")
+    resolved_mode = _resolve_scan_mode(
+        mode=mode,
+        incremental=incremental,
+        scan_all=scan_all,
+        since_date=normalized_since,
+        before_date=normalized_before,
+    )
+    job, reused = _create_job(
+        current_user,
+        db,
+        config,
+        mode=resolved_mode,
+        max_emails=max_emails,
+        since_date=normalized_since,
+        before_date=normalized_before,
+    )
+    return {
+        "message": "Scan job ready" if reused else "Scan job created",
+        "max_emails": max_emails or 0,
+        "incremental": resolved_mode == "incremental",
+        "mode": resolved_mode,
+        "job_id": job["id"],
+        "reused": reused,
+    }
+
+
+@router.post("/jobs", response_model=CreateScanJobOut)
+def create_scan_job(
+    max_emails: int | None = Query(None, ge=0, le=MAX_REQUESTED_MAX_EMAILS),
+    mode: str | None = Query(None),
+    scan_all: bool = Query(False),
+    since_date: str | None = Query(None),
+    before_date: str | None = Query(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    config: AppConfig = Depends(get_config),
+) -> CreateScanJobOut:
+    normalized_since = _parse_date_input(since_date, "since_date")
+    normalized_before = _parse_date_input(before_date, "before_date")
+    resolved_mode = _resolve_scan_mode(
+        mode=mode,
+        scan_all=scan_all,
+        since_date=normalized_since,
+        before_date=normalized_before,
+    )
+    job, reused = _create_job(
+        current_user,
+        db,
+        config,
+        mode=resolved_mode,
+        max_emails=max_emails,
+        since_date=normalized_since,
+        before_date=normalized_before,
+    )
+    return CreateScanJobOut(job=job, reused=reused)
+
+
+@router.get("/jobs/active", response_model=ScanJobOut | None)
+def get_active_scan_job_endpoint(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ScanJobOut | None:
+    journey_id = _require_active_journey(current_user)
+    job = get_active_scan_job(db, current_user.id, journey_id)
+    return None if job is None else ScanJobOut.model_validate(serialize_scan_job(job))
+
+
+@router.get("/jobs/{job_id}", response_model=ScanJobOut)
+def get_scan_job_endpoint(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ScanJobOut:
+    return ScanJobOut.model_validate(_active_job_or_404(db, current_user, job_id))
+
+
+@router.get("/jobs/{job_id}/stream")
+async def stream_scan_job(
+    job_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    journey_id = _require_active_journey(current_user)
+    job = get_scan_job(db, current_user.id, journey_id, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Scan job not found")
+    return _streaming_response(
+        _stream_job_events(request, current_user.id, journey_id, job.id)
+    )
+
+
+@router.post("/jobs/{job_id}/step", response_model=ScanJobStepOut)
+def step_scan_job(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    config: AppConfig = Depends(get_config),
+) -> ScanJobStepOut:
+    journey_id = _require_active_journey(current_user)
+    job = get_scan_job(db, current_user.id, journey_id, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Scan job not found")
 
     try:
-        oauth_access_token, mailbox_email = get_valid_google_access_token(db, current_user.id, config)
+        oauth_access_token, _ = get_valid_google_access_token(db, current_user.id, config)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Google mailbox not connected: {exc}") from exc
-    # Persist any auth/token refresh writes before the background worker starts
-    # so SQLite does not keep the request transaction open while the scan writes.
-    db.commit()
 
-    scope = _scan_scope(current_user)
-    lock = _get_scan_lock(scope)
-    if not lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="A scan is already in progress for this journey")
-
-    scan_thread = threading.Thread(
-        target=_run_scan_background,
-        args=(
+    try:
+        job, processed_in_step, done = run_scan_job_step(
+            db,
             config,
-            current_user.id,
-            int(current_user.active_journey_id),
-            mailbox_email,
-            oauth_access_token,
-            max_emails,
-            incremental,
-        ),
-        daemon=True,
-    )
-    scan_thread.start()
+            owner_user_id=current_user.id,
+            journey_id=journey_id,
+            job_id=job_id,
+            oauth_access_token=oauth_access_token,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    mode = "incremental (new emails only)" if incremental else f"full (latest {max_emails})"
-    return {"message": f"Scan started ({mode})", "max_emails": max_emails, "incremental": incremental}
+    payload = serialize_scan_job(job)
+    if not done and processed_in_step > 0 and payload["status"] in ACTIVE_SCAN_JOB_STATUSES:
+        dispatch_scan_job_continuation(config, job.id)
+
+    return ScanJobStepOut(
+        job=payload,
+        processed_in_step=processed_in_step,
+        done=done,
+    )
+
+
+@router.post("/jobs/{job_id}/process", response_model=ScanJobStepOut)
+def continue_scan_job_in_background(
+    job_id: int,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+    config: AppConfig = Depends(get_config),
+) -> ScanJobStepOut:
+    _require_worker_secret(authorization, config)
+
+    job = db.get(ScanJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Scan job not found")
+
+    try:
+        oauth_access_token, _ = get_valid_google_access_token(db, job.owner_user_id, config)
+    except Exception as exc:
+        job.status = "failed"
+        job.completed_at = datetime.now(timezone.utc)
+        job.last_error = f"Google mailbox not connected: {exc}"
+        db.commit()
+        raise HTTPException(status_code=400, detail=f"Google mailbox not connected: {exc}") from exc
+
+    try:
+        updated_job, processed_in_step, done = process_scan_job(
+            db,
+            config,
+            job_id=job_id,
+            oauth_access_token=oauth_access_token,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return ScanJobStepOut(
+        job=serialize_scan_job(updated_job),
+        processed_in_step=processed_in_step,
+        done=done,
+    )
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=ScanJobOut)
+def cancel_scan_job(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ScanJobOut:
+    journey_id = _require_active_journey(current_user)
+    job = request_scan_job_cancel(db, current_user.id, journey_id, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Scan job not found")
+    return ScanJobOut.model_validate(serialize_scan_job(job))
 
 
 @router.get("/status", response_model=ScanStateOut | None)
@@ -219,7 +432,6 @@ def get_scan_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ScanStateOut | None:
-    """Return the last scan state for the current user."""
     if current_user.active_journey_id is None:
         return None
 
@@ -238,239 +450,103 @@ def get_scan_status(
 
 
 @router.get("/last-result", response_model=ScanResultOut | None)
-def get_last_scan_result(current_user: User = Depends(get_current_user)) -> ScanResultOut | None:
-    """Return the latest in-memory scan result for this user."""
-    return _user_scan_last_result.get(_scan_scope(current_user))
+def get_last_scan_result(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ScanResultOut | None:
+    journey_id = _require_active_journey(current_user)
+    job = get_latest_terminal_scan_job(db, current_user.id, journey_id)
+    if job is None:
+        return None
+    return ScanResultOut.model_validate(scan_job_to_scan_result(job))
 
 
 @router.get("/running", response_model=dict)
-def get_scan_running(current_user: User = Depends(get_current_user)) -> dict:
-    """Check whether the current user has any scan running."""
-    scope = _scan_scope(current_user)
-    return {"running": _any_scan_running(scope)}
+def get_scan_running(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    journey_id = _require_active_journey(current_user)
+    return {"running": get_active_scan_job(db, current_user.id, journey_id) is not None}
 
 
 @router.get("/progress", response_model=dict)
-def get_scan_progress(current_user: User = Depends(get_current_user)) -> dict:
-    """Return latest scan progress for current user."""
-    scope = _scan_scope(current_user)
-    progress = _user_scan_progress.get(scope)
-    if progress is not None:
-        return progress
-
-    running = _any_scan_running(scope)
-    if running:
-        return {"type": "progress", "processed": 0, "total": 0, "current_subject": "", "status": "processing"}
-    return {"type": "idle", "processed": 0, "total": 0, "current_subject": "", "status": "idle"}
+def get_scan_progress(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    journey_id = _require_active_journey(current_user)
+    job = get_active_scan_job(db, current_user.id, journey_id)
+    if job is None:
+        return {"type": "idle", "processed": 0, "total": 0, "current_subject": "", "status": "idle"}
+    return {
+        "type": "progress",
+        "processed": job.processed_messages,
+        "total": job.total_messages,
+        "current_subject": job.current_subject or "",
+        "status": job.status,
+        "mode": job.mode,
+    }
 
 
 @router.post("/cancel", response_model=dict)
-def cancel_scan(current_user: User = Depends(get_current_user)) -> dict:
-    """Request cancellation of current user's non-SSE scan."""
-    scope = _scan_scope(current_user)
-    if not _user_scan_running.get(scope, False):
+def cancel_scan(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    journey_id = _require_active_journey(current_user)
+    job = get_active_scan_job(db, current_user.id, journey_id)
+    if job is None:
         raise HTTPException(status_code=400, detail="No scan is currently running")
-
-    _user_scan_cancel_requested[scope] = True
-    logger.info("scan_cancellation_requested", user_id=current_user.id, journey_id=current_user.active_journey_id)
+    request_scan_job_cancel(db, current_user.id, journey_id, job.id)
     return {"message": "Scan cancellation requested"}
-
-
-def _run_scan_with_queue(
-    config: AppConfig,
-    user_id: int,
-    journey_id: int,
-    mailbox_email: str,
-    oauth_access_token: str,
-    max_emails: int,
-    incremental: bool,
-    progress_queue: queue.Queue,
-    since_date: Optional[str] = None,
-    before_date: Optional[str] = None,
-) -> None:
-    """Run scan and push progress updates to queue for one user."""
-    scope = (user_id, journey_id)
-    lock = _get_sse_scan_lock(scope)
-
-    def should_cancel() -> bool:
-        return _user_sse_cancel_requested.get(scope, False)
-
-    def progress_callback(info: ProgressInfo) -> None:
-        event = {"type": "progress", **info}
-        _user_scan_progress[scope] = event
-        try:
-            progress_queue.put(event, block=False)
-        except queue.Full:
-            pass
-
-    try:
-        _user_sse_scan_running[scope] = True
-        _user_sse_cancel_requested[scope] = False
-
-        session_factory = get_session_factory()
-        session = session_factory()
-        session.info["owner_user_id"] = user_id
-        session.info["journey_id"] = journey_id
-
-        try:
-            cfg = config.model_copy(update={"max_scan_emails": max_emails})
-            if since_date or before_date:
-                logger.info(
-                    "sse_date_range_scan_starting",
-                    user_id=user_id,
-                    journey_id=journey_id,
-                    since=since_date,
-                    before=before_date,
-                )
-                summary = run_date_range_scan(
-                    cfg,
-                    session,
-                    owner_user_id=user_id,
-                    mailbox_email=mailbox_email,
-                    oauth_access_token=oauth_access_token,
-                    since_date=since_date,
-                    before_date=before_date,
-                    should_cancel=should_cancel,
-                    progress_callback=progress_callback,
-                )
-            elif incremental:
-                logger.info("sse_incremental_scan_starting", user_id=user_id, journey_id=journey_id)
-                summary = run_incremental_scan(
-                    cfg,
-                    session,
-                    owner_user_id=user_id,
-                    mailbox_email=mailbox_email,
-                    oauth_access_token=oauth_access_token,
-                    should_cancel=should_cancel,
-                    progress_callback=progress_callback,
-                )
-            else:
-                logger.info("sse_scan_starting", user_id=user_id, journey_id=journey_id, max_emails=max_emails)
-                summary = run_scan(
-                    cfg,
-                    session,
-                    owner_user_id=user_id,
-                    mailbox_email=mailbox_email,
-                    oauth_access_token=oauth_access_token,
-                    should_cancel=should_cancel,
-                    progress_callback=progress_callback,
-                )
-
-            _user_scan_last_result[scope] = _to_result(summary)
-            progress_queue.put({"type": "complete", "result": _user_scan_last_result[scope].model_dump()})
-        finally:
-            session.close()
-    except Exception as exc:
-        logger.error("sse_scan_error", user_id=user_id, journey_id=journey_id, error=str(exc))
-        progress_queue.put({"type": "error", "message": str(exc)})
-    finally:
-        _user_sse_scan_running[scope] = False
-        _user_scan_progress.pop(scope, None)
-        progress_queue.put(None)
-        if lock.locked():
-            lock.release()
-
-
-async def _event_generator(
-    progress_queue: queue.Queue,
-    request: Request,
-) -> AsyncGenerator[str, None]:
-    """Generate SSE events from the progress queue."""
-    while True:
-        if await request.is_disconnected():
-            logger.info("sse_client_disconnected_scan_continues")
-            break
-
-        try:
-            try:
-                event = progress_queue.get_nowait()
-            except queue.Empty:
-                yield ": keepalive\n\n"
-                await asyncio.sleep(0.5)
-                continue
-
-            if event is None:
-                break
-
-            yield f"data: {json.dumps(event)}\n\n"
-        except Exception as exc:
-            logger.error("sse_generator_error", error=str(exc))
-            break
 
 
 @router.get("/stream")
 async def stream_scan(
     request: Request,
-    max_emails: int = Query(100, ge=1, le=10000),
-    incremental: bool = Query(False),
-    since_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
-    before_date: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
+    max_emails: int | None = Query(None, ge=0, le=MAX_REQUESTED_MAX_EMAILS),
+    incremental: bool | None = Query(None),
+    scan_all: bool = Query(False),
+    mode: str | None = Query(None),
+    since_date: str | None = Query(None),
+    before_date: str | None = Query(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     config: AppConfig = Depends(get_config),
 ) -> StreamingResponse:
-    """Stream scan progress via Server-Sent Events for current user."""
-    if current_user.active_journey_id is None:
-        raise HTTPException(status_code=400, detail="No active journey")
-
-    try:
-        oauth_access_token, mailbox_email = get_valid_google_access_token(db, current_user.id, config)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Google mailbox not connected: {exc}") from exc
-    # Streaming responses keep dependency cleanup open until the stream ends.
-    # Commit now to release any SQLite write lock from auth/journey/token updates
-    # before the background scan thread starts writing.
-    db.commit()
-
-    scope = _scan_scope(current_user)
-    lock = _get_sse_scan_lock(scope)
-    if not lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="A scan is already in progress for this journey")
-
-    progress_queue: queue.Queue = queue.Queue(maxsize=100)
-
-    scan_thread = threading.Thread(
-        target=_run_scan_with_queue,
-        args=(
-            config,
-            current_user.id,
-            int(current_user.active_journey_id),
-            mailbox_email,
-            oauth_access_token,
-            max_emails,
-            incremental,
-            progress_queue,
-            since_date,
-            before_date,
-        ),
-        daemon=True,
-    )
-    scan_thread.start()
-
-    logger.info(
-        "sse_scan_stream_started",
-        user_id=current_user.id,
-        journey_id=current_user.active_journey_id,
-        max_emails=max_emails,
+    normalized_since = _parse_date_input(since_date, "since_date")
+    normalized_before = _parse_date_input(before_date, "before_date")
+    resolved_mode = _resolve_scan_mode(
+        mode=mode,
         incremental=incremental,
-        since_date=since_date,
-        before_date=before_date,
+        scan_all=scan_all,
+        since_date=normalized_since,
+        before_date=normalized_before,
     )
-
-    return StreamingResponse(
-        _event_generator(progress_queue, request),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+    job, _ = _create_job(
+        current_user,
+        db,
+        config,
+        mode=resolved_mode,
+        max_emails=max_emails,
+        since_date=normalized_since,
+        before_date=normalized_before,
+    )
+    journey_id = _require_active_journey(current_user)
+    return _streaming_response(
+        _stream_job_events(request, current_user.id, journey_id, int(job["id"]))
     )
 
 
 @router.post("/stream/cancel", response_model=dict)
-def cancel_sse_scan(current_user: User = Depends(get_current_user)) -> dict:
-    """Request cancellation of current user's SSE scan."""
-    _user_sse_cancel_requested[_scan_scope(current_user)] = True
-    logger.info("sse_scan_cancellation_requested", user_id=current_user.id, journey_id=current_user.active_journey_id)
-    return {"message": "SSE scan cancellation requested"}
+def cancel_sse_scan(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    journey_id = _require_active_journey(current_user)
+    job = get_active_scan_job(db, current_user.id, journey_id)
+    if job is None:
+        raise HTTPException(status_code=400, detail="No scan is currently running")
+    request_scan_job_cancel(db, current_user.id, journey_id, job.id)
+    return {"message": "Scan cancellation requested"}

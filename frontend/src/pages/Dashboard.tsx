@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
-import { createApplication, getFlowData, getLastScanResult, getScanStatus, getStats, listApplications } from "../api/client";
+import { createApplication, getDashboardData, getLastScanResult, getScanStatus, listApplications } from "../api/client";
 import type { Application, ApplicationCreate, FlowData, ScanResult, ScanState, Stats } from "../types";
 import { STATUSES } from "../types";
 import FilterBar from "../components/FilterBar";
@@ -194,26 +194,18 @@ export default function Dashboard() {
     }
   }, [page, statusFilter, companySearch, activeJourney?.id]);
 
-  const fetchStats = useCallback(async () => {
+  const fetchDashboardMetrics = useCallback(async () => {
     setStatsLoading(true);
-    try {
-      const s = await getStats();
-      setStats(s);
-    } catch (err) {
-      console.error("Failed to fetch stats:", err);
-    } finally {
-      setStatsLoading(false);
-    }
-  }, [activeJourney?.id]);
-
-  const fetchFlowData = useCallback(async () => {
     setFlowLoading(true);
     try {
-      const fd = await getFlowData();
-      setFlowData(fd);
+      const dashboard = await getDashboardData();
+      const { flow, ...statsPayload } = dashboard;
+      setStats(statsPayload);
+      setFlowData(flow);
     } catch (err) {
-      console.error("Failed to fetch flow data:", err);
+      console.error("Failed to fetch dashboard data:", err);
     } finally {
+      setStatsLoading(false);
       setFlowLoading(false);
     }
   }, [activeJourney?.id]);
@@ -320,11 +312,10 @@ export default function Dashboard() {
   }, [fetchApplications]);
 
   useEffect(() => {
-    fetchStats();
-    fetchFlowData();
+    fetchDashboardMetrics();
     fetchLastScan();
     fetchScanState();
-  }, [fetchStats, fetchFlowData, fetchLastScan, fetchScanState]);
+  }, [fetchDashboardMetrics, fetchLastScan, fetchScanState]);
 
   const handleScanComplete = (result: ScanResult) => {
     setLastScan(result);
@@ -337,15 +328,13 @@ export default function Dashboard() {
     } else {
       updateDashboardSearch({ page: 1 });
     }
-    fetchStats();
-    fetchFlowData();
+    fetchDashboardMetrics();
     fetchScanState();
   };
 
   const handleRefresh = () => {
     fetchApplications();
-    fetchStats();
-    fetchFlowData();
+    fetchDashboardMetrics();
   };
 
   const openCreateModal = () => {
@@ -390,8 +379,7 @@ export default function Dashboard() {
       if (page === 1) {
         fetchApplications();
       }
-      fetchStats();
-      fetchFlowData();
+      fetchDashboardMetrics();
       console.info("application_created", { id: created.id });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

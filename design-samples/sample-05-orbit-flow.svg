@@ -1,0 +1,56 @@
+<svg width="1400" height="900" viewBox="0 0 1400 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="160" y1="92" x2="1180" y2="836" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1320"/>
+      <stop offset="1" stop-color="#12263F"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="36" y1="32" x2="168" y2="178" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#70E1F5"/>
+      <stop offset="1" stop-color="#74F0B5"/>
+    </linearGradient>
+  </defs>
+  <rect width="1400" height="900" fill="#09111D"/>
+  <rect x="72" y="72" width="1256" height="756" rx="40" fill="url(#bg)" stroke="#21344E"/>
+  <text x="130" y="170" fill="#EAF2FF" font-size="28" font-family="Space Grotesk, Inter, Arial, sans-serif" font-weight="700">Sample 05</text>
+  <text x="130" y="222" fill="#F8FBFF" font-size="84" font-family="Space Grotesk, Inter, Arial, sans-serif" font-weight="700" letter-spacing="-2">OfferThread</text>
+  <text x="130" y="278" fill="#8FA5BF" font-size="30" font-family="Inter, Arial, sans-serif" font-weight="500">Modern platform energy with a future-facing orbit system.</text>
+  <g transform="translate(132 344)">
+    <rect x="0" y="0" width="202" height="202" rx="48" fill="#07111D"/>
+    <circle cx="101" cy="101" r="62" stroke="url(#ring)" stroke-width="8"/>
+    <circle cx="54" cy="82" r="10" fill="#70E1F5"/>
+    <circle cx="142" cy="52" r="8" fill="#74F0B5"/>
+    <circle cx="159" cy="144" r="11" fill="#FFD166"/>
+    <path d="M76 64H115L133 82V136C133 150 122 161 108 161H76C62 161 51 150 51 136V89C51 75 62 64 76 64Z" fill="#F3F8FF"/>
+    <path d="M115 64L133 82H115V64Z" fill="#D8E8FF"/>
+    <path d="M73 98H111" stroke="#0F243E" stroke-width="7" stroke-linecap="round"/>
+    <path d="M73 116H111" stroke="#0F243E" stroke-width="7" stroke-linecap="round" opacity="0.45"/>
+  </g>
+  <g transform="translate(418 390)">
+    <rect x="0" y="0" width="234" height="164" rx="34" fill="#112338"/>
+    <circle cx="74" cy="82" r="44" stroke="#74F0B5" stroke-width="8"/>
+    <circle cx="65" cy="41" r="10" fill="#70E1F5"/>
+    <circle cx="108" cy="119" r="12" fill="#FFD166"/>
+    <rect x="94" y="42" width="88" height="88" rx="18" fill="#F3F8FF"/>
+    <path d="M119 70H159" stroke="#0F243E" stroke-width="8" stroke-linecap="round"/>
+    <path d="M119 89H159" stroke="#0F243E" stroke-width="8" stroke-linecap="round" opacity="0.45"/>
+    <circle cx="192" cy="54" r="11" fill="#74F0B5"/>
+  </g>
+  <g transform="translate(936 180)">
+    <rect x="0" y="0" width="262" height="262" rx="58" fill="#07111D"/>
+    <circle cx="131" cy="131" r="82" stroke="url(#ring)" stroke-width="10"/>
+    <circle cx="70" cy="108" r="12" fill="#70E1F5"/>
+    <circle cx="187" cy="70" r="10" fill="#74F0B5"/>
+    <circle cx="205" cy="182" r="13" fill="#FFD166"/>
+    <path d="M98 82H150L174 106V178C174 196 160 210 142 210H98C80 210 66 196 66 178V114C66 96 80 82 98 82Z" fill="#F3F8FF"/>
+    <path d="M150 82L174 106H150V82Z" fill="#D8E8FF"/>
+  </g>
+  <text x="936" y="488" fill="#F8FBFF" font-size="28" font-family="Space Grotesk, Inter, Arial, sans-serif" font-weight="700">Tab icon</text>
+  <text x="936" y="528" fill="#8FA5BF" font-size="24" font-family="Inter, Arial, sans-serif" font-weight="500">Best if you want a stronger startup-tech signature.</text>
+  <g transform="translate(130 644)">
+    <rect x="0" y="0" width="146" height="46" rx="23" fill="#07111D"/>
+    <rect x="164" y="0" width="146" height="46" rx="23" fill="#70E1F5"/>
+    <rect x="328" y="0" width="146" height="46" rx="23" fill="#74F0B5"/>
+    <rect x="492" y="0" width="146" height="46" rx="23" fill="#FFD166"/>
+  </g>
+  <text x="130" y="744" fill="#8FA5BF" font-size="24" font-family="Inter, Arial, sans-serif" font-weight="500">Palette: deep night, electric cyan, mint signal, amber highlight</text>
+</svg>

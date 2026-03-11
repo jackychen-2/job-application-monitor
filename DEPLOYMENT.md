@@ -1,231 +1,177 @@
 # Deployment Guide
 
-## Development Setup (Local)
+## Target Shape
 
-### Step 1: Environment Setup
+- Frontend:
+  Vercel project rooted at `frontend/`
+  production domain `https://offerthread.com`
+- Backend:
+  Vercel project rooted at `backend/`
+  production domain `https://api.offerthread.com`
+- Database:
+  hosted Postgres, for example Neon via Vercel Marketplace
 
-You already have the environment configured with Python 3.12 and npm dependencies installed. Your existing `.env` file will work with the new system.
+This repo now keeps two modes:
+
+- local mode:
+  frontend + backend on your machine with `SQLite`
+- deployed mode:
+  Vercel frontend + Vercel backend + `Postgres`
+
+## Local Development
+
+### 1. Configure env files
 
 ```bash
-# Activate the virtual environment
-source .venv-new/bin/activate
+cp .env.example .env
+cp frontend/.env.example frontend/.env.local
 ```
 
-### Step 2: Run Backend
+For local development, keep:
 
-Start the FastAPI backend server:
+```env
+DATABASE_URL=sqlite:///job_monitor.db
+FRONTEND_URL=http://localhost:5173
+CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+GOOGLE_REDIRECT_URI=http://localhost:8000/api/auth/google/callback
+AUTH_COOKIE_SECURE=false
+```
+
+### 2. Run the backend
 
 ```bash
 cd backend
-uvicorn job_monitor.main:app --reload --host 0.0.0.0 --port 8000
+PYTHONPATH=. ../.venv-new/bin/uvicorn job_monitor.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The backend will be available at **http://localhost:8000**. API docs at **http://localhost:8000/docs**.
-
-### Step 3: Run Frontend (in a new terminal)
+### 3. Run the frontend
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-The React dashboard will be available at **http://localhost:5173**.
+## Vercel Deployment
 
-### Step 4: First Scan
+### 1. Create the backend database
 
-1. Open **http://localhost:5173** in your browser
-2. Click the **"Scan Emails"** button
-3. The app will connect to your Gmail (using credentials from `.env`), scan for job emails, and populate the dashboard
+Provision a Postgres database and copy its connection string.
 
----
+Example:
 
-## Production Deployment (Docker)
-
-### Build and Run
-
-```bash
-docker compose up --build
+```env
+DATABASE_URL=postgresql+psycopg://...
 ```
 
-Access the app at **http://localhost:8000**.
+### 2. Migrate your local SQLite data
 
-### Custom Configuration
-
-Create a `.env` file in the project root with your credentials:
+Run the one-off migration script before your first production launch:
 
 ```bash
-# Required
-IMAP_HOST=imap.gmail.com
-EMAIL_USERNAME=your_email@gmail.com
-EMAIL_PASSWORD=your_app_password
-OPENAI_API_KEY=sk-...
+./.venv-new/bin/python backend/scripts/migrate_sqlite_to_postgres.py \
+  --sqlite-path job_monitor.db \
+  --database-url "$DATABASE_URL" \
+  --truncate
+```
 
-# Optional tuning
-MAX_SCAN_EMAILS=50
-LLM_MODEL=gpt-4o-mini
+Migrated tables:
+
+- `users`
+- `google_accounts`
+- `journeys`
+- `applications`
+- `status_history`
+- `processed_emails`
+- `scan_state`
+- `application_merge_events`
+- `application_merge_items`
+
+Not migrated:
+
+- `auth_sessions`
+
+Users should log in again after the first production cutover.
+
+### 3. Deploy the backend Vercel project
+
+Project settings:
+
+- Root Directory:
+  `backend`
+- Framework:
+  Other / Python
+- Entry file:
+  `app.py`
+
+Set these environment variables in the backend project:
+
+```env
+DATABASE_URL=postgresql+psycopg://...
+FRONTEND_URL=https://offerthread.com
+CORS_ORIGINS=https://offerthread.com
+AUTH_COOKIE_SECURE=true
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_REDIRECT_URI=https://api.offerthread.com/api/auth/google/callback
+TOKEN_ENCRYPTION_KEY=...
+LLM_API_KEY=...
 LOG_LEVEL=INFO
+SCAN_JOB_BATCH_SIZE=5
 ```
 
----
+### 4. Deploy the frontend Vercel project
 
-## Migration from Old Script
+Project settings:
 
-The old [`monitor_job_apps.py`](monitor_job_apps.py) can coexist with the new system. Here's how to migrate:
+- Root Directory:
+  `frontend`
 
-### Option 1: Fresh Start
+Set this environment variable in the frontend project:
 
-Simply use the new system going forward. The old Numbers file and JSON state are ignored.
-
-### Option 2: Import Historical Data (Manual)
-
-1. Export your [`job_application_tracker.numbers`](job_application_tracker.numbers) or [`.xlsx`](job_application_tracker.xlsx) to CSV
-2. Use the API to bulk-import:
-
-```python
-import requests
-import csv
-
-with open('old_applications.csv') as f:
-    reader = csv.DictReader(f)
-    for row in reader:
-        requests.post('http://localhost:8000/api/applications', json={
-            'company': row['Company'],
-            'job_title': row['Job Title'],
-            'status': row['Status'],
-            'source': 'migrated'
-        })
+```env
+VITE_API_BASE_URL=https://api.offerthread.com/api
 ```
 
-### Option 3: Transfer State Only
+### 5. Connect domains
 
-Copy the last UID from [`.job_monitor_state.json`](.job_monitor_state.json) to avoid re-scanning old emails:
+- `offerthread.com` -> frontend Vercel project
+- `api.offerthread.com` -> backend Vercel project
 
-```sql
-INSERT INTO scan_state (email_account, email_folder, last_uid, last_scan_at)
-VALUES ('jackychen9803@gmail.com', 'INBOX', 5738, datetime('now'));
-```
+### 6. Update Google OAuth
 
----
+Google Cloud Console must include:
 
-## Next Steps for Production
+- Authorized origin:
+  `https://offerthread.com`
+- Authorized redirect URI:
+  `https://api.offerthread.com/api/auth/google/callback`
 
-### Immediate Improvements (Phase 7)
+### 7. Smoke test production
 
-1. **Background Scanning** — Replace synchronous scan with Celery/background task queue
-2. **WebSocket Support** — Real-time scan progress updates to the frontend
-3. **Authentication** — Add user login (OAuth2 + JWT tokens) for multi-user support
-4. **Rate Limiting** — Protect API endpoints with slowapi or similar
-5. **Error Tracking** — Integrate Sentry for production error monitoring
+Verify:
 
-### Testing (Phase 8)
+- `https://offerthread.com`
+- `https://api.offerthread.com/api/health`
+- Google login
+- scan job creation
+- scan job resume after refresh
+- application data still present
 
-```bash
-cd backend && pytest -v --cov=job_monitor
-```
+## Scan Behavior in Production
 
-Create tests in `tests/` directory:
-- Unit tests for extraction rules
-- Mock IMAP responses for email pipeline tests
-- API integration tests with httpx
-- Test fixtures in `conftest.py`
+This Vercel version intentionally supports only incremental scanning.
 
-### Database Migration (Phase 9)
+- No SSE scan stream
+- No full mailbox scan UI
+- No date-range scan UI
+- No evaluation UI in the main app shell
 
-For multi-user production, switch from SQLite to PostgreSQL:
+The scan flow is now:
 
-```bash
-# Update .env
-DATABASE_URL=postgresql://user:password@localhost:5432/job_monitor
+1. Frontend creates or reuses an active scan job.
+2. Backend stores Gmail message IDs in `scan_job_messages`.
+3. Frontend polls every 2 seconds.
+4. Each poll triggers a small `step` call.
+5. Progress and results persist in the database.
 
-# Run Alembic migrations
-cd backend
-alembic init alembic
-alembic revision --autogenerate -m "initial schema"
-alembic upgrade head
-```
-
-### Monitoring (Phase 10)
-
-Add observability:
-- **Prometheus metrics** — FastAPI middleware for request/response metrics
-- **Grafana dashboards** — Visualize scan frequency, LLM costs, error rates
-- **Health checks** — `/api/health` already implemented
-
-### Multi-User Expansion (Phase 11)
-
-1. Add `users` table with email accounts per user
-2. Add authentication (FastAPI Security + OAuth2)
-3. Modify queries to filter by `user_id`
-4. Add user settings page in frontend
-5. Deploy to cloud (AWS ECS, GCP Cloud Run, or DigitalOcean)
-
----
-
-## Architecture Benefits
-
-Compared to the original 711-line script, the new architecture provides:
-
-| Feature | Before | After |
-|---------|--------|-------|
-| **Testability** | Monolithic, hard to test | 15+ independent modules, mockable |
-| **Cross-platform** | macOS-only (Numbers.app) | SQLite + CSV/Excel (any OS) |
-| **Duplicate handling** | None — re-scans all emails | DB unique constraints prevent duplicates |
-| **Status history** | No audit trail | Full history in `status_history` table |
-| **Web interface** | None | React dashboard with filters and charts |
-| **API** | None | RESTful API with Swagger docs |
-| **Retry logic** | None — fails on transient errors | Tenacity retry for IMAP and LLM |
-| **LLM providers** | Hardcoded OpenAI | Swappable via protocol interface |
-| **Logging** | print() statements | Structured logging with levels and JSON output |
-| **Deployment** | Manual Python script + cron/launchd | Docker Compose with one command |
-
----
-
-## File Structure Summary
-
-```
-backend/                    # FastAPI + extraction engine
-├── job_monitor/
-│   ├── main.py            # FastAPI app (15 routes)
-│   ├── config.py          # Pydantic settings
-│   ├── models.py          # SQLAlchemy ORM (4 tables)
-│   ├── schemas.py         # API request/response validation
-│   ├── database.py        # Engine + session management
-│   ├── api/               # 4 REST routers (apps, scan, stats, export)
-│   ├── email/             # IMAP client, parser, classifier
-│   ├── extraction/        # Rules + LLM + orchestration
-│   └── export/            # CSV + Excel exporters
-
-frontend/                   # React + Vite + Tailwind
-├── src/
-│   ├── App.tsx            # Router
-│   ├── api/client.ts      # Typed fetch wrapper
-│   ├── components/        # 7 reusable components
-│   ├── pages/             # Dashboard + Detail
-│   └── types/             # TypeScript interfaces
-
-plans/architecture.md       # Full design document
-```
-
----
-
-## Quick Commands
-
-```bash
-# Install dependencies
-make install
-
-# Start backend
-make backend
-
-# Start frontend (in separate terminal)
-make frontend
-
-# Lint
-make lint
-
-# Test
-make test
-
-# Docker
-docker compose up --build
-```
+If the user closes the page, the job stops progressing until they return. If they reopen the page, the frontend restores the active job and continues.

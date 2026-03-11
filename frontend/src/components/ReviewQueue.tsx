@@ -19,11 +19,14 @@ export default function ReviewQueue({ onResolved }: Props) {
 
   const fetchData = useCallback(async () => {
     try {
-      const [emailsData, appsData] = await Promise.all([
-        getPendingReviewEmails(),
-        listApplications({ page_size: 100 }),
-      ]);
+      const emailsData = await getPendingReviewEmails();
       setEmails(emailsData);
+      if (emailsData.length === 0) {
+        setApplications([]);
+        return;
+      }
+
+      const appsData = await listApplications({ page_size: 100 });
       setApplications(appsData.items);
     } catch (err) {
       console.error("Failed to fetch review data:", err);

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -313,7 +314,7 @@ class ProcessedEmail(Base):
     journey_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("journeys.id", ondelete="CASCADE"), nullable=True, index=True
     )
-    uid: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    uid: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     email_account: Mapped[str] = mapped_column(String(300), nullable=False)
     email_folder: Mapped[str] = mapped_column(String(100), nullable=False, default="INBOX")
 
@@ -370,11 +371,102 @@ class ScanState(Base):
     )
     email_account: Mapped[str] = mapped_column(String(300), nullable=False)
     email_folder: Mapped[str] = mapped_column(String(100), nullable=False, default="INBOX")
-    last_uid: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_uid: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     def __repr__(self) -> str:
         return (
             f"<ScanState owner={self.owner_user_id} account={self.email_account!r} "
             f"folder={self.email_folder!r} uid={self.last_uid}>"
+        )
+
+
+class ScanJob(Base):
+    """A resumable scan job processed in small request-driven chunks."""
+
+    __tablename__ = "scan_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    journey_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("journeys.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="queued", index=True)
+    mode: Mapped[str] = mapped_column(String(30), nullable=False, default="incremental")
+    mailbox_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    requested_max_emails: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
+    since_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    before_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    batch_size: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    history_start_id: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    history_latest_id: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    history_fallback_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    total_messages: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    processed_messages: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    emails_matched: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    skipped_social_or_promotions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    skipped_not_job_related: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    skipped_message_unavailable: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    applications_created: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    applications_updated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    applications_deleted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_estimated_cost: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    current_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    errors_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    non_job_reason_counts_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_application_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    updated_application_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    messages: Mapped[list[ScanJobMessage]] = relationship(
+        back_populates="scan_job",
+        cascade="all, delete-orphan",
+        order_by="ScanJobMessage.position",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ScanJob id={self.id} owner={self.owner_user_id} journey={self.journey_id} "
+            f"status={self.status!r} processed={self.processed_messages}/{self.total_messages}>"
+        )
+
+
+class ScanJobMessage(Base):
+    """A Gmail message queued for a scan job."""
+
+    __tablename__ = "scan_job_messages"
+    __table_args__ = (
+        UniqueConstraint("scan_job_id", "position", name="uq_scan_job_message_position"),
+        UniqueConstraint("scan_job_id", "gmail_message_id", name="uq_scan_job_message_gmail_message"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scan_job_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("scan_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    gmail_message_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    scan_job: Mapped[ScanJob] = relationship(back_populates="messages")
+
+    def __repr__(self) -> str:
+        return (
+            f"<ScanJobMessage job={self.scan_job_id} position={self.position} "
+            f"status={self.status!r}>"
         )

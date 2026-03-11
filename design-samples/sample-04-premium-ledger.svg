@@ -1,0 +1,37 @@
+<svg width="1400" height="900" viewBox="0 0 1400 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1400" height="900" fill="#F3EEE6"/>
+  <rect x="72" y="72" width="1256" height="756" rx="40" fill="#FBF8F2" stroke="#DED4C4"/>
+  <text x="130" y="170" fill="#171717" font-size="28" font-family="New York, Iowan Old Style, Georgia, serif" font-weight="700">Sample 04</text>
+  <text x="130" y="222" fill="#171717" font-size="84" font-family="New York, Iowan Old Style, Georgia, serif" font-weight="700" letter-spacing="-1">OfferThread</text>
+  <text x="130" y="278" fill="#6A6056" font-size="30" font-family="SF Pro Text, Inter, Arial, sans-serif" font-weight="500">Luxury editorial tone for a high-trust personal career product.</text>
+  <g transform="translate(132 348)">
+    <rect x="0" y="0" width="198" height="198" rx="34" fill="#171717"/>
+    <rect x="34" y="34" width="130" height="130" rx="26" stroke="#C9A86A" stroke-width="6"/>
+    <path d="M63 76H103C129 76 150 97 150 123V126H132V122C132 106 119 94 103 94H63V76Z" fill="#F7F1E7"/>
+    <path d="M136 83V123C136 140 122 154 105 154H61V136H100C110 136 118 128 118 118V83H136Z" fill="#F7F1E7"/>
+    <circle cx="154" cy="50" r="10" fill="#D85B45"/>
+  </g>
+  <g transform="translate(408 390)">
+    <rect x="0" y="0" width="244" height="164" rx="28" fill="#F2E7D4"/>
+    <rect x="28" y="24" width="132" height="116" rx="20" fill="#171717"/>
+    <path d="M50 53H90C117 53 138 74 138 101V103H120V100C120 85 108 71 93 71H50V53Z" fill="#F7F1E7"/>
+    <path d="M126 60V100C126 117 112 131 95 131H48V113H90C100 113 108 105 108 95V60H126Z" fill="#F7F1E7"/>
+    <circle cx="198" cy="83" r="30" fill="#D85B45"/>
+    <path d="M184 84L194 94L214 72" stroke="#FBF8F2" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <g transform="translate(936 180)">
+    <rect x="0" y="0" width="262" height="262" rx="46" fill="#171717"/>
+    <rect x="48" y="48" width="166" height="166" rx="34" stroke="#C9A86A" stroke-width="8"/>
+    <path d="M85 101H127C160 101 186 127 186 160V163H164V159C164 140 149 123 130 123H85V101Z" fill="#F7F1E7"/>
+    <path d="M172 110V160C172 182 154 200 132 200H83V178H126C139 178 150 167 150 154V110H172Z" fill="#F7F1E7"/>
+  </g>
+  <text x="936" y="488" fill="#171717" font-size="28" font-family="New York, Iowan Old Style, Georgia, serif" font-weight="700">Tab icon</text>
+  <text x="936" y="528" fill="#6A6056" font-size="24" font-family="SF Pro Text, Inter, Arial, sans-serif" font-weight="500">Monogram stays elegant even at small sizes.</text>
+  <g transform="translate(130 644)">
+    <rect x="0" y="0" width="146" height="46" rx="23" fill="#171717"/>
+    <rect x="164" y="0" width="146" height="46" rx="23" fill="#C9A86A"/>
+    <rect x="328" y="0" width="146" height="46" rx="23" fill="#D85B45"/>
+    <rect x="492" y="0" width="146" height="46" rx="23" fill="#F2E7D4"/>
+  </g>
+  <text x="130" y="744" fill="#6A6056" font-size="24" font-family="SF Pro Text, Inter, Arial, sans-serif" font-weight="500">Palette: ink black, brass, terracotta, parchment</text>
+</svg>

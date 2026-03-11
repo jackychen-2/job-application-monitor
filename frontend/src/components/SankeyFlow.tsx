@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { ResponsiveContainer, Sankey, Tooltip } from "recharts";
 import type { FlowData } from "../types";
 
@@ -416,6 +417,13 @@ export default function SankeyFlow({
   showSummary = true,
   title = "Application Flow",
 }: Props) {
+  const sankeyData = useMemo(() => {
+    if (!flowData) {
+      return null;
+    }
+    return buildSankeyData(flowData);
+  }, [flowData]);
+
   if (loading || !flowData) {
     return (
       <Shell title={title}>
@@ -432,7 +440,6 @@ export default function SankeyFlow({
     );
   }
 
-  const sankeyData = buildSankeyData(flowData);
   if (!sankeyData) {
     return (
       <Shell title={title}>

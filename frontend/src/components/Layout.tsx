@@ -29,7 +29,6 @@ export default function Layout() {
             </Link>
             <nav className="flex items-center gap-4">
               <Link to={dashboardHref} onClick={markDashboardRestore} className="text-sm text-gray-600 hover:text-gray-900">Dashboard</Link>
-              <Link to="/eval" className="text-sm text-gray-600 hover:text-gray-900">Evaluation</Link>
               <JourneySwitcher />
               <span className="text-xs text-gray-500">{user?.email}</span>
               <button

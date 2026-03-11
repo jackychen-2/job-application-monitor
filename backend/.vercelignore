@@ -1,0 +1,9 @@
+.env.local
+.pytest_cache
+.ruff_cache
+__pycache__
+tests
+job_monitor.egg-info
+job_monitor.db
+job_monitor.db-shm
+job_monitor.db-wal

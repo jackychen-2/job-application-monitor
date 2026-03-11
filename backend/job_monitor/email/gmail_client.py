@@ -177,16 +177,23 @@ class GmailClient:
 
         return ids
 
-    def fetch_latest_message_ids(self, count: int) -> tuple[list[str], int]:
-        ids = self._list_message_ids(query=_TRACKABLE_INBOX_QUERY, max_count=count)
+    def fetch_trackable_message_ids(
+        self,
+        max_count: Optional[int] = None,
+    ) -> tuple[list[str], int]:
+        ids = self._list_message_ids(query=_TRACKABLE_INBOX_QUERY, max_count=max_count)
         # Gmail list returns newest-first; process oldest->newest for stable progression.
         ids.reverse()
         return ids, self.get_latest_history_id()
+
+    def fetch_latest_message_ids(self, count: int) -> tuple[list[str], int]:
+        return self.fetch_trackable_message_ids(max_count=count)
 
     def fetch_message_ids_by_date_range(
         self,
         since_date: Optional[str] = None,
         before_date: Optional[str] = None,
+        max_count: Optional[int] = None,
     ) -> tuple[list[str], int]:
         parts: list[str] = []
         if since_date:
@@ -195,7 +202,7 @@ class GmailClient:
             parts.append(f"before:{_to_gmail_before_date_inclusive(before_date)}")
 
         query = _merge_gmail_query(_TRACKABLE_INBOX_QUERY, " ".join(parts) if parts else None)
-        ids = self._list_message_ids(query=query, max_count=None)
+        ids = self._list_message_ids(query=query, max_count=max_count)
         ids.reverse()
         return ids, self.get_latest_history_id()
 

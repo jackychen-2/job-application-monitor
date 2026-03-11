@@ -21,6 +21,7 @@ from job_monitor.models import (
     GoogleAccount,
     Journey,
     ProcessedEmail,
+    ScanJob,
     ScanState,
     StatusHistory,
     User,
@@ -49,6 +50,7 @@ _OWNER_SCOPED_MODELS = (
     ProcessedEmail,
     StatusHistory,
     ScanState,
+    ScanJob,
     CachedEmail,
     EvalApplicationGroup,
     EvalLabel,
@@ -64,6 +66,7 @@ _JOURNEY_SCOPED_MODELS = (
     ProcessedEmail,
     StatusHistory,
     ScanState,
+    ScanJob,
 )
 
 _OWNER_SCOPED_TABLES = (
@@ -74,6 +77,7 @@ _OWNER_SCOPED_TABLES = (
     "processed_emails",
     "status_history",
     "scan_state",
+    "scan_jobs",
     "cached_emails",
     "eval_application_groups",
     "eval_labels",
@@ -89,7 +93,20 @@ _JOURNEY_SCOPED_TABLES = (
     "processed_emails",
     "status_history",
     "scan_state",
+    "scan_jobs",
 )
+
+
+def _normalize_database_url(database_url: str) -> str:
+    """Translate generic Postgres URLs to the SQLAlchemy psycopg dialect."""
+    if database_url.startswith("postgresql://"):
+        return f"postgresql+psycopg://{database_url[len('postgresql://'):]}"
+    return database_url
+
+
+def _column_type_name(column_type: object) -> str:
+    """Return a normalized SQLAlchemy inspector type name."""
+    return type(column_type).__name__.upper()
 
 
 @event.listens_for(Session, "do_orm_execute")
@@ -150,20 +167,21 @@ def init_db(config: AppConfig) -> Engine:
     """Create the database engine, tables, and return the engine."""
     global _engine, _SessionLocal
 
+    database_url = _normalize_database_url(config.database_url)
     connect_args = {}
-    if config.database_url.startswith("sqlite"):
+    if database_url.startswith("sqlite"):
         connect_args["check_same_thread"] = False
         connect_args["timeout"] = 30
 
     _engine = create_engine(
-        config.database_url,
+        database_url,
         connect_args=connect_args,
         echo=False,
         pool_pre_ping=True,
     )
 
     # SQLite-specific optimizations
-    if config.database_url.startswith("sqlite"):
+    if database_url.startswith("sqlite"):
         event.listen(_engine, "connect", _enable_sqlite_wal)
 
     # Create all tables for new databases
@@ -173,7 +191,7 @@ def init_db(config: AppConfig) -> Engine:
     # Upgrade existing DB schema and owner backfill when needed
     _run_schema_upgrades(config)
 
-    logger.info("database_initialized", url=config.database_url)
+    logger.info("database_initialized", url=database_url)
 
     # Re-process data with latest non-LLM logic on startup
     _cleanup_on_startup()
@@ -273,6 +291,148 @@ def _run_schema_upgrades(config: AppConfig) -> None:
                     f"ON {table_name}(journey_id)"
                 )
             )
+
+        if "applications" in existing_tables:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_applications_scope_status "
+                    "ON applications(owner_user_id, journey_id, status)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_applications_scope_email_date "
+                    "ON applications(owner_user_id, journey_id, email_date)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_applications_scope_created_at "
+                    "ON applications(owner_user_id, journey_id, created_at)"
+                )
+            )
+
+        if "processed_emails" in existing_tables:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_processed_emails_scope_processed_at "
+                    "ON processed_emails(owner_user_id, journey_id, processed_at)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_processed_emails_scope_llm_processed_at "
+                    "ON processed_emails(owner_user_id, journey_id, llm_used, processed_at)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_processed_emails_scope_application_job_related "
+                    "ON processed_emails(owner_user_id, journey_id, application_id, is_job_related)"
+                )
+            )
+
+        if "status_history" in existing_tables:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_status_history_scope_transition "
+                    "ON status_history(owner_user_id, journey_id, old_status, new_status)"
+                )
+            )
+
+        if "scan_state" in existing_tables:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_scan_state_scope_last_scan_at "
+                    "ON scan_state(owner_user_id, journey_id, last_scan_at)"
+                )
+            )
+
+        if "scan_jobs" in existing_tables:
+            scan_job_existing_columns = {
+                col["name"] for col in inspector.get_columns("scan_jobs")
+            }
+            if "since_date" not in scan_job_existing_columns:
+                conn.execute(text("ALTER TABLE scan_jobs ADD COLUMN since_date VARCHAR(10)"))
+                logger.info("schema_upgrade_added_column", table="scan_jobs", column="since_date")
+            if "before_date" not in scan_job_existing_columns:
+                conn.execute(text("ALTER TABLE scan_jobs ADD COLUMN before_date VARCHAR(10)"))
+                logger.info("schema_upgrade_added_column", table="scan_jobs", column="before_date")
+            if "processing_started_at" not in scan_job_existing_columns:
+                conn.execute(text("ALTER TABLE scan_jobs ADD COLUMN processing_started_at TIMESTAMP"))
+                logger.info(
+                    "schema_upgrade_added_column",
+                    table="scan_jobs",
+                    column="processing_started_at",
+                )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_scan_jobs_scope_status_created_at "
+                    "ON scan_jobs(owner_user_id, journey_id, status, created_at)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_scan_jobs_processing_started_at "
+                    "ON scan_jobs(processing_started_at)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_scan_jobs_active_scope "
+                    "ON scan_jobs(owner_user_id, journey_id) "
+                    "WHERE status IN ('queued', 'running', 'cancel_requested')"
+                )
+            )
+
+        if "scan_job_messages" in existing_tables:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_scan_job_messages_job_status_position "
+                    "ON scan_job_messages(scan_job_id, status, position)"
+                )
+            )
+
+        if not config.database_url.startswith("sqlite"):
+            if "processed_emails" in existing_tables:
+                processed_cols = {
+                    col["name"]: _column_type_name(col["type"])
+                    for col in inspector.get_columns("processed_emails")
+                }
+                if processed_cols.get("uid") == "INTEGER":
+                    conn.execute(text("ALTER TABLE processed_emails ALTER COLUMN uid TYPE BIGINT"))
+                    logger.info("schema_upgrade_altered_column", table="processed_emails", column="uid", type="BIGINT")
+
+            if "scan_state" in existing_tables:
+                scan_state_cols = {
+                    col["name"]: _column_type_name(col["type"])
+                    for col in inspector.get_columns("scan_state")
+                }
+                if scan_state_cols.get("last_uid") == "INTEGER":
+                    conn.execute(text("ALTER TABLE scan_state ALTER COLUMN last_uid TYPE BIGINT"))
+                    logger.info("schema_upgrade_altered_column", table="scan_state", column="last_uid", type="BIGINT")
+
+            if "scan_jobs" in existing_tables:
+                scan_job_cols = {
+                    col["name"]: _column_type_name(col["type"])
+                    for col in inspector.get_columns("scan_jobs")
+                }
+                if scan_job_cols.get("history_start_id") == "INTEGER":
+                    conn.execute(text("ALTER TABLE scan_jobs ALTER COLUMN history_start_id TYPE BIGINT"))
+                    logger.info(
+                        "schema_upgrade_altered_column",
+                        table="scan_jobs",
+                        column="history_start_id",
+                        type="BIGINT",
+                    )
+                if scan_job_cols.get("history_latest_id") == "INTEGER":
+                    conn.execute(text("ALTER TABLE scan_jobs ALTER COLUMN history_latest_id TYPE BIGINT"))
+                    logger.info(
+                        "schema_upgrade_altered_column",
+                        table="scan_jobs",
+                        column="history_latest_id",
+                        type="BIGINT",
+                    )
 
     if config.database_url.startswith("sqlite"):
         _rebuild_sqlite_journey_scoped_tables_if_needed()
@@ -459,7 +619,7 @@ def _sqlite_rebuild_processed_emails(cursor) -> None:  # type: ignore[no-untyped
             id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
             owner_user_id INTEGER,
             journey_id INTEGER,
-            uid INTEGER NOT NULL,
+            uid BIGINT NOT NULL,
             email_account VARCHAR(300) NOT NULL,
             email_folder VARCHAR(100) NOT NULL DEFAULT 'INBOX',
             subject TEXT,
@@ -518,7 +678,7 @@ def _sqlite_rebuild_scan_state(cursor) -> None:  # type: ignore[no-untyped-def]
             journey_id INTEGER,
             email_account VARCHAR(300) NOT NULL,
             email_folder VARCHAR(100) NOT NULL DEFAULT 'INBOX',
-            last_uid INTEGER NOT NULL DEFAULT 0,
+            last_uid BIGINT NOT NULL DEFAULT 0,
             last_scan_at DATETIME,
             FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE CASCADE,
             FOREIGN KEY(journey_id) REFERENCES journeys (id) ON DELETE CASCADE,

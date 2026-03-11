@@ -190,6 +190,47 @@ class ScanStateOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ScanJobOut(BaseModel):
+    id: int
+    status: str
+    mode: str
+    requested_max_emails: int
+    since_date: Optional[str] = None
+    before_date: Optional[str] = None
+    history_fallback_used: bool = False
+    total_messages: int
+    processed_messages: int
+    current_subject: Optional[str] = None
+    emails_matched: int
+    skipped_social_or_promotions: int = 0
+    skipped_not_job_related: int = 0
+    skipped_message_unavailable: int = 0
+    applications_created: int
+    applications_updated: int
+    applications_deleted: int = 0
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_estimated_cost: float
+    errors: List[str] = Field(default_factory=list)
+    non_job_reason_counts: Dict[str, int] = Field(default_factory=dict)
+    created_application_ids: List[int] = Field(default_factory=list)
+    updated_application_ids: List[int] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+    completed_at: Optional[datetime] = None
+
+
+class CreateScanJobOut(BaseModel):
+    job: ScanJobOut
+    reused: bool = False
+
+
+class ScanJobStepOut(BaseModel):
+    job: ScanJobOut
+    processed_in_step: int
+    done: bool
+
+
 # ── Stats schemas ─────────────────────────────────────────
 
 
@@ -236,6 +277,18 @@ class StatsOut(BaseModel):
     daily_llm_costs: List[DailyCost] = []
     daily_applications: List[DailyCount] = []
     hourly_applications_24h: List[HourlyCount] = []
+
+
+class DashboardDataOut(BaseModel):
+    total_applications: int
+    status_breakdown: List[StatusCount]
+    recent_applications: List[ApplicationOut] = []
+    total_emails_scanned: int
+    total_llm_cost: float
+    daily_llm_costs: List[DailyCost] = []
+    daily_applications: List[DailyCount] = []
+    hourly_applications_24h: List[HourlyCount] = []
+    flow: FlowData
 
 
 # ── Journey schemas ───────────────────────────────────────

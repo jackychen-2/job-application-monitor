@@ -32,6 +32,9 @@ class AppConfig(BaseSettings):
     # ── Scanning ──────────────────────────────────────────
     max_scan_emails: int = 20
     imap_timeout_sec: int = 30
+    scan_job_batch_size: int = 5
+    scan_job_continue_enabled: bool = True
+    scan_job_continue_secret: SecretStr = SecretStr("")
 
     # ── LLM ───────────────────────────────────────────────
     llm_enabled: bool = True
@@ -69,6 +72,13 @@ class AppConfig(BaseSettings):
     @field_validator("llm_enabled", mode="before")
     @classmethod
     def parse_bool(cls, v: object) -> bool:
+        if isinstance(v, str):
+            return v.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(v)
+
+    @field_validator("scan_job_continue_enabled", mode="before")
+    @classmethod
+    def parse_scan_job_continue_enabled(cls, v: object) -> bool:
         if isinstance(v, str):
             return v.strip().lower() in {"1", "true", "yes", "on"}
         return bool(v)

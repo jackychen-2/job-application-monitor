@@ -142,6 +142,57 @@ export interface ScanState {
   last_scan_at: string | null;
 }
 
+export type ScanJobMode = "incremental" | "full" | "date_range";
+
+export type ScanJobStatus =
+  | "queued"
+  | "running"
+  | "cancel_requested"
+  | "cancelled"
+  | "completed"
+  | "failed";
+
+export interface ScanJob {
+  id: number;
+  status: ScanJobStatus;
+  mode: ScanJobMode;
+  requested_max_emails: number;
+  since_date: string | null;
+  before_date: string | null;
+  history_fallback_used: boolean;
+  total_messages: number;
+  processed_messages: number;
+  current_subject: string | null;
+  emails_matched: number;
+  skipped_social_or_promotions: number;
+  skipped_not_job_related: number;
+  skipped_message_unavailable: number;
+  applications_created: number;
+  applications_updated: number;
+  applications_deleted: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_estimated_cost: number;
+  errors: string[];
+  non_job_reason_counts: Record<string, number>;
+  created_application_ids: number[];
+  updated_application_ids: number[];
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface CreateScanJobResult {
+  job: ScanJob;
+  reused: boolean;
+}
+
+export interface ScanJobStepResult {
+  job: ScanJob;
+  processed_in_step: number;
+  done: boolean;
+}
+
 export interface StatusCount {
   status: string;
   count: number;
@@ -171,6 +222,10 @@ export interface Stats {
   daily_llm_costs: DailyCost[];
   daily_applications: DailyCount[];
   hourly_applications_24h: HourlyCount[];
+}
+
+export interface DashboardData extends Stats {
+  flow: FlowData;
 }
 
 export interface StatusTransition {

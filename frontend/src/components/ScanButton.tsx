@@ -2,8 +2,14 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { format, subDays, subWeeks, startOfDay } from "date-fns";
 import { DayPicker, DateRange } from "react-day-picker";
 import "react-day-picker/style.css";
-import { getScanStreamUrl, cancelScanStream, getScanRunning, getScanProgress, getLastScanResult } from "../api/client";
-import type { ScanResult } from "../types";
+import {
+  getScanStreamUrl,
+  cancelScanStream,
+  getScanRunning,
+  getScanProgress,
+  getLastScanResult,
+} from "../api/client";
+import type { ScanJob, ScanResult } from "../types";
 
 interface Props {
   mode?: "loading" | "initial" | "default";
@@ -56,6 +62,27 @@ const INITIAL_PRESETS: {
 ];
 
 const EMAIL_COUNT_OPTIONS = [5, 10, 15, 20, 50, 75, 100, 200, 500];
+
+function jobToScanResult(job: ScanJob): ScanResult {
+  return {
+    emails_scanned: job.processed_messages,
+    emails_matched: job.emails_matched,
+    skipped_social_or_promotions: job.skipped_social_or_promotions,
+    skipped_not_job_related: job.skipped_not_job_related,
+    skipped_message_unavailable: job.skipped_message_unavailable,
+    non_job_reason_counts: job.non_job_reason_counts,
+    applications_created: job.applications_created,
+    applications_updated: job.applications_updated,
+    applications_deleted: job.applications_deleted,
+    created_application_ids: job.created_application_ids,
+    updated_application_ids: job.updated_application_ids,
+    total_prompt_tokens: job.total_prompt_tokens,
+    total_completion_tokens: job.total_completion_tokens,
+    total_estimated_cost: job.total_estimated_cost,
+    errors: job.errors,
+    cancelled: job.status === "cancelled",
+  };
+}
 
 export default function ScanButton({ mode = "default", onScanComplete }: Props) {
   const [scanning, setScanning] = useState(false);
@@ -162,8 +189,96 @@ export default function ScanButton({ mode = "default", onScanComplete }: Props) 
     return `${from} -> ${to}`;
   };
 
+  const handleJobPayload = useCallback((job: ScanJob) => {
+    setProgress({
+      processed: job.processed_messages,
+      total: job.total_messages,
+      currentSubject: job.current_subject || "",
+    });
+
+    if (job.status === "completed" || job.status === "cancelled") {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+      scanInProgressRef.current = false;
+      setScanning(false);
+      setProgress(null);
+      onScanComplete(jobToScanResult(job));
+      return;
+    }
+
+    if (job.status === "failed") {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+      scanInProgressRef.current = false;
+      setScanning(false);
+      setProgress(null);
+      setError(job.errors[0] || "Scan failed");
+    }
+  }, [onScanComplete]);
+
+  const handleStreamMessage = useCallback((payload: unknown) => {
+    if (!payload || typeof payload !== "object") {
+      return;
+    }
+
+    const maybeLegacy = payload as {
+      type?: string;
+      processed?: number;
+      total?: number;
+      current_subject?: string;
+      result?: ScanResult;
+      message?: string;
+    };
+    if (maybeLegacy.type === "progress") {
+      setProgress({
+        processed: maybeLegacy.processed || 0,
+        total: maybeLegacy.total || 0,
+        currentSubject: maybeLegacy.current_subject || "",
+      });
+      return;
+    }
+    if (maybeLegacy.type === "complete" && maybeLegacy.result) {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+      scanInProgressRef.current = false;
+      setScanning(false);
+      setProgress(null);
+      onScanComplete(maybeLegacy.result);
+      return;
+    }
+    if (maybeLegacy.type === "error") {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+      scanInProgressRef.current = false;
+      setScanning(false);
+      setProgress(null);
+      setError(maybeLegacy.message || "Scan failed");
+      return;
+    }
+
+    const maybeJob = payload as Partial<ScanJob>;
+    if (
+      typeof maybeJob.id === "number" &&
+      typeof maybeJob.status === "string" &&
+      typeof maybeJob.processed_messages === "number" &&
+      typeof maybeJob.total_messages === "number"
+    ) {
+      handleJobPayload(maybeJob as ScanJob);
+    }
+  }, [handleJobPayload, onScanComplete]);
+
   const handleScan = useCallback((options: {
     incremental?: boolean;
+    scan_all?: boolean;
+    mode?: "incremental" | "full" | "date_range";
     since_date?: string;
     before_date?: string;
     max_emails?: number;
@@ -179,41 +294,34 @@ export default function ScanButton({ mode = "default", onScanComplete }: Props) 
     const url = getScanStreamUrl({
       max_emails: options.max_emails ?? (options.incremental ? 100 : undefined),
       incremental: options.incremental,
+      scan_all: options.scan_all,
+      mode: options.mode,
       since_date: options.since_date,
       before_date: options.before_date,
     });
 
-    const es = new EventSource(url);
+    const es = new EventSource(url, { withCredentials: true });
     eventSourceRef.current = es;
 
-    es.onmessage = (event) => {
+    const parseEvent = (event: MessageEvent<string>) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === "progress") {
-          setProgress({
-            processed: data.processed,
-            total: data.total,
-            currentSubject: data.current_subject || "",
-          });
-        } else if (data.type === "complete") {
-          es.close();
-          eventSourceRef.current = null;
-          scanInProgressRef.current = false;
-          setScanning(false);
-          setProgress(null);
-          onScanComplete(data.result);
-        } else if (data.type === "error") {
-          es.close();
-          eventSourceRef.current = null;
-          scanInProgressRef.current = false;
-          setScanning(false);
-          setProgress(null);
-          setError(data.message || "Scan failed");
-        }
+        handleStreamMessage(data);
       } catch {
         // ignore parse errors
       }
     };
+
+    es.onmessage = parseEvent;
+    es.addEventListener("job", parseEvent as EventListener);
+    es.addEventListener("done", parseEvent as EventListener);
+    es.addEventListener("error", ((event: Event) => {
+      const messageEvent = event as MessageEvent<string>;
+      if (!messageEvent.data) {
+        return;
+      }
+      parseEvent(messageEvent);
+    }) as EventListener);
 
     es.onerror = () => {
       es.close();
@@ -252,7 +360,7 @@ export default function ScanButton({ mode = "default", onScanComplete }: Props) 
         }, 1000);
       }
     };
-  }, [onScanComplete]);
+  }, [handleStreamMessage, onScanComplete]);
 
   const handleCancel = async () => {
     try {
@@ -275,13 +383,14 @@ export default function ScanButton({ mode = "default", onScanComplete }: Props) 
     setSelectedPreset(null);
     setSelectedInitialPreset(null);
     handleScan({
+      mode: "date_range",
       since_date: formatDate(dateRange.from),
       before_date: dateRange.to ? formatDate(dateRange.to) : formatDate(new Date()),
     });
   };
 
   const handleScanCount = () => {
-    handleScan({ max_emails: selectedCount });
+    handleScan({ mode: "full", scan_all: true, max_emails: selectedCount });
   };
 
   const handleScanNew = () => {
@@ -294,6 +403,7 @@ export default function ScanButton({ mode = "default", onScanComplete }: Props) 
     setSelectedInitialPreset(null);
     setDateRange({ from: dates.from, to: dates.to });
     handleScan({
+      mode: "date_range",
       since_date: formatDate(dates.from),
       before_date: formatDate(dates.to),
     });
@@ -305,6 +415,15 @@ export default function ScanButton({ mode = "default", onScanComplete }: Props) 
     setSelectedPreset(null);
     setDateRange({ from: dates.from, to: dates.to });
   };
+
+  if (mode === "loading") {
+    return (
+      <div className="flex items-center gap-2">
+        <div className="h-10 w-32 animate-pulse rounded-md bg-gray-200" />
+        <div className="h-10 w-24 animate-pulse rounded-md bg-gray-200" />
+      </div>
+    );
+  }
 
   if (scanning) {
     return (
@@ -327,15 +446,6 @@ export default function ScanButton({ mode = "default", onScanComplete }: Props) 
         >
           Cancel
         </button>
-      </div>
-    );
-  }
-
-  if (mode === "loading") {
-    return (
-      <div className="flex items-center gap-2">
-        <div className="h-10 w-32 animate-pulse rounded-md bg-gray-200" />
-        <div className="h-10 w-24 animate-pulse rounded-md bg-gray-200" />
       </div>
     );
   }

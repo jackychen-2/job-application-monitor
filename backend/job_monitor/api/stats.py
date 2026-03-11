@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends
@@ -11,7 +12,14 @@ from sqlalchemy.orm import Session
 
 from job_monitor.auth.deps import get_owner_scoped_db
 from job_monitor.models import Application, ProcessedEmail, StatusHistory
-from job_monitor.schemas import ApplicationOut, FlowData, StatsOut, StatusCount, StatusTransition
+from job_monitor.schemas import (
+    ApplicationOut,
+    DashboardDataOut,
+    FlowData,
+    StatsOut,
+    StatusCount,
+    StatusTransition,
+)
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/stats", tags=["stats"])
@@ -23,27 +31,22 @@ def _as_utc(value: datetime | None) -> datetime | None:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
-@router.get("", response_model=StatsOut)
-def get_stats(db: Session = Depends(get_owner_scoped_db)) -> StatsOut:
-    """Return dashboard statistics: totals, status breakdown, recent activity, daily costs."""
-    total = db.query(func.count(Application.id)).scalar() or 0
-
-    # Status breakdown
+def _get_status_snapshot(db: Session) -> tuple[int, list[StatusCount]]:
     status_rows = (
         db.query(Application.status, func.count(Application.id))
         .group_by(Application.status)
         .all()
     )
-    status_breakdown = [StatusCount(status=s, count=c) for s, c in status_rows]
+    status_breakdown = [StatusCount(status=s, count=int(c)) for s, c in status_rows]
+    total = sum(item.count for item in status_breakdown)
+    return total, status_breakdown
 
-    # Recent applications (last 10)
-    recent = (
-        db.query(Application)
-        .order_by(Application.created_at.desc())
-        .limit(10)
-        .all()
-    )
 
+def _build_stats_fields(
+    db: Session,
+    total: int,
+    status_breakdown: list[StatusCount],
+) -> dict[str, Any]:
     # Email scan totals
     total_emails = db.query(func.count(ProcessedEmail.id)).scalar() or 0
     total_cost = db.query(func.sum(ProcessedEmail.estimated_cost_usd)).scalar() or 0.0
@@ -100,38 +103,23 @@ def get_stats(db: Session = Depends(get_owner_scoped_db)) -> StatsOut:
     )
     daily_costs = [{"date": str(row.date), "cost": round(float(row.cost or 0), 6)} for row in daily_costs_rows]
 
-    return StatsOut(
-        total_applications=total,
-        status_breakdown=status_breakdown,
-        recent_applications=[ApplicationOut.model_validate(a) for a in recent],
-        total_emails_scanned=total_emails,
-        total_llm_cost=round(total_cost, 6),
-        daily_llm_costs=daily_costs,
-        daily_applications=daily_applications,
-        hourly_applications_24h=hourly_applications_24h,
-    )
+    return {
+        "total_applications": total,
+        "status_breakdown": status_breakdown,
+        "total_emails_scanned": total_emails,
+        "total_llm_cost": round(total_cost, 6),
+        "daily_llm_costs": daily_costs,
+        "daily_applications": daily_applications,
+        "hourly_applications_24h": hourly_applications_24h,
+    }
 
 
-@router.get("/flow", response_model=FlowData)
-def get_flow_data(db: Session = Depends(get_owner_scoped_db)) -> FlowData:
-    """Return application flow data: status counts + transition edges for Sankey diagram.
-
-    Aggregates StatusHistory transitions (old_status → new_status) and also counts
-    applications that are still in their initial status (no transitions yet).
-    """
-    total = db.query(func.count(Application.id)).scalar() or 0
-
-    # Status breakdown (current snapshot)
-    status_rows = (
-        db.query(Application.status, func.count(Application.id))
-        .group_by(Application.status)
-        .all()
-    )
-    status_counts = [StatusCount(status=s, count=c) for s, c in status_rows]
-
-    # Aggregate transitions from StatusHistory.
-    # Initial creation entries have old_status = NULL; map them to a virtual root
-    # node so the Sankey graph can be built from transition edges only.
+def _build_flow_data(
+    db: Session,
+    total: int,
+    status_counts: list[StatusCount],
+) -> FlowData:
+    """Build Sankey flow data from the current status snapshot + status history."""
     from_status_expr = func.coalesce(StatusHistory.old_status, "Applications")
     transition_rows = (
         db.query(
@@ -143,13 +131,56 @@ def get_flow_data(db: Session = Depends(get_owner_scoped_db)) -> FlowData:
         .all()
     )
     transitions = [
-        StatusTransition(from_status=old, to_status=new, count=cnt)
+        StatusTransition(from_status=old, to_status=new, count=int(cnt))
         for old, new, cnt in transition_rows
-        if old != new  # skip self-transitions
+        if old != new
     ]
 
     return FlowData(
         status_counts=status_counts,
         transitions=transitions,
         total=total,
+    )
+
+
+@router.get("", response_model=StatsOut)
+def get_stats(db: Session = Depends(get_owner_scoped_db)) -> StatsOut:
+    """Return dashboard statistics: totals, status breakdown, recent activity, daily costs."""
+    total, status_breakdown = _get_status_snapshot(db)
+
+    recent = (
+        db.query(Application)
+        .order_by(Application.created_at.desc())
+        .limit(10)
+        .all()
+    )
+
+    stats_fields = _build_stats_fields(db, total, status_breakdown)
+    return StatsOut(
+        recent_applications=[ApplicationOut.model_validate(a) for a in recent],
+        **stats_fields,
+    )
+
+
+@router.get("/flow", response_model=FlowData)
+def get_flow_data(db: Session = Depends(get_owner_scoped_db)) -> FlowData:
+    """Return application flow data: status counts + transition edges for Sankey diagram.
+
+    Aggregates StatusHistory transitions (old_status → new_status) and also counts
+    applications that are still in their initial status (no transitions yet).
+    """
+    total, status_counts = _get_status_snapshot(db)
+    return _build_flow_data(db, total, status_counts)
+
+
+@router.get("/dashboard", response_model=DashboardDataOut)
+def get_dashboard_data(db: Session = Depends(get_owner_scoped_db)) -> DashboardDataOut:
+    """Return the dashboard payload in one request to avoid duplicate aggregates."""
+    total, status_breakdown = _get_status_snapshot(db)
+    stats_fields = _build_stats_fields(db, total, status_breakdown)
+    flow = _build_flow_data(db, total, status_breakdown)
+    return DashboardDataOut(
+        recent_applications=[],
+        flow=flow,
+        **stats_fields,
     )

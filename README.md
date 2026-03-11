@@ -1,6 +1,6 @@
 # Job Application Monitor
 
-A production-quality tool that monitors your Gmail inbox via Google OAuth + Gmail API (read-only), detects job-application related messages using regex rules + LLM (OpenAI), and tracks applications in a SQLite database with a web dashboard.
+A Gmail-driven job tracker with Google OAuth, FastAPI, React, and a database-backed incremental scan job system that works both locally with SQLite and on Vercel with Postgres.
 
 ## Features
 
@@ -14,7 +14,8 @@ A production-quality tool that monitors your Gmail inbox via Google OAuth + Gmai
 - **Duplicate Detection** — Prevents re-processing emails and duplicate application entries
 - **Export** — Download applications as CSV or Excel
 - **Retry Logic** — Gmail API and LLM calls retry on transient failures (tenacity)
-- **Docker Ready** — Single-command deployment with Docker Compose
+- **Database-Backed Scan Jobs** — Incremental scans persist progress/results in the database instead of in-memory SSE state
+- **Vercel Ready** — Split frontend/backend deployment with Postgres for production
 
 ## Architecture
 
@@ -49,7 +50,7 @@ frontend/src/
 ### 1. Clone and configure
 
 ```bash
-cp backend/.env.example .env
+cp .env.example .env
 # Edit .env with Google OAuth + encryption settings and optional OpenAI key
 ```
 
@@ -89,6 +90,30 @@ docker compose up --build
 
 Open **http://localhost:8000** in your browser.
 
+## Vercel Production Shape
+
+- Frontend Vercel project:
+  root directory `frontend/`
+  domain `https://offerthread.com`
+- Backend Vercel project:
+  root directory `backend/`
+  domain `https://api.offerthread.com`
+- Database:
+  hosted Postgres via Vercel Marketplace / Neon
+
+This repo now supports:
+
+- local development with `SQLite`
+- production deployment with `Postgres`
+- front-end polling of incremental scan jobs via:
+  - `POST /api/scan/jobs`
+  - `GET /api/scan/jobs/active`
+  - `GET /api/scan/jobs/{job_id}`
+  - `POST /api/scan/jobs/{job_id}/step`
+  - `POST /api/scan/jobs/{job_id}/cancel`
+
+The first Vercel release intentionally removes the evaluation UI from the main app shell and only keeps incremental scanning.
+
 ## API Endpoints
 
 | Method | Path | Description |
@@ -99,7 +124,12 @@ Open **http://localhost:8000** in your browser.
 | POST | `/api/applications` | Create application manually |
 | PATCH | `/api/applications/{id}` | Update application |
 | DELETE | `/api/applications/{id}` | Delete application |
-| POST | `/api/scan` | Trigger email scan |
+| POST | `/api/scan` | Compatibility wrapper that creates an incremental scan job |
+| POST | `/api/scan/jobs` | Create or reuse the active incremental scan job |
+| GET | `/api/scan/jobs/active` | Return the active scan job for the current journey |
+| GET | `/api/scan/jobs/{id}` | Read scan job progress |
+| POST | `/api/scan/jobs/{id}/step` | Process the next batch of messages |
+| POST | `/api/scan/jobs/{id}/cancel` | Request cancellation |
 | GET | `/api/scan/status` | Last scan state |
 | GET | `/api/stats` | Dashboard statistics |
 | GET | `/api/export?format=csv` | Download CSV |
@@ -107,7 +137,7 @@ Open **http://localhost:8000** in your browser.
 
 ## Environment Variables
 
-See [`backend/.env.example`](backend/.env.example) for all configuration options.
+See [`.env.example`](.env.example) and [`frontend/.env.example`](frontend/.env.example) for local examples.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -123,9 +153,11 @@ See [`backend/.env.example`](backend/.env.example) for all configuration options
 | `AUTH_COOKIE_NAME` | ❌ | `job_monitor_session` | Session cookie name |
 | `AUTH_SESSION_TTL_DAYS` | ❌ | `30` | Login session lifetime |
 | `AUTH_COOKIE_SECURE` | ❌ | `false` | Use `true` for HTTPS deployments |
+| `CORS_ORIGINS` | ❌ | `http://localhost:5173,http://localhost:3000` | Allowed browser origins |
 | `LLM_ENABLED` | ❌ | `true` | Enable LLM extraction |
 | `LLM_API_KEY` | ❌ | — | OpenAI API key |
 | `DATABASE_URL` | ❌ | `sqlite:///job_monitor.db` | Database URL |
+| `SCAN_JOB_BATCH_SIZE` | ❌ | `5` | Max emails processed per scan step |
 
 ## Google OAuth Setup
 
@@ -139,6 +171,19 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 ```
 
 After login, scans run against the logged-in user's Gmail account.
+
+## Data Migration
+
+To move your existing local SQLite data into production Postgres:
+
+```bash
+./.venv-new/bin/python backend/scripts/migrate_sqlite_to_postgres.py \
+  --sqlite-path job_monitor.db \
+  --database-url "$DATABASE_URL" \
+  --truncate
+```
+
+The migration script copies the core user/application tables and intentionally skips `auth_sessions`.
 
 ## Development
 
