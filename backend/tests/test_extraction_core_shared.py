@@ -34,6 +34,11 @@ class _StubLLMProvider:
         return LLMLinkConfirmResult(is_same_application=False)
 
 
+class _ConfirmingStubLLMProvider(_StubLLMProvider):
+    def confirm_same_application(self, *args, **kwargs) -> LLMLinkConfirmResult:
+        return LLMLinkConfirmResult(decision="same", is_same_application=True, confidence=0.95)
+
+
 def _make_config(*, llm_enabled: bool) -> AppConfig:
     return AppConfig(
         imap_host="imap.example.com",
@@ -227,7 +232,7 @@ def test_core_strong_rule_fallback_overrides_llm_false_negative() -> None:
     assert prediction.extraction.company == "Amazon"
     assert prediction.extraction.job_title == "Database Engineer"
     assert prediction.extraction.req_id == "3199345"
-    assert prediction.extraction.status == "已申请"
+    assert prediction.extraction.status == "Unknown"
 
 
 def test_eval_runner_persists_non_job_reason_and_decision_log(monkeypatch) -> None:
@@ -461,7 +466,7 @@ def test_pipeline_strong_rule_fallback_tracks_aws_false_negative() -> None:
         assert app.company == "Amazon"
         assert app.job_title == "Database Engineer"
         assert app.req_id == "3199345"
-        assert app.status == "已申请"
+        assert app.status == "Unknown"
         assert summary.emails_matched == 1
         assert summary.skipped_not_job_related == 0
     finally:
@@ -529,6 +534,100 @@ def test_pipeline_does_not_backfill_assessment_name_as_job_title() -> None:
         assert apps[0].job_title == ""
         assert apps[0].status == "OA"
         assert apps[0].email_subject == oa_email.subject
+    finally:
+        session.close()
+
+
+def test_pipeline_rescan_clears_existing_assessment_only_title() -> None:
+    session = _new_session()
+    try:
+        app = Application(
+            owner_user_id=1,
+            company="Visa",
+            normalized_company="visa",
+            job_title="Technical Skills Assessment (Coding - Advanced)",
+            status="已申请",
+            source="email",
+        )
+        session.add(app)
+        session.commit()
+
+        parsed = ParsedEmailData(
+            subject="Your HackerRank Visa Technical Skills Assessment (Coding - Advanced) Invitation",
+            sender="Visa Talent Team <support@hackerrankforwork.com>",
+            date_raw="Mon, 9 Mar 2026 04:38:00 -0700",
+            date_pt="2026-03-09 04:38:00 PDT",
+            date_dt=datetime(2026, 3, 9, 11, 38, tzinfo=timezone.utc),
+            body_text="Please complete the HackerRank assessment to continue.",
+            message_id="visa-fix-msg-1@example.com",
+            gmail_thread_id="visa-fix-thread-1",
+        )
+
+        _process_single_email(
+            session=session,
+            config=_make_config(llm_enabled=True),
+            llm_provider=_ConfirmingStubLLMProvider(
+                _make_oa_assessment_result(company="Visa", job_title="")
+            ),
+            owner_user_id=1,
+            mailbox_email="candidate@example.com",
+            mailbox_folder="INBOX",
+            uid=99,
+            parsed=parsed,
+            summary=ScanSummary(),
+        )
+        session.commit()
+
+        refreshed = session.get(Application, app.id)
+        assert refreshed is not None
+        assert refreshed.job_title == ""
+    finally:
+        session.close()
+
+
+def test_pipeline_rescan_keeps_non_artifact_title_when_incoming_title_is_empty() -> None:
+    session = _new_session()
+    try:
+        app = Application(
+            owner_user_id=1,
+            company="Visa",
+            normalized_company="visa",
+            job_title="data engineer",
+            status="已申请",
+            source="email",
+        )
+        session.add(app)
+        session.commit()
+
+        parsed = ParsedEmailData(
+            subject="Your HackerRank Visa Technical Skills Assessment (Coding - Advanced) Invitation",
+            sender="Visa Talent Team <support@hackerrankforwork.com>",
+            date_raw="Mon, 9 Mar 2026 04:38:00 -0700",
+            date_pt="2026-03-09 04:38:00 PDT",
+            date_dt=datetime(2026, 3, 9, 11, 38, tzinfo=timezone.utc),
+            body_text="Please complete the HackerRank assessment to continue.",
+            message_id="visa-fix-msg-2@example.com",
+            gmail_thread_id="visa-fix-thread-2",
+        )
+
+        _process_single_email(
+            session=session,
+            config=_make_config(llm_enabled=True),
+            llm_provider=_ConfirmingStubLLMProvider(
+                _make_oa_assessment_result(company="Visa", job_title="")
+            ),
+            owner_user_id=1,
+            mailbox_email="candidate@example.com",
+            mailbox_folder="INBOX",
+            uid=100,
+            parsed=parsed,
+            summary=ScanSummary(),
+        )
+        session.commit()
+
+        refreshed = session.get(Application, app.id)
+        assert refreshed is not None
+        assert refreshed.job_title == "data engineer"
     finally:
         session.close()
 

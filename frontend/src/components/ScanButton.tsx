@@ -409,11 +409,16 @@ export default function ScanButton({ mode = "default", onScanComplete }: Props) 
     });
   };
 
-  const handleInitialPresetSelect = (preset: typeof INITIAL_PRESETS[number]) => {
+  const handleInitialPresetScan = (preset: typeof INITIAL_PRESETS[number]) => {
     const dates = preset.getDates();
     setSelectedInitialPreset(preset.key);
     setSelectedPreset(null);
     setDateRange({ from: dates.from, to: dates.to });
+    handleScan({
+      mode: "date_range",
+      since_date: formatDate(dates.from),
+      before_date: formatDate(dates.to),
+    });
   };
 
   if (mode === "loading") {
@@ -467,7 +472,7 @@ export default function ScanButton({ mode = "default", onScanComplete }: Props) 
               Initial Scan
             </button>
             <p className="max-w-xs text-right text-xs text-amber-700">
-              New journey: choose a time range for the first import.
+              New journey: start with a preset or choose a custom range.
             </p>
           </div>
         ) : (
@@ -496,7 +501,7 @@ export default function ScanButton({ mode = "default", onScanComplete }: Props) 
                 <div>
                   <h3 className="text-sm font-semibold text-gray-900">Choose initial import range</h3>
                   <p className="mt-1 text-xs leading-5 text-gray-500">
-                    Start with a limited time range. After this import, this journey can use Scan New.
+                    Preset ranges start immediately. Use Custom Range if you need specific dates. After this import, this journey can use Scan New.
                   </p>
                 </div>
 
@@ -505,7 +510,7 @@ export default function ScanButton({ mode = "default", onScanComplete }: Props) 
                     <button
                       key={preset.key}
                       type="button"
-                      onClick={() => handleInitialPresetSelect(preset)}
+                      onClick={() => handleInitialPresetScan(preset)}
                       className={`rounded-lg border px-3 py-3 text-left transition-colors ${
                         selectedInitialPreset === preset.key
                           ? "border-indigo-300 bg-indigo-50 text-indigo-700"
@@ -556,7 +561,7 @@ export default function ScanButton({ mode = "default", onScanComplete }: Props) 
                       disabled={!dateRange?.from}
                       className="rounded-md bg-indigo-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
                     >
-                      Scan Selected Range
+                      Scan Custom Range
                     </button>
                   </div>
                 </div>

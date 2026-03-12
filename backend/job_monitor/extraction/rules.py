@@ -334,6 +334,12 @@ _ASSESSMENT_TITLE_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+_INVALID_JOB_TITLES = {
+    "the", "a", "an", "to", "for", "at", "in", "on", "of", "and", "or",
+    "your", "our", "this", "that", "it", "is", "are", "was", "were",
+    "application", "job", "position", "role", "unknown", "n/a", "none",
+}
+
 
 def _has_role_hint(text: str) -> bool:
     lowered = (text or "").lower()
@@ -371,6 +377,28 @@ def normalize_job_title_candidate(text: str) -> str:
         return ""
 
     return value
+
+
+def is_blank_or_artifact_job_title(text: str | None) -> bool:
+    """Return True when a stored title is blank or clearly an OA/event artifact."""
+    raw = (text or "").strip()
+    if not raw:
+        return True
+    return normalize_job_title_candidate(raw) == ""
+
+
+def validate_job_title_candidate(text: str, *, max_length: int = 80) -> str:
+    """Return a cleaned job title, or empty string when the candidate looks unsafe."""
+    cleaned = normalize_job_title_candidate(text)
+    if not cleaned:
+        return ""
+    if len(cleaned) < 3 or len(cleaned) > max_length:
+        return ""
+    if cleaned.lower() in _INVALID_JOB_TITLES:
+        return ""
+    if ". " in cleaned or cleaned[0].islower():
+        return ""
+    return cleaned
 
 
 def extract_job_title(subject: str, body: str) -> str:

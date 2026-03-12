@@ -40,22 +40,16 @@ from job_monitor.extraction.llm import (
 from job_monitor.extraction.rules import (
     extract_job_req_id,
     extract_job_title,
+    is_blank_or_artifact_job_title,
     normalize_job_title_candidate,
     normalize_req_id,
     split_title_and_req_id,
+    validate_job_title_candidate,
 )
 from job_monitor.linking.resolver import (
     normalize_company,
     resolve_by_company,
 )
-
-# Garbage titles that should be replaced with empty string
-_INVALID_TITLES = {
-    "the", "a", "an", "to", "for", "at", "in", "on", "of", "and", "or",
-    "your", "our", "this", "that", "it", "is", "are", "was", "were",
-    "application", "job", "position", "role", "unknown", "n/a", "none",
-}
-
 
 def _is_manual_source(source: str | None) -> bool:
     return (source or "").strip().lower().startswith("manual")
@@ -63,39 +57,25 @@ def _is_manual_source(source: str | None) -> bool:
 
 def _validate_job_title(title: str) -> str:
     """Return the title if valid, or empty string for garbage values."""
-    cleaned = normalize_job_title_candidate(title)
-    if not cleaned:
-        return ""
-    if len(cleaned) < 3:
-        return ""
-    # Max length: real job titles are rarely > 80 chars
-    if len(cleaned) > 80:
-        return ""
-    if cleaned.lower() in _INVALID_TITLES:
-        return ""
-    # Reject sentence-like patterns (contains periods followed by spaces, or starts with lowercase)
-    if ". " in cleaned or cleaned[0].islower():
-        return ""
-    return cleaned
+    return validate_job_title_candidate(title)
 
 
 def _normalize_stored_title_for_rescan(existing_title: str | None, incoming_title: str | None) -> str | None:
     """Decide whether a rescan should repair an already stored title.
 
-    We only clear/replace legacy titles that normalize to empty, such as
-    assessment event names accidentally stored as job titles.
+    We only clear/replace legacy titles that are blank or clear OA/event
+    artifacts. A merely "odd" title should not be erased by a later rescan.
     """
     current_raw = (existing_title or "").strip()
     if not current_raw:
         cleaned_incoming = _validate_job_title(incoming_title or "")
         return cleaned_incoming or None
 
-    current_clean = _validate_job_title(current_raw)
-    if current_clean:
+    if not is_blank_or_artifact_job_title(current_raw):
         return None
 
     cleaned_incoming = _validate_job_title(incoming_title or "")
-    return cleaned_incoming
+    return cleaned_incoming or ""
 
 
 def _extract_title_and_req_id(
@@ -263,8 +243,9 @@ def _get_or_create_application(
             existing.company = company
             existing.normalized_company = normalized
             changed_existing = True
-        if job_title and not (existing.job_title or "").strip():
-            existing.job_title = job_title
+        repaired_title = _normalize_stored_title_for_rescan(existing.job_title, job_title)
+        if repaired_title is not None and (existing.job_title or "") != repaired_title:
+            existing.job_title = repaired_title
             changed_existing = True
         if req_id and existing.req_id != req_id:
             existing.req_id = req_id
@@ -717,8 +698,9 @@ def _process_single_email(
                 app.company = company
                 app.normalized_company = normalize_company(company)
                 changed = True
-            if job_title and not (app.job_title or "").strip():
-                app.job_title = job_title
+            repaired_title = _normalize_stored_title_for_rescan(app.job_title, job_title)
+            if repaired_title is not None and (app.job_title or "") != repaired_title:
+                app.job_title = repaired_title
                 changed = True
             if req_id and app.req_id != req_id:
                 app.req_id = req_id

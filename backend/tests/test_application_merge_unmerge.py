@@ -375,6 +375,165 @@ def test_system_dedupe_prefers_manual_app_and_merges_email_duplicate() -> None:
         session.close()
 
 
+def test_system_dedupe_merges_shared_email_identity_and_keeps_richer_title() -> None:
+    session = _new_session()
+    try:
+        assessment_app = Application(
+            owner_user_id=1,
+            journey_id=10,
+            company="Visa",
+            normalized_company="visa",
+            job_title="Technical Skills Assessment (Coding - Advanced)",
+            status="已申请",
+            source="email",
+        )
+        role_app = Application(
+            owner_user_id=1,
+            journey_id=10,
+            company="Visa",
+            normalized_company="visa",
+            job_title="Senior Software Engineer - Big Data/GenAI",
+            status="已申请",
+            source="email",
+        )
+        session.add_all([assessment_app, role_app])
+        session.flush()
+
+        same_email_dt = datetime(2026, 3, 2, 14, 8, 17)
+        session.add_all(
+            [
+                ProcessedEmail(
+                    owner_user_id=1,
+                    journey_id=10,
+                    uid=2200,
+                    email_account="candidate@example.com",
+                    email_folder="INBOX",
+                    gmail_message_id="legacy-header-id@example.com",
+                    subject="Visa has received your application",
+                    sender="Visa <notification@smartrecruiters.com>",
+                    email_date=same_email_dt,
+                    is_job_related=True,
+                    application_id=assessment_app.id,
+                ),
+                ProcessedEmail(
+                    owner_user_id=1,
+                    journey_id=10,
+                    uid=2201,
+                    email_account="candidate@example.com",
+                    email_folder="INBOX",
+                    gmail_message_id="gmail-internal-id-1",
+                    subject="Visa has received your application",
+                    sender="Visa <notification@smartrecruiters.com>",
+                    email_date=same_email_dt,
+                    is_job_related=True,
+                    application_id=role_app.id,
+                ),
+                ProcessedEmail(
+                    owner_user_id=1,
+                    journey_id=10,
+                    uid=2202,
+                    email_account="candidate@example.com",
+                    email_folder="INBOX",
+                    gmail_message_id="gmail-internal-id-2",
+                    subject="Next Steps with Visa – Response Required",
+                    sender="Nicole Carlson from Visa <notifications@smartrecruiters.com>",
+                    email_date=datetime(2026, 3, 6, 11, 15, 15),
+                    is_job_related=True,
+                    application_id=role_app.id,
+                ),
+            ]
+        )
+        session.commit()
+
+        merged = merge_owner_duplicate_applications(session, owner_user_id=1, journey_id=10)
+        session.commit()
+
+        assert merged == 1
+        apps = session.query(Application).filter(Application.owner_user_id == 1).all()
+        assert len(apps) == 1
+        assert apps[0].id == role_app.id
+        assert apps[0].job_title == "Senior Software Engineer - Big Data/GenAI"
+        assert (
+            session.query(ProcessedEmail)
+            .filter(ProcessedEmail.application_id == role_app.id)
+            .count()
+            == 3
+        )
+    finally:
+        session.close()
+
+
+def test_system_dedupe_does_not_merge_shared_template_with_two_valid_titles() -> None:
+    session = _new_session()
+    try:
+        data_app = Application(
+            owner_user_id=1,
+            journey_id=10,
+            company="Visa",
+            normalized_company="visa",
+            job_title="Data Engineer",
+            status="已申请",
+            source="email",
+        )
+        product_app = Application(
+            owner_user_id=1,
+            journey_id=10,
+            company="Visa",
+            normalized_company="visa",
+            job_title="Product Manager",
+            status="已申请",
+            source="email",
+        )
+        session.add_all([data_app, product_app])
+        session.flush()
+
+        same_email_dt = datetime(2026, 3, 2, 14, 8, 17)
+        session.add_all(
+            [
+                ProcessedEmail(
+                    owner_user_id=1,
+                    journey_id=10,
+                    uid=2300,
+                    email_account="candidate@example.com",
+                    email_folder="INBOX",
+                    gmail_message_id="data-msg-1",
+                    subject="Visa has received your application",
+                    sender="Visa <notification@smartrecruiters.com>",
+                    email_date=same_email_dt,
+                    is_job_related=True,
+                    application_id=data_app.id,
+                ),
+                ProcessedEmail(
+                    owner_user_id=1,
+                    journey_id=10,
+                    uid=2301,
+                    email_account="candidate@example.com",
+                    email_folder="INBOX",
+                    gmail_message_id="product-msg-1",
+                    subject="Visa has received your application",
+                    sender="Visa <notification@smartrecruiters.com>",
+                    email_date=same_email_dt,
+                    is_job_related=True,
+                    application_id=product_app.id,
+                ),
+            ]
+        )
+        session.commit()
+
+        merged = merge_owner_duplicate_applications(session, owner_user_id=1, journey_id=10)
+        session.commit()
+
+        assert merged == 0
+        assert (
+            session.query(Application)
+            .filter(Application.owner_user_id == 1)
+            .count()
+            == 2
+        )
+    finally:
+        session.close()
+
+
 def test_system_dedupe_skips_multiple_manual_duplicates() -> None:
     session = _new_session()
     try:

@@ -534,7 +534,7 @@ _PROGRESSED_STATUSES = {"OA", "面试", "Offer", "Onboarding", "拒绝"}
 _TITLE_SYNONYMS = {
     "sr.": "senior", "sr": "senior",
     "jr.": "junior", "jr": "junior",
-    "mgr": "manager", "eng": "engineer", "dev": "developer",
+    "mgr": "manager", "eng": "engineer", "dev": "developer", "sw": "software",
     "swe": "software engineer", "sde": "software development engineer",
     "mts": "member of technical staff",
     "iii": "3", "ii": "2", "i": "1", "iv": "4", "v": "5",
