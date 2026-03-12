@@ -1,0 +1,51 @@
+name: Vercel Frontend
+
+on:
+  push:
+    paths:
+      - "frontend/**"
+      - ".github/workflows/vercel-frontend.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: vercel-frontend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      VERCEL_ORG_ID: team_Cm6uFYzVJybYuDWVnqjoq0yC
+      VERCEL_PROJECT_ID: prj_GKITmq7Ho3FW4EuF2bPKTpBQ704G
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Pull Vercel project settings
+        run: |
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            vercel pull --yes --environment=production --token="${{ secrets.VERCEL_TOKEN }}"
+          else
+            vercel pull --yes --environment=preview --token="${{ secrets.VERCEL_TOKEN }}"
+          fi
+
+      - name: Deploy frontend
+        run: |
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            vercel deploy --prod --yes --token="${{ secrets.VERCEL_TOKEN }}"
+          else
+            vercel deploy --yes --token="${{ secrets.VERCEL_TOKEN }}"
+          fi
