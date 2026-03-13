@@ -241,6 +241,18 @@ def _run_schema_upgrades(config: AppConfig) -> None:
                     table="applications",
                     column="dedupe_locked",
                 )
+            if "applied_at" not in app_columns:
+                conn.execute(
+                    text(
+                        "ALTER TABLE applications "
+                        "ADD COLUMN applied_at TIMESTAMP"
+                    )
+                )
+                logger.info(
+                    "schema_upgrade_added_column",
+                    table="applications",
+                    column="applied_at",
+                )
             conn.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS idx_applications_dedupe_locked "
@@ -310,6 +322,12 @@ def _run_schema_upgrades(config: AppConfig) -> None:
                 text(
                     "CREATE INDEX IF NOT EXISTS idx_applications_scope_email_date "
                     "ON applications(owner_user_id, journey_id, email_date)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_applications_scope_applied_at "
+                    "ON applications(owner_user_id, journey_id, applied_at)"
                 )
             )
             conn.execute(
@@ -569,6 +587,7 @@ def _sqlite_rebuild_applications(cursor) -> None:  # type: ignore[no-untyped-def
     cursor.execute("PRAGMA table_info('applications')")
     app_columns = {str(row[1]) for row in cursor.fetchall()}
     has_dedupe_locked = "dedupe_locked" in app_columns
+    has_applied_at = "applied_at" in app_columns
 
     cursor.execute(
         """
@@ -583,6 +602,7 @@ def _sqlite_rebuild_applications(cursor) -> None:  # type: ignore[no-untyped-def
             email_subject TEXT,
             email_sender VARCHAR(300),
             email_date DATETIME,
+            applied_at DATETIME,
             status VARCHAR(50) NOT NULL DEFAULT '已申请',
             source VARCHAR(50) NOT NULL DEFAULT 'email',
             notes TEXT,
@@ -598,11 +618,11 @@ def _sqlite_rebuild_applications(cursor) -> None:  # type: ignore[no-untyped-def
         f"""
         INSERT INTO applications__journey_new (
             id, owner_user_id, journey_id, company, normalized_company, job_title, req_id,
-            email_subject, email_sender, email_date, status, source, notes, dedupe_locked, created_at, updated_at
+            email_subject, email_sender, email_date, applied_at, status, source, notes, dedupe_locked, created_at, updated_at
         )
         SELECT
             id, owner_user_id, journey_id, company, normalized_company, job_title, req_id,
-            email_subject, email_sender, email_date, status, source, notes,
+            email_subject, email_sender, email_date, {"applied_at" if has_applied_at else "NULL"}, status, source, notes,
             {"dedupe_locked" if has_dedupe_locked else "0"},
             created_at, updated_at
         FROM applications
@@ -615,6 +635,7 @@ def _sqlite_rebuild_applications(cursor) -> None:  # type: ignore[no-untyped-def
     cursor.execute("CREATE INDEX IF NOT EXISTS ix_applications_company ON applications(company)")
     cursor.execute("CREATE INDEX IF NOT EXISTS ix_applications_normalized_company ON applications(normalized_company)")
     cursor.execute("CREATE INDEX IF NOT EXISTS ix_applications_status ON applications(status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS ix_applications_applied_at ON applications(applied_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_applications_dedupe_locked ON applications(dedupe_locked)")
 
 

@@ -50,7 +50,7 @@ def test_get_stats_includes_hourly_applications_24h() -> None:
         stats = get_stats(db=session)
 
         assert len(stats.hourly_applications_24h) == 24
-        assert sum(item.count for item in stats.hourly_applications_24h) == 2
+        assert sum(item.count for item in stats.hourly_applications_24h) == 1
     finally:
         session.close()
 

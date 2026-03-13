@@ -22,6 +22,7 @@ ProgressCallback = Callable[[ProgressInfo], None]
 
 from sqlalchemy.orm import Session
 
+from job_monitor.application_dates import assign_applied_at_if_missing
 from job_monitor.config import AppConfig
 from job_monitor.dedupe import merge_owner_duplicate_applications
 from job_monitor.email.gmail_client import (
@@ -757,6 +758,13 @@ def _process_single_email(
             if changed:
                 summary.applications_updated += 1
                 _append_unique_application_id(summary.updated_application_ids, app.id)
+
+    assign_applied_at_if_missing(
+        app,
+        status=app.status,
+        preferred_at=email_date,
+        fallback_at=app.created_at,
+    )
 
     # ── Step 6: 清理孤立的旧Application ───────────────────
     # 如果这封邮件之前关联到不同的app，清理旧的（如果没有其他邮件引用）

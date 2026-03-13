@@ -8,6 +8,7 @@ export interface Application {
   email_subject: string | null;
   email_sender: string | null;
   email_date: string | null;
+  applied_at: string | null;
   status: string;
   source: string;
   notes: string | null;

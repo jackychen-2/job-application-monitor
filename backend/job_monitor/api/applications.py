@@ -12,6 +12,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from job_monitor.application_dates import (
+    assign_applied_at_if_missing,
+    merge_applied_at,
+    refresh_applied_at,
+)
 from job_monitor.auth.deps import get_owner_scoped_db
 from job_monitor.extraction.rules import normalize_req_id
 from job_monitor.linking.resolver import normalize_company
@@ -72,6 +77,7 @@ def _serialize_application_snapshot(app: Application) -> dict[str, Any]:
         "email_subject": app.email_subject,
         "email_sender": app.email_sender,
         "email_date": _serialize_datetime(app.email_date),
+        "applied_at": _serialize_datetime(app.applied_at),
         "status": app.status,
         "source": app.source,
         "notes": app.notes,
@@ -286,6 +292,11 @@ def create_application(
     )
     db.add(app)
     db.flush()
+    assign_applied_at_if_missing(
+        app,
+        status=body.status,
+        fallback_at=app.created_at,
+    )
 
     # Record initial status
     db.add(
@@ -329,6 +340,13 @@ def update_application(
 
     for field, value in update_data.items():
         setattr(app, field, value)
+
+    if "status" in update_data:
+        assign_applied_at_if_missing(
+            app,
+            status=app.status,
+            preferred_at=datetime.now(timezone.utc),
+        )
 
     db.commit()
     db.refresh(app)
@@ -437,7 +455,9 @@ def merge_applications(
 
     # Delete the source application
     target.dedupe_locked = False
+    merge_applied_at(target, source)
     _refresh_application_email_summary(db, target)
+    refresh_applied_at(db, target)
     db.delete(source)
     db.commit()
     db.refresh(target)
@@ -523,6 +543,7 @@ def unmerge_application(
         email_subject=snapshot.get("email_subject"),
         email_sender=snapshot.get("email_sender"),
         email_date=_parse_snapshot_datetime(snapshot.get("email_date")),
+        applied_at=_parse_snapshot_datetime(snapshot.get("applied_at")),
         status=source_status,
         source=snapshot.get("source") or "manual",
         notes=snapshot.get("notes"),
@@ -567,6 +588,8 @@ def unmerge_application(
     merge_event.undone_source_application_id = restored_source.id
     _refresh_application_email_summary(db, target)
     _refresh_application_email_summary(db, restored_source)
+    refresh_applied_at(db, target, preserve_existing=False)
+    refresh_applied_at(db, restored_source)
     db.commit()
 
     logger.info(
@@ -670,6 +693,8 @@ def split_application(
             change_source="manual_split",
         )
     )
+    refresh_applied_at(db, source_app, preserve_existing=False)
+    refresh_applied_at(db, new_app, preserve_existing=False)
     db.commit()
 
     logger.info(

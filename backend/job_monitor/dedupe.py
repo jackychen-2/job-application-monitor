@@ -12,6 +12,7 @@ import structlog
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from job_monitor.application_dates import merge_applied_at, refresh_applied_at
 from job_monitor.extraction.rules import (
     is_blank_or_artifact_job_title,
     normalize_req_id,
@@ -265,6 +266,7 @@ def _merge_duplicate_group(
             keep.normalized_company = duplicate.normalized_company
         if (not keep.notes) and duplicate.notes:
             keep.notes = duplicate.notes
+        merge_applied_at(keep, duplicate)
 
         pe_query = session.query(ProcessedEmail).filter(
             ProcessedEmail.application_id == duplicate.id,
@@ -281,6 +283,7 @@ def _merge_duplicate_group(
         sh_query.update({StatusHistory.application_id: keep.id}, synchronize_session=False)
 
         _refresh_application_email_summary(session, keep)
+        refresh_applied_at(session, keep)
 
         session.delete(duplicate)
         merged += 1
@@ -322,6 +325,7 @@ def _serialize_application_snapshot(app: Application) -> dict[str, str | None]:
         "email_subject": app.email_subject,
         "email_sender": app.email_sender,
         "email_date": _serialize_datetime(app.email_date),
+        "applied_at": _serialize_datetime(app.applied_at),
         "status": app.status,
         "source": app.source,
         "notes": app.notes,

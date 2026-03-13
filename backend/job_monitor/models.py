@@ -149,6 +149,7 @@ class Application(Base):
     email_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
     email_sender: Mapped[str | None] = mapped_column(String(300), nullable=True)
     email_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="已申请", index=True)
     source: Mapped[str] = mapped_column(String(50), nullable=False, default="email")
     dedupe_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)

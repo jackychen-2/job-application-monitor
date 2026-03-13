@@ -134,6 +134,7 @@ class ApplicationOut(BaseModel):
     email_subject: Optional[str]
     email_sender: Optional[str]
     email_date: Optional[datetime]
+    applied_at: Optional[datetime]
     status: str
     source: str
     notes: Optional[str]

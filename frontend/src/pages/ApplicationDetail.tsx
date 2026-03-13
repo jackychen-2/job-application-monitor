@@ -296,7 +296,11 @@ export default function ApplicationDetail() {
 
         <div className="grid grid-cols-2 gap-4 mt-4 text-sm">
           <div>
-            <span className="text-gray-500">Email Date:</span>{" "}
+            <span className="text-gray-500">Applied At:</span>{" "}
+            <span className="text-gray-900">{formatDateTime(app.applied_at)}</span>
+          </div>
+          <div>
+            <span className="text-gray-500">Latest Email:</span>{" "}
             <span className="text-gray-900">{formatDateTime(app.email_date)}</span>
           </div>
           <div>

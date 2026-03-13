@@ -47,6 +47,8 @@ def _build_stats_fields(
     total: int,
     status_breakdown: list[StatusCount],
 ) -> dict[str, Any]:
+    application_timeline_at = func.coalesce(Application.applied_at, Application.created_at)
+
     # Email scan totals
     total_emails = db.query(func.count(ProcessedEmail.id)).scalar() or 0
     total_cost = db.query(func.sum(ProcessedEmail.estimated_cost_usd)).scalar() or 0.0
@@ -54,12 +56,12 @@ def _build_stats_fields(
     # Daily application counts (for heatmap)
     daily_apps_rows = (
         db.query(
-            func.date(Application.email_date).label("date"),
+            func.date(application_timeline_at).label("date"),
             func.count(Application.id).label("count"),
         )
-        .filter(Application.email_date != None)  # noqa: E711
-        .group_by(func.date(Application.email_date))
-        .order_by(func.date(Application.email_date))
+        .filter(application_timeline_at != None)  # noqa: E711
+        .group_by(func.date(application_timeline_at))
+        .order_by(func.date(application_timeline_at))
         .all()
     )
     daily_applications = [{"date": str(row.date), "count": int(row.count)} for row in daily_apps_rows]
@@ -72,12 +74,12 @@ def _build_stats_fields(
         for offset in range(24)
     }
     recent_activity_rows = (
-        db.query(Application.email_date, Application.created_at)
-        .filter(func.coalesce(Application.email_date, Application.created_at) >= hour_start)
+        db.query(Application.applied_at, Application.created_at)
+        .filter(application_timeline_at >= hour_start)
         .all()
     )
-    for email_date, created_at in recent_activity_rows:
-        activity_at = _as_utc(email_date) or _as_utc(created_at)
+    for applied_at, created_at in recent_activity_rows:
+        activity_at = _as_utc(applied_at) or _as_utc(created_at)
         if activity_at is None or activity_at < hour_start:
             continue
         bucket = activity_at.replace(minute=0, second=0, microsecond=0)
@@ -150,7 +152,7 @@ def get_stats(db: Session = Depends(get_owner_scoped_db)) -> StatsOut:
 
     recent = (
         db.query(Application)
-        .order_by(Application.created_at.desc())
+        .order_by(func.coalesce(Application.applied_at, Application.created_at).desc())
         .limit(10)
         .all()
     )
