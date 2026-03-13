@@ -137,6 +137,10 @@ function edgeLayoutWeight(from: string, to: string): number {
   return w;
 }
 
+const TERMINAL_NODES = new Set(["拒绝", "Offer", "Onboarding", "Unknown"]);
+// Nodes whose incoming links all converge to center and are rendered as short bars.
+const CONVERGING_NODES = new Set([...TERMINAL_NODES, "OA", "已申请", "面试"]);
+
 function buildSankeyData(flowData: FlowData): SankeyData | null {
   const edgeCounts = new Map<string, number>();
   const currentCountByStatus = new Map<string, number>();
@@ -165,10 +169,13 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
     addCanonicalEdge(from, to, transition.count);
   }
 
-  // Always build root edges from current status snapshot.
+  // Build root edges from current status snapshot.
+  // Skip terminal states — they are reached via recorded transitions, not directly
+  // from Applications, to avoid double-counting the same applications twice.
   for (const sc of flowData.status_counts) {
     const to = normalizeStatus(sc.status);
     if (sc.count <= 0) continue;
+    if (TERMINAL_NODES.has(to)) continue;
     addCanonicalEdge("Applications", to, sc.count);
   }
 
@@ -259,10 +266,6 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
 
   return { nodes, links };
 }
-
-const TERMINAL_NODES = new Set(["拒绝", "Offer", "Onboarding", "Unknown"]);
-// Nodes whose incoming links all converge to center and are rendered as short bars.
-const CONVERGING_NODES = new Set([...TERMINAL_NODES, "OA", "已申请", "面试"]);
 
 // Must stay in sync with the `margin` prop passed to <Sankey> below.
 const SANKEY_MARGIN_TOP = 20;
