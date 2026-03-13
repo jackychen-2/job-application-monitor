@@ -490,7 +490,7 @@ export default function SankeyFlow({
             linkCurvature={0.52}
             iterations={64}
             sort={true}
-            margin={{ top: 20, right: 84, bottom: 20, left: 72 }}
+            margin={{ top: 20, right: 84, bottom: 20, left: 108 }}
           >
             <Tooltip cursor={false} content={<SankeyTooltipContent />} />
           </Sankey>
