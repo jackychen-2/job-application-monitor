@@ -245,30 +245,25 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
   const primaryRangeLabel = describeRange(selectedRange);
   const selectedRangeIndex = RANGE_OPTIONS.findIndex((option) => option.key === selectedRange);
   const selectedRangeGlowStyle = {
-    width: "calc(20% - 0.155rem)",
-    left: `calc(${selectedRangeIndex * 20}% + ${(0.2275 - selectedRangeIndex * 0.075).toFixed(4)}rem)`,
+    width: "calc((100% - 0.25rem) / 5)",
+    transform: `translateX(${selectedRangeIndex * 100}%)`,
   } as const;
   const selectedRangeSliderStyle = {
-    width: "calc(20% - 0.295rem)",
-    left: `calc(${selectedRangeIndex * 20}% + ${(0.2975 - selectedRangeIndex * 0.075).toFixed(4)}rem)`,
+    width: "calc((100% - 0.25rem) / 5)",
+    transform: `translateX(${selectedRangeIndex * 100}%)`,
   } as const;
-  const recruiterCount = statusCountMap.get("Recruiter Reach-out") ?? 0;
-  const interviewCount = statusCountMap.get("面试") ?? 0;
-  const offerCount = statusCountMap.get("Offer") ?? 0;
-  const secondaryStats = [
-    { label: "Recruiter", value: recruiterCount, dotClass: "bg-amber-400" },
-    { label: "Interviews", value: interviewCount, dotClass: "bg-teal-400" },
-    { label: "Offers", value: offerCount, dotClass: "bg-rose-400" },
-    { label: "Rejected", value: rejectedCount, dotClass: "bg-stone-400" },
-  ];
 
   return (
-    <section className="relative overflow-hidden rounded-[28px] border border-white/34 bg-[linear-gradient(180deg,rgba(255,255,255,0.24),rgba(240,249,255,0.16)_42%,rgba(219,234,254,0.18)_100%)] p-4 shadow-[0_64px_104px_-74px_rgba(15,23,42,0.42),0_28px_58px_-44px_rgba(56,189,248,0.22),inset_0_1px_0_rgba(255,255,255,0.44),inset_0_-22px_34px_rgba(59,130,246,0.06)] backdrop-blur-[28px] sm:p-5">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_18%_14%,rgba(255,255,255,0.86),transparent_28%),radial-gradient(circle_at_86%_84%,rgba(147,197,253,0.28),transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.1),rgba(255,255,255,0.02)_62%)]" />
-      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.08),transparent_34%,rgba(186,230,253,0.14)_76%,transparent_100%)]" />
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_52%_118%,rgba(59,130,246,0.1),transparent_46%)]" />
-      <div className="pointer-events-none absolute inset-x-6 top-0 h-px bg-white/54" />
-      <div className="pointer-events-none absolute inset-x-8 bottom-0 h-[1px] bg-slate-300/14" />
+    <section className="relative overflow-hidden rounded-[30px] border border-white/18 bg-[linear-gradient(180deg,rgba(255,255,255,0.12),rgba(248,250,252,0.05)_24%,rgba(239,246,255,0.09)_70%,rgba(219,234,254,0.14)_100%)] p-4 shadow-[0_44px_92px_-58px_rgba(15,23,42,0.42),0_18px_40px_-26px_rgba(14,165,233,0.14),inset_0_1px_0_rgba(255,255,255,0.42)] backdrop-blur-[46px] backdrop-saturate-[210%] sm:p-5">
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(118deg,rgba(255,255,255,0.22)_0%,rgba(255,255,255,0.08)_16%,rgba(255,255,255,0.02)_28%,rgba(125,211,252,0.12)_44%,rgba(255,255,255,0.02)_57%,rgba(251,191,36,0.03)_70%,rgba(191,219,254,0.14)_100%)]" />
+      <div className="pointer-events-none absolute left-[18%] top-[-10%] h-[128%] w-16 rotate-[11deg] rounded-full bg-[linear-gradient(180deg,rgba(255,255,255,0.48),rgba(255,255,255,0.08)_26%,rgba(186,230,253,0.24)_52%,rgba(255,255,255,0.06)_74%,rgba(255,255,255,0.34)_100%)] opacity-80 blur-[18px]" />
+      <div className="pointer-events-none absolute right-[14%] top-[8%] h-[74%] w-12 rotate-[9deg] rounded-full bg-[linear-gradient(180deg,rgba(255,255,255,0.3),rgba(224,242,254,0.14)_38%,rgba(251,207,232,0.14)_72%,rgba(255,255,255,0.18)_100%)] opacity-70 blur-[20px]" />
+      <div className="pointer-events-none absolute bottom-[10%] right-[12%] h-12 w-[30%] rounded-full bg-[linear-gradient(90deg,rgba(255,255,255,0.02),rgba(255,255,255,0.16)_36%,rgba(125,211,252,0.24)_58%,rgba(255,255,255,0.03)_100%)] blur-[22px]" />
+      <div className="pointer-events-none absolute inset-[1px] rounded-[29px] border border-white/20" />
+      <div className="pointer-events-none absolute left-[4%] right-[18%] top-0 h-px bg-[linear-gradient(90deg,rgba(255,255,255,0.96),rgba(255,255,255,0.42)_48%,rgba(255,255,255,0.08)_100%)]" />
+      <div className="pointer-events-none absolute left-0 top-[10%] bottom-[18%] w-px bg-[linear-gradient(180deg,rgba(255,255,255,0.44),rgba(255,255,255,0.06)_52%,rgba(255,255,255,0.02)_100%)]" />
+      <div className="pointer-events-none absolute right-0 top-[24%] bottom-[10%] w-px bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.16)_34%,rgba(255,255,255,0.03)_100%)]" />
+      <div className="pointer-events-none absolute left-[8%] top-[1.5%] h-7 w-[36%] rounded-full bg-white/20 blur-xl" />
 
       <div className="relative flex flex-col gap-4">
         <div className="flex flex-col gap-2">
@@ -278,21 +273,21 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
             </h2>
           </div>
 
-          <div className="relative grid w-full grid-cols-5 rounded-[15px] border border-white/20 bg-[linear-gradient(180deg,rgba(255,255,255,0.18),rgba(240,249,255,0.1)_40%,rgba(224,242,254,0.1)_100%)] p-[3px] shadow-[0_16px_30px_-28px_rgba(15,23,42,0.14),inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-14px_22px_rgba(59,130,246,0.04)] backdrop-blur-[20px]">
-            <div className="pointer-events-none absolute inset-0 rounded-[15px] bg-[radial-gradient(circle_at_18%_14%,rgba(255,255,255,0.5),transparent_34%),radial-gradient(circle_at_86%_84%,rgba(147,197,253,0.14),transparent_32%)]" />
+          <div className="relative grid w-full grid-cols-5 rounded-[17px] border border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.035),rgba(255,255,255,0.015)_100%)] p-[2px] shadow-[inset_0_1px_0_rgba(255,255,255,0.1),inset_0_-8px_14px_rgba(15,23,42,0.04)]">
+            <div className="pointer-events-none absolute inset-[1px] rounded-[16px] bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.012)_100%)]" />
+            <div className="pointer-events-none absolute left-[6%] right-[22%] top-0 h-px bg-[linear-gradient(90deg,rgba(255,255,255,0.44),rgba(255,255,255,0.12)_54%,rgba(255,255,255,0.02)_100%)]" />
             <div
               aria-hidden="true"
-              className="pointer-events-none absolute inset-y-[1px] rounded-[14px] bg-[radial-gradient(circle_at_28%_22%,rgba(255,255,255,0.88),rgba(219,234,254,0.58)_42%,rgba(125,211,252,0.26)_76%,transparent_100%)] blur-[20px] opacity-95 transition-[left,width] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
+              className="pointer-events-none absolute left-[2px] inset-y-[4px] rounded-[13px] bg-[linear-gradient(135deg,rgba(255,255,255,0.26),rgba(191,219,254,0.08)_54%,rgba(255,255,255,0.03)_100%)] opacity-55 blur-[10px] transition-[transform,width] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
               style={selectedRangeGlowStyle}
             />
             <div
               aria-hidden="true"
-              className="pointer-events-none absolute inset-y-[4px] rounded-[12px] border border-white/86 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(255,255,255,0.76)_44%,rgba(240,249,255,0.5)_100%)] shadow-[0_18px_28px_-22px_rgba(15,23,42,0.26),0_8px_16px_-14px_rgba(125,211,252,0.16),inset_0_1px_0_rgba(255,255,255,0.98)] transition-[left,width] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
+              className="pointer-events-none absolute left-[2px] inset-y-[2px] rounded-[13px] border border-white/22 bg-[linear-gradient(180deg,rgba(255,255,255,0.18),rgba(255,255,255,0.06)_56%,rgba(224,242,254,0.03)_100%)] shadow-[0_6px_14px_-12px_rgba(15,23,42,0.18),inset_0_1px_0_rgba(255,255,255,0.3)] backdrop-blur-[12px] transition-[transform,width] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
               style={selectedRangeSliderStyle}
             >
-              <div className="absolute inset-[1px] rounded-[11px] bg-[linear-gradient(180deg,rgba(255,255,255,0.56),rgba(255,255,255,0.16)_54%,rgba(224,242,254,0.24)_100%)]" />
-              <div className="absolute inset-x-3 top-[2px] h-[46%] rounded-full bg-white/84 blur-[2px]" />
-              <div className="absolute bottom-[4px] right-[14%] h-[26%] w-[58%] rounded-full bg-sky-100/52 blur-[10px]" />
+              <div className="absolute inset-[1px] rounded-[12px] bg-[linear-gradient(180deg,rgba(255,255,255,0.12),rgba(255,255,255,0.03)_100%)]" />
+              <div className="absolute inset-x-4 top-[2px] h-[28%] rounded-full bg-white/18 blur-[4px]" />
             </div>
             {RANGE_OPTIONS.map((option) => (
               <button
@@ -300,10 +295,10 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
                 type="button"
                 onClick={() => setSelectedRange(option.key)}
                 aria-pressed={selectedRange === option.key}
-                className={`relative z-10 rounded-[12px] px-1 py-[0.7rem] text-[0.92rem] leading-none whitespace-nowrap tracking-[0.01em] transition-[color,transform,font-weight] duration-300 ease-out focus-visible:outline-none sm:px-2 ${
+                className={`relative z-10 rounded-[13px] px-1 py-[0.74rem] text-[0.94rem] leading-none whitespace-nowrap tracking-[0.01em] transition-[color,font-weight] duration-300 ease-out focus-visible:outline-none sm:px-2 ${
                   selectedRange === option.key
-                    ? "-translate-y-[1px] font-semibold text-slate-950"
-                    : "font-medium text-slate-600/62 hover:text-slate-800/88"
+                    ? "font-semibold text-slate-950"
+                    : "font-medium text-slate-700/54 hover:text-slate-800/78"
                 }`}
               >
                 {option.label}
@@ -312,7 +307,7 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
           </div>
         </div>
 
-        <div className="grid items-stretch gap-3 md:grid-cols-[minmax(0,1fr),132px] md:min-h-[196px] lg:grid-cols-[minmax(0,1fr),142px]">
+        <div className="grid items-stretch gap-3 md:grid-cols-[minmax(0,1fr),144px] md:min-h-[196px]">
           <LiquidGlassCard className="min-h-[196px]" contentClassName="px-4 py-3.5">
             <div>
               <div className="text-[0.95rem] font-medium text-slate-700/78">
@@ -327,55 +322,37 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
             </div>
           </LiquidGlassCard>
 
-          <LiquidGlassCard className="md:h-full md:min-h-[196px]" contentClassName="px-3 py-3">
-            <div className="grid grid-cols-2 gap-2 md:h-full md:grid-cols-1 md:grid-rows-2 md:gap-3">
-              <SummaryMetric
-                label="Active"
-                value={loading ? "—" : `${activeCount}`}
-                accent="teal"
-                className="pr-1 md:pr-0"
-              />
-              <SummaryMetric
-                label="Total"
-                value={loading ? "—" : `${totalApplications}`}
-                className="pl-1 md:pl-0"
-              />
-            </div>
-          </LiquidGlassCard>
-        </div>
-
-        <LiquidGlassCard contentClassName="p-2.5">
-          <div className="mb-2 text-[0.95rem] font-medium text-slate-700/82">
-            Current stages
-          </div>
-          <div className="grid grid-cols-2 gap-x-6 gap-y-1 px-3 py-1">
-            {secondaryStats.map((stat, index) => (
-              <div
-                key={stat.label}
-                className={`flex min-h-[56px] items-center py-3 ${index % 2 === 1 ? "pl-3" : "pr-3"}`}
-              >
-                <div className="flex w-full items-center justify-between gap-3">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className={`h-2.5 w-2.5 shrink-0 rounded-full shadow-[0_0_14px_rgba(255,255,255,0.65)] ${stat.dotClass}`} />
-                    <span className="truncate text-[0.95rem] font-medium text-slate-700/78">
-                      {stat.label}
-                    </span>
-                  </div>
-                  <div className="text-[0.95rem] font-semibold tabular-nums text-slate-900">
-                    {loading ? "—" : stat.value}
-                  </div>
+          <div className="relative overflow-hidden rounded-[24px] border border-white/34 bg-[linear-gradient(180deg,rgba(255,255,255,0.14),rgba(255,255,255,0.05)_46%,rgba(224,242,254,0.08)_100%)] shadow-[0_20px_36px_-28px_rgba(15,23,42,0.24),inset_0_1px_0_rgba(255,255,255,0.52)] backdrop-blur-[24px] md:h-full md:min-h-[196px]">
+            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_18%_12%,rgba(255,255,255,0.58),transparent_30%),radial-gradient(circle_at_84%_84%,rgba(125,211,252,0.16),transparent_30%)]" />
+            <div className="pointer-events-none absolute inset-x-5 top-0 h-px bg-white/70" />
+            <div className="pointer-events-none absolute left-[10%] top-[-8%] h-16 w-[46%] rotate-[8deg] rounded-full bg-white/24 blur-xl" />
+            <div className="relative flex h-full min-h-[164px] flex-col justify-between px-4 py-4">
+              <div>
+                <div className="text-[0.95rem] font-medium text-slate-800/82">Active</div>
+                <div className="mt-3 text-[2.3rem] font-semibold tracking-[-0.055em] tabular-nums text-slate-950">
+                  {loading ? "—" : activeCount}
                 </div>
               </div>
-            ))}
-          </div>
-        </LiquidGlassCard>
 
-        <LiquidGlassCard contentClassName="px-2.5 py-2.5">
-          <div className="px-3 py-2">
+              <div className="pt-7">
+                <div className="text-[0.95rem] font-medium text-slate-700/72">Total</div>
+                <div className="mt-3 text-[2.3rem] font-semibold tracking-[-0.055em] tabular-nums text-slate-950">
+                  {loading ? "—" : totalApplications}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <LiquidGlassCard contentClassName="relative px-2.5 py-2.5">
+          <div className="pointer-events-none absolute left-[24%] top-[18%] h-28 w-[28%] rounded-full bg-cyan-200/10 blur-3xl" />
+          <div className="pointer-events-none absolute right-[10%] bottom-[8%] h-28 w-[34%] rounded-full bg-blue-200/12 blur-3xl" />
+          <div className="pointer-events-none absolute right-[16%] top-[10%] h-24 w-[24%] rounded-full bg-rose-100/8 blur-3xl" />
+          <div className="relative px-3 py-2">
             {loading ? (
-              <div className="h-32 animate-pulse rounded-[12px] bg-white/28" />
+              <div className="h-32 animate-pulse rounded-[12px] bg-white/18" />
             ) : chartData.length === 0 ? (
-              <div className="flex h-32 items-center justify-center rounded-[12px] border border-dashed border-white/45 bg-white/10 text-sm text-slate-400">
+              <div className="flex h-32 items-center justify-center rounded-[12px] bg-white/6 text-sm text-slate-400">
                 No application activity yet
               </div>
             ) : (
@@ -460,45 +437,14 @@ function LiquidGlassCard({
 }: LiquidGlassCardProps) {
   return (
     <div
-      className={`relative overflow-hidden rounded-[22px] border border-white/22 bg-[linear-gradient(180deg,rgba(255,255,255,0.2),rgba(240,249,255,0.12)_42%,rgba(224,242,254,0.14)_100%)] shadow-[0_24px_42px_-32px_rgba(15,23,42,0.2),0_14px_28px_-20px_rgba(56,189,248,0.18),inset_0_1px_0_rgba(255,255,255,0.38),inset_0_-18px_30px_rgba(59,130,246,0.05)] backdrop-blur-[18px] ${className}`}
+      className={`relative overflow-hidden rounded-[24px] border border-white/42 bg-[linear-gradient(180deg,rgba(255,255,255,0.16),rgba(255,255,255,0.05)_42%,rgba(224,242,254,0.1)_100%)] shadow-[0_30px_54px_-38px_rgba(15,23,42,0.3),0_18px_34px_-24px_rgba(14,165,233,0.2),inset_0_1px_0_rgba(255,255,255,0.72),inset_0_-18px_30px_rgba(59,130,246,0.08)] backdrop-blur-[30px] backdrop-saturate-[170%] ${className}`}
     >
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_18%_14%,rgba(255,255,255,0.58),transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.12),rgba(255,255,255,0.04)_42%,rgba(236,254,255,0.06)_100%)]" />
-      <div className="pointer-events-none absolute inset-[1px] rounded-[inherit] bg-[linear-gradient(135deg,rgba(255,255,255,0.14),transparent_34%,rgba(186,230,253,0.16)_76%,transparent_100%)]" />
-      <div className="pointer-events-none absolute inset-x-5 top-[1px] h-[18%] rounded-full bg-white/38 blur-[8px]" />
-      <div className="pointer-events-none absolute -bottom-4 right-[8%] h-20 w-[46%] rounded-full bg-sky-100/34 blur-[28px]" />
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_52%_118%,rgba(59,130,246,0.08),transparent_48%)]" />
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_16%_12%,rgba(255,255,255,0.78),transparent_32%),radial-gradient(circle_at_88%_82%,rgba(125,211,252,0.18),transparent_30%),linear-gradient(180deg,rgba(255,255,255,0.14),rgba(255,255,255,0.03)_48%,rgba(236,254,255,0.08)_100%)]" />
+      <div className="pointer-events-none absolute left-[8%] top-[-12%] h-20 w-[54%] rotate-[10deg] rounded-full bg-white/42 blur-xl" />
+      <div className="pointer-events-none absolute -bottom-6 right-[8%] h-24 w-28 rounded-full bg-sky-100/28 blur-[30px]" />
+      <div className="pointer-events-none absolute inset-[1px] rounded-[inherit] border border-white/18" />
+      <div className="pointer-events-none absolute inset-x-5 top-[1px] h-[16%] rounded-full bg-white/32 blur-[10px]" />
       <div className={`relative ${contentClassName}`}>{children}</div>
-    </div>
-  );
-}
-
-function SummaryMetric({
-  label,
-  value,
-  accent = "gray",
-  className = "",
-}: {
-  label: string;
-  value: string;
-  accent?: "gray" | "teal";
-  className?: string;
-}) {
-  const glowClasses =
-    accent === "teal"
-      ? "bg-[radial-gradient(circle_at_18%_18%,rgba(255,255,255,0.22),transparent_36%),radial-gradient(circle_at_86%_88%,rgba(45,212,191,0.16),transparent_34%)]"
-      : "bg-[radial-gradient(circle_at_18%_18%,rgba(255,255,255,0.2),transparent_36%),radial-gradient(circle_at_86%_88%,rgba(125,211,252,0.14),transparent_34%)]";
-
-  return (
-    <div className={`relative flex min-h-[80px] flex-col justify-between overflow-hidden ${className}`}>
-      <div className={`pointer-events-none absolute inset-0 ${glowClasses}`} />
-      <div className="relative flex min-h-[80px] flex-col justify-between px-1 py-0.5">
-        <div className={`text-sm font-medium ${accent === "teal" ? "text-teal-800/82" : "text-slate-700/74"}`}>
-          {label}
-        </div>
-        <div className="mt-2 text-[1.75rem] font-semibold tracking-tight tabular-nums text-slate-950">
-          {value}
-        </div>
-      </div>
     </div>
   );
 }

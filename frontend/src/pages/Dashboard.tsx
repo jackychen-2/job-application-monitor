@@ -491,7 +491,19 @@ export default function Dashboard() {
       )}
 
       <div className="grid grid-cols-1 xl:grid-cols-[392px,minmax(0,1fr)] 2xl:grid-cols-[420px,minmax(0,1fr)] gap-6 items-start">
-        <PipelineProgressPanel stats={stats} loading={statsLoading} />
+        <div className="relative isolate">
+          <div className="pointer-events-none absolute inset-[-4%] overflow-hidden rounded-[40px]">
+            <div className="absolute inset-0 bg-[linear-gradient(145deg,rgba(255,255,255,0.72),rgba(239,246,255,0.3)_34%,rgba(219,234,254,0.16)_100%)]" />
+            <div className="absolute -left-10 top-9 h-44 w-44 rounded-full bg-sky-300/46 blur-[76px]" />
+            <div className="absolute right-[-6%] top-[4%] h-36 w-36 rounded-full bg-rose-200/28 blur-[72px]" />
+            <div className="absolute left-[35%] top-[14%] h-[64%] w-24 rotate-[12deg] rounded-full bg-white/32 blur-[52px]" />
+            <div className="absolute left-[28%] top-[22%] h-44 w-48 rounded-full bg-cyan-300/28 blur-[88px]" />
+            <div className="absolute left-[12%] bottom-[2%] h-56 w-56 rounded-full bg-blue-300/36 blur-[92px]" />
+          </div>
+          <div className="relative z-10">
+            <PipelineProgressPanel stats={stats} loading={statsLoading} />
+          </div>
+        </div>
         <SankeyFlow
           flowData={flowData}
           loading={flowLoading}
