@@ -253,6 +253,8 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
 }
 
 const TERMINAL_NODES = new Set(["拒绝", "Offer", "Onboarding", "Unknown"]);
+// Nodes whose incoming links all converge to center and are rendered as short bars.
+const CONVERGING_NODES = new Set([...TERMINAL_NODES, "OA", "已申请"]);
 
 // Must stay in sync with the `margin` prop passed to <Sankey> below.
 const SANKEY_MARGIN_TOP = 20;
@@ -284,9 +286,9 @@ function LinkShape(props: SankeyLinkRenderProps) {
 
   const visualWidth = Math.max(8, Math.min(24, payload?.visualWidth ?? linkWidth));
   const targetName = payload?.target?.name ?? "";
-  const isTerminal = TERMINAL_NODES.has(targetName);
+  const isConverging = CONVERGING_NODES.has(targetName);
 
-  if (isTerminal) {
+  if (isConverging) {
     // All links converge to the vertical center of the target node.
     // recharts injects y/dy (layout space) onto node objects; link props are in SVG space
     // (layout + margin.top), so we add SANKEY_MARGIN_TOP to align coordinate spaces.
@@ -331,7 +333,7 @@ function NodeShape(props: SankeyNodeRenderProps) {
   }
 
   const isRoot = payload.name === "Applications";
-  const isTerminal = TERMINAL_NODES.has(payload.name);
+  const isConverging = CONVERGING_NODES.has(payload.name);
   const nodeColor = payload.color || "#94a3b8";
   const value = Math.round(payload.rawCount ?? payload.value ?? 0);
   const showLabelCard = !isRoot;
@@ -348,16 +350,15 @@ function NodeShape(props: SankeyNodeRenderProps) {
   const depth = payload.depth || 0;
   const placeOnLeft = depth >= 3;
 
-  // Terminal nodes render as a small circle at their center instead of a tall bar.
-  if (isTerminal) {
-    const cx = x + width / 2;
+  // Converging nodes render as a short bar at their center instead of a full-height bar.
+  if (isConverging) {
+    const barH = 20;
     const cy = y + height / 2;
-    const r = 7;
-    const cardX = cx + r + 8;
+    const cardX = x + width + 8;
     const cardY = cy - cardH / 2;
     return (
       <g>
-        <circle cx={cx} cy={cy} r={r} fill={nodeColor} />
+        <rect x={x} y={cy - barH / 2} width={width} height={barH} fill={nodeColor} rx={2} />
         <rect
           x={cardX}
           y={cardY}
