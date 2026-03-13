@@ -3,6 +3,7 @@ import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
 import ApplicationDetail from "./pages/ApplicationDetail";
 import AccountPage from "./pages/AccountPage";
+import ProgressPreview from "./pages/ProgressPreview";
 import { useAuth } from "./auth/AuthContext";
 import AuthModal from "./components/AuthModal";
 
@@ -18,11 +19,17 @@ export default function App() {
   }
 
   if (!user) {
-    return <AuthModal />;
+    return (
+      <Routes>
+        <Route path="/preview/progress" element={<ProgressPreview />} />
+        <Route path="*" element={<AuthModal />} />
+      </Routes>
+    );
   }
 
   return (
     <Routes>
+      <Route path="/preview/progress" element={<ProgressPreview />} />
       <Route element={<Layout />}>
         <Route path="/" element={<Dashboard />} />
         <Route path="/account" element={<AccountPage />} />

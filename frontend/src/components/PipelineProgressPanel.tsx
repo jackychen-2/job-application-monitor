@@ -233,6 +233,7 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
     return formatRangeWindow(rangeStart, today);
   }, [hourlyData, rangeStart, selectedRange, today]);
   const primaryRangeLabel = describeRange(selectedRange);
+  const selectedRangeIndex = RANGE_OPTIONS.findIndex((option) => option.key === selectedRange);
   const recruiterCount = statusCountMap.get("Recruiter Reach-out") ?? 0;
   const interviewCount = statusCountMap.get("面试") ?? 0;
   const offerCount = statusCountMap.get("Offer") ?? 0;
@@ -255,16 +256,27 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
           </h2>
         </div>
 
-        <div className="grid w-full grid-cols-5 rounded-[16px] border border-white/70 bg-white/28 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.7),inset_0_-12px_24px_rgba(15,23,42,0.03)] backdrop-blur-md">
+        <div className="relative grid w-full grid-cols-5 rounded-[16px] border border-white/70 bg-white/28 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.7),inset_0_-12px_24px_rgba(15,23,42,0.03)] backdrop-blur-md">
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-y-1 left-1 rounded-[14px] border border-white/90 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(247,250,252,0.78))] shadow-[0_18px_34px_-24px_rgba(15,23,42,0.42),0_8px_16px_-12px_rgba(59,130,246,0.18),inset_0_1px_0_rgba(255,255,255,1)] transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
+            style={{
+              width: "calc((100% - 0.5rem) / 5)",
+              transform: `translateX(${selectedRangeIndex * 100}%)`,
+            }}
+          >
+            <div className="absolute inset-[1px] rounded-[13px] bg-[linear-gradient(180deg,rgba(255,255,255,0.55),rgba(255,255,255,0.08))]" />
+          </div>
           {RANGE_OPTIONS.map((option) => (
             <button
               key={option.key}
               type="button"
               onClick={() => setSelectedRange(option.key)}
-              className={`rounded-[14px] px-1.5 py-2 text-sm font-semibold whitespace-nowrap transition-all duration-200 sm:px-2 ${
+              aria-pressed={selectedRange === option.key}
+              className={`relative z-10 rounded-[14px] px-1.5 py-2 text-sm font-semibold whitespace-nowrap transition-[color,transform] duration-200 ease-out focus-visible:outline-none sm:px-2 ${
                 selectedRange === option.key
-                  ? "border border-white/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.92),rgba(241,245,249,0.72))] text-slate-950 shadow-[0_10px_24px_-20px_rgba(15,23,42,0.28),inset_0_1px_0_rgba(255,255,255,0.96)]"
-                  : "text-slate-500 hover:bg-white/42 hover:text-slate-900"
+                  ? "-translate-y-[1px] text-slate-950"
+                  : "text-slate-500 hover:text-slate-900"
               }`}
             >
               {option.label}
