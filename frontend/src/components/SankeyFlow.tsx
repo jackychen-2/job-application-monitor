@@ -280,12 +280,14 @@ function LinkShape(props: SankeyLinkRenderProps) {
   const isTerminal = TERMINAL_NODES.has(payload?.target?.name ?? "");
 
   if (isTerminal) {
-    // Tapered filled path: full width at source, converges to a single point at target
+    // Tapered filled path: full width at source, blunt tip at target
     const hw = visualWidth / 2;
+    const tipHw = 4;
     const d = [
       `M ${sourceX},${sourceY - hw}`,
-      `C ${sourceControlX},${sourceY - hw} ${targetControlX},${targetY} ${targetX},${targetY}`,
-      `C ${targetControlX},${targetY} ${sourceControlX},${sourceY + hw} ${sourceX},${sourceY + hw}`,
+      `C ${sourceControlX},${sourceY - hw} ${targetControlX},${targetY - tipHw} ${targetX},${targetY - tipHw}`,
+      `L ${targetX},${targetY + tipHw}`,
+      `C ${targetControlX},${targetY + tipHw} ${sourceControlX},${sourceY + hw} ${sourceX},${sourceY + hw}`,
       "Z",
     ].join(" ");
     return <path d={d} fill={stroke} fillOpacity={0.62} stroke="none" />;
