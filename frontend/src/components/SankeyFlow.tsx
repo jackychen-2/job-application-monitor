@@ -249,6 +249,8 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
   return { nodes, links };
 }
 
+const TERMINAL_NODES = new Set(["拒绝", "Offer", "Onboarding", "Unknown"]);
+
 function LinkShape(props: SankeyLinkRenderProps) {
   const {
     sourceX,
@@ -273,9 +275,23 @@ function LinkShape(props: SankeyLinkRenderProps) {
   if (hiddenLink) {
     return <path d="" fill="none" stroke="none" />;
   }
-  const d = `M${sourceX},${sourceY} C${sourceControlX},${sourceY} ${targetControlX},${targetY} ${targetX},${targetY}`;
-  const visualWidth = Math.max(8, Math.min(24, payload?.visualWidth ?? linkWidth));
 
+  const visualWidth = Math.max(8, Math.min(24, payload?.visualWidth ?? linkWidth));
+  const isTerminal = TERMINAL_NODES.has(payload?.target?.name ?? "");
+
+  if (isTerminal) {
+    // Tapered filled path: full width at source, converges to a single point at target
+    const hw = visualWidth / 2;
+    const d = [
+      `M ${sourceX},${sourceY - hw}`,
+      `C ${sourceControlX},${sourceY - hw} ${targetControlX},${targetY} ${targetX},${targetY}`,
+      `C ${targetControlX},${targetY} ${sourceControlX},${sourceY + hw} ${sourceX},${sourceY + hw}`,
+      "Z",
+    ].join(" ");
+    return <path d={d} fill={stroke} fillOpacity={0.62} stroke="none" />;
+  }
+
+  const d = `M${sourceX},${sourceY} C${sourceControlX},${sourceY} ${targetControlX},${targetY} ${targetX},${targetY}`;
   return (
     <path
       d={d}
