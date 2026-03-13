@@ -38,6 +38,8 @@ type ChartPoint = {
   count: number;
 };
 
+type ChartGrouping = "hour" | "day" | "week" | "month";
+
 const RANGE_OPTIONS: RangeOption[] = [
   { key: "24h", label: "24H", summaryLabel: "24H" },
   { key: "7d", label: "7D", summaryLabel: "7D" },
@@ -117,6 +119,10 @@ function formatRangeWindow(start: Date, end: Date): string {
   return `${format(start, "MMM d")} - ${format(end, "MMM d, yyyy")}`;
 }
 
+function countDaysInRange(start: Date, end: Date): number {
+  return Math.floor((end.getTime() - start.getTime()) / 86_400_000) + 1;
+}
+
 function describeRange(range: RangeKey): string {
   switch (range) {
     case "24h":
@@ -138,6 +144,18 @@ function buildCountMap(data: DailyCount[]): Map<string, number> {
     map.set(entry.date, entry.count);
   });
   return map;
+}
+
+function getChartGrouping(range: RangeKey, start: Date, end: Date): ChartGrouping {
+  if (range === "24h") return "hour";
+  if (range === "90d") return "week";
+  if (range === "all") {
+    const dayCount = countDaysInRange(start, end);
+    if (dayCount <= 45) return "day";
+    if (dayCount <= 180) return "week";
+    return "month";
+  }
+  return "day";
 }
 
 export default function PipelineProgressPanel({ stats, loading }: Props) {
@@ -175,26 +193,29 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
     selectedRange === "24h"
       ? hourlyData.reduce((total, entry) => total + entry.count, 0)
       : sumRange(rangeStart, today, countMap);
+  const chartGrouping = useMemo(
+    () => getChartGrouping(selectedRange, rangeStart, today),
+    [rangeStart, selectedRange, today],
+  );
   const chartData = useMemo(() => {
-    if (selectedRange === "24h") {
+    if (chartGrouping === "hour") {
       return buildHourlyChartData(hourlyData);
     }
-    if (selectedRange === "90d") {
+    if (chartGrouping === "week") {
       return buildWeeklyChartData(rangeStart, today, countMap);
     }
-    if (selectedRange === "all") {
+    if (chartGrouping === "month") {
       return buildMonthlyChartData(rangeStart, today, countMap);
     }
     return buildDailyChartData(rangeStart, today, countMap, selectedRange === "7d" ? "EEE" : "MMM d");
-  }, [countMap, hourlyData, rangeStart, selectedRange, today]);
-  const trendTitle =
-    "Applications over time";
+  }, [chartGrouping, countMap, hourlyData, rangeStart, selectedRange, today]);
+  const trendTitle = "Applications over time";
   const trendGroupingLabel =
-    selectedRange === "24h"
+    chartGrouping === "hour"
       ? "Grouped by hour"
-      : selectedRange === "90d"
+      : chartGrouping === "week"
         ? "Grouped by week"
-        : selectedRange === "all"
+        : chartGrouping === "month"
           ? "Grouped by month"
           : "Grouped by day";
   const trendRangeLabel = useMemo(() => {
@@ -229,7 +250,7 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
 
       <div className="relative flex flex-col gap-4">
         <div>
-          <h2 className="text-3xl font-semibold leading-[0.95] tracking-tight text-slate-950 sm:text-[3rem]">
+          <h2 className="whitespace-nowrap text-[2.35rem] font-semibold leading-[0.95] tracking-tight text-slate-950 sm:text-[2.6rem] lg:text-[2.85rem]">
             Application Progress
           </h2>
         </div>
@@ -242,7 +263,7 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
               onClick={() => setSelectedRange(option.key)}
               className={`rounded-[14px] px-1.5 py-2 text-sm font-semibold whitespace-nowrap transition-all duration-200 sm:px-2 ${
                 selectedRange === option.key
-                  ? "border border-sky-500/55 bg-white/84 text-slate-950 shadow-[0_14px_28px_-22px_rgba(15,23,42,0.4),inset_0_1px_0_rgba(255,255,255,0.94)]"
+                  ? "border border-white/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.92),rgba(241,245,249,0.72))] text-slate-950 shadow-[0_10px_24px_-20px_rgba(15,23,42,0.28),inset_0_1px_0_rgba(255,255,255,0.96)]"
                   : "text-slate-500 hover:bg-white/42 hover:text-slate-900"
               }`}
             >
@@ -251,7 +272,7 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
           ))}
         </div>
 
-        <div className="grid items-start gap-3 md:grid-cols-[minmax(0,1.18fr),minmax(0,0.82fr)]">
+        <div className="grid items-start gap-3 md:grid-cols-[minmax(0,1fr),176px] lg:grid-cols-[minmax(0,1fr),188px]">
           <div className="relative min-h-[220px] overflow-hidden rounded-[22px] border border-white/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.82),rgba(244,252,252,0.42))] px-5 py-5 shadow-[0_16px_32px_-26px_rgba(15,23,42,0.28),inset_0_1px_0_rgba(255,255,255,0.92)] backdrop-blur-md">
             <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(125,211,252,0.16),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(45,212,191,0.10),transparent_40%)]" />
             <div className="relative">
@@ -267,7 +288,7 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 self-start md:grid-cols-1 xl:grid-cols-2">
+          <div className="grid grid-cols-2 gap-3 self-stretch md:grid-cols-1">
             <Metric label="Active" value={loading ? "—" : `${activeCount}`} accent="teal" />
             <Metric label="Total" value={loading ? "—" : `${totalApplications}`} />
           </div>
@@ -281,16 +302,16 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
             {secondaryStats.map((stat) => (
               <div
                 key={stat.label}
-                className={`relative overflow-hidden rounded-[16px] border border-white/65 bg-gradient-to-br ${stat.glowClass} px-3.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.78)] backdrop-blur-md`}
+                className={`relative flex min-h-[68px] items-center overflow-hidden rounded-[16px] border border-white/65 bg-gradient-to-br ${stat.glowClass} px-3.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.78)] backdrop-blur-md`}
               >
-                <div className="flex items-center justify-between gap-3">
+                <div className="flex w-full items-center justify-between gap-3">
                   <div className="flex min-w-0 items-center gap-2">
                     <span className={`h-2.5 w-2.5 shrink-0 rounded-full shadow-[0_0_14px_rgba(255,255,255,0.65)] ${stat.dotClass}`} />
                     <span className="truncate text-sm font-medium text-slate-600">
                       {stat.label}
                     </span>
                   </div>
-                  <div className="text-sm font-semibold text-slate-900">
+                  <div className="text-sm font-semibold tabular-nums text-slate-900">
                     {loading ? "—" : stat.value}
                   </div>
                 </div>
@@ -391,12 +412,12 @@ function Metric({
       : "border-white/75 bg-[linear-gradient(180deg,rgba(255,255,255,0.7),rgba(255,255,255,0.24))] text-slate-950";
 
   return (
-    <div className={`relative min-h-[112px] overflow-hidden rounded-[22px] border px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.84)] backdrop-blur-md ${accentClasses}`}>
+    <div className={`relative flex min-h-[104px] flex-col justify-between overflow-hidden rounded-[22px] border px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.84)] backdrop-blur-md ${accentClasses}`}>
       <div className={`absolute inset-x-4 top-0 h-px ${accent === "teal" ? "bg-teal-100/80" : "bg-white/90"}`} />
       <div className={`text-sm font-medium ${accent === "teal" ? "text-teal-800/80" : "text-slate-500"}`}>
         {label}
       </div>
-      <div className="mt-3 text-2xl font-semibold tracking-tight">
+      <div className="mt-3 text-2xl font-semibold tracking-tight tabular-nums">
         {value}
       </div>
     </div>
