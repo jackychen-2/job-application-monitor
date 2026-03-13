@@ -117,6 +117,21 @@ function formatRangeWindow(start: Date, end: Date): string {
   return `${format(start, "MMM d")} - ${format(end, "MMM d, yyyy")}`;
 }
 
+function describeRange(range: RangeKey): string {
+  switch (range) {
+    case "24h":
+      return "Last 24 hours";
+    case "7d":
+      return "Last 7 days";
+    case "30d":
+      return "Last 30 days";
+    case "90d":
+      return "Last 90 days";
+    case "all":
+      return "All time";
+  }
+}
+
 function buildCountMap(data: DailyCount[]): Map<string, number> {
   const map = new Map<string, number>();
   data.forEach((entry) => {
@@ -194,46 +209,42 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
 
     return formatRangeWindow(rangeStart, today);
   }, [hourlyData, rangeStart, selectedRange, today]);
-
-  const selectedOption = RANGE_OPTIONS.find((option) => option.key === selectedRange);
-  const rangeLabel = selectedOption?.summaryLabel ?? "30D";
+  const primaryRangeLabel = describeRange(selectedRange);
   const recruiterCount = statusCountMap.get("Recruiter Reach-out") ?? 0;
   const interviewCount = statusCountMap.get("面试") ?? 0;
   const offerCount = statusCountMap.get("Offer") ?? 0;
   const secondaryStats = [
-    { label: "Recruiter", value: recruiterCount, dotClass: "bg-amber-400", glowClass: "from-amber-100/80 via-white/40 to-white/10" },
-    { label: "Interviews", value: interviewCount, dotClass: "bg-teal-400", glowClass: "from-teal-100/80 via-white/40 to-white/10" },
-    { label: "Offers", value: offerCount, dotClass: "bg-rose-400", glowClass: "from-rose-100/80 via-white/40 to-white/10" },
-    { label: "Rejected", value: rejectedCount, dotClass: "bg-stone-400", glowClass: "from-stone-100/80 via-white/40 to-white/10" },
+    { label: "Recruiter", value: recruiterCount, dotClass: "bg-amber-400", glowClass: "from-amber-50/85 via-white/45 to-white/15" },
+    { label: "Interviews", value: interviewCount, dotClass: "bg-teal-400", glowClass: "from-teal-50/85 via-white/45 to-white/15" },
+    { label: "Offers", value: offerCount, dotClass: "bg-rose-400", glowClass: "from-rose-50/85 via-white/45 to-white/15" },
+    { label: "Rejected", value: rejectedCount, dotClass: "bg-stone-400", glowClass: "from-stone-50/85 via-white/45 to-white/15" },
   ];
 
   return (
-    <section className="relative overflow-hidden rounded-[30px] border border-white/70 bg-white/45 p-5 shadow-[0_28px_70px_-42px_rgba(15,23,42,0.5),0_16px_36px_-24px_rgba(45,212,191,0.45)] backdrop-blur-xl sm:p-6">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.92),transparent_34%),radial-gradient(circle_at_bottom_right,rgba(45,212,191,0.18),transparent_36%),linear-gradient(180deg,rgba(255,255,255,0.26),rgba(255,255,255,0.08))]" />
+    <section className="relative overflow-hidden rounded-[28px] border border-white/75 bg-white/44 p-5 shadow-[0_26px_70px_-42px_rgba(15,23,42,0.5),0_16px_36px_-24px_rgba(45,212,191,0.42)] backdrop-blur-xl sm:p-6">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.94),transparent_34%),radial-gradient(circle_at_bottom_right,rgba(45,212,191,0.15),transparent_40%),linear-gradient(180deg,rgba(255,255,255,0.24),rgba(255,255,255,0.06))]" />
       <div className="pointer-events-none absolute inset-x-6 top-0 h-px bg-white/90" />
 
-      <div className="relative flex flex-col gap-5">
-        <div>
-          <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-500/90">
-              Pipeline Activity
-            </p>
-            <h2 className="mt-2 text-xl font-semibold tracking-tight text-slate-900">
-              Application Progress
-            </h2>
-          </div>
+      <div className="relative flex flex-col gap-4">
+        <div className="flex items-end justify-between gap-3">
+          <h2 className="text-[1.95rem] font-semibold tracking-tight text-slate-950">
+            Application Progress
+          </h2>
+          <span className="text-sm font-medium text-slate-500">
+            {primaryRangeLabel}
+          </span>
         </div>
 
-        <div className="grid w-full grid-cols-5 rounded-[22px] border border-white/70 bg-white/35 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.72)] backdrop-blur-md">
+        <div className="grid w-full grid-cols-5 rounded-[16px] border border-white/70 bg-white/28 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.7),inset_0_-12px_24px_rgba(15,23,42,0.03)] backdrop-blur-md">
           {RANGE_OPTIONS.map((option) => (
             <button
               key={option.key}
               type="button"
               onClick={() => setSelectedRange(option.key)}
-              className={`rounded-[18px] px-1.5 py-2 text-xs font-semibold whitespace-nowrap transition-all duration-200 sm:px-2 sm:text-sm ${
+              className={`rounded-[14px] px-1.5 py-2 text-sm font-semibold whitespace-nowrap transition-all duration-200 sm:px-2 ${
                 selectedRange === option.key
-                  ? "bg-white/78 text-slate-900 shadow-[0_14px_32px_-22px_rgba(15,23,42,0.4),inset_0_1px_0_rgba(255,255,255,0.92)]"
-                  : "text-slate-500 hover:bg-white/35 hover:text-slate-900"
+                  ? "border border-sky-500/55 bg-white/84 text-slate-950 shadow-[0_14px_28px_-22px_rgba(15,23,42,0.4),inset_0_1px_0_rgba(255,255,255,0.94)]"
+                  : "text-slate-500 hover:bg-white/42 hover:text-slate-900"
               }`}
             >
               {option.label}
@@ -241,58 +252,66 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
           ))}
         </div>
 
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1.1fr),minmax(0,0.9fr)]">
-          <div className="relative overflow-hidden rounded-[26px] border border-white/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.72),rgba(255,255,255,0.28))] px-5 py-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)] backdrop-blur-md">
-            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(125,211,252,0.18),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(45,212,191,0.12),transparent_40%)]" />
+        <div className="grid items-start gap-3 lg:grid-cols-[minmax(0,1.22fr),minmax(260px,0.78fr)]">
+          <div className="relative overflow-hidden rounded-[22px] border border-white/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.82),rgba(244,252,252,0.42))] px-5 py-5 shadow-[0_16px_32px_-26px_rgba(15,23,42,0.28),inset_0_1px_0_rgba(255,255,255,0.92)] backdrop-blur-md">
+            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(125,211,252,0.16),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(45,212,191,0.10),transparent_40%)]" />
             <div className="relative">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">
-                {rangeLabel} applications
+              <div className="text-sm font-medium text-slate-500">
+                New applications
               </div>
-              <div className={`mt-4 text-6xl font-semibold tracking-[-0.04em] ${loading ? "animate-pulse text-slate-300" : "text-slate-950"}`}>
+              <div className="mt-1 text-sm text-slate-400">
+                {primaryRangeLabel}
+              </div>
+              <div className={`mt-5 text-6xl font-semibold tracking-[-0.05em] ${loading ? "animate-pulse text-slate-300" : "text-slate-950"}`}>
                 {loading ? "—" : recentApplications}
               </div>
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <Metric label="Active" value={loading ? "—" : `${activeCount}`} accent="teal" />
-            <Metric label="Total" value={loading ? "—" : `${totalApplications}`} />
+          <div className="grid grid-cols-2 gap-3 self-start">
+            <Metric label="Open applications" value={loading ? "—" : `${activeCount}`} accent="teal" />
+            <Metric label="All tracked" value={loading ? "—" : `${totalApplications}`} />
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-2.5">
-          {secondaryStats.map((stat) => (
-            <div
-              key={stat.label}
-              className={`relative overflow-hidden rounded-[18px] border border-white/70 bg-gradient-to-br ${stat.glowClass} px-3.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.82)] backdrop-blur-md`}
-            >
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className={`h-2.5 w-2.5 shrink-0 rounded-full shadow-[0_0_14px_rgba(255,255,255,0.65)] ${stat.dotClass}`} />
-                  <span className="truncate text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
-                    {stat.label}
-                  </span>
-                </div>
-                <div className="text-sm font-semibold text-slate-900">
-                  {loading ? "—" : stat.value}
+        <div className="rounded-[22px] border border-white/65 bg-white/24 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.72)] backdrop-blur-md">
+          <div className="mb-3 text-sm font-medium text-slate-500">
+            Current stages
+          </div>
+          <div className="grid grid-cols-2 gap-2.5">
+            {secondaryStats.map((stat) => (
+              <div
+                key={stat.label}
+                className={`relative overflow-hidden rounded-[16px] border border-white/65 bg-gradient-to-br ${stat.glowClass} px-3.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.78)] backdrop-blur-md`}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className={`h-2.5 w-2.5 shrink-0 rounded-full shadow-[0_0_14px_rgba(255,255,255,0.65)] ${stat.dotClass}`} />
+                    <span className="truncate text-sm font-medium text-slate-600">
+                      {stat.label}
+                    </span>
+                  </div>
+                  <div className="text-sm font-semibold text-slate-900">
+                    {loading ? "—" : stat.value}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
 
-        <div className="relative overflow-hidden rounded-[26px] border border-white/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.56),rgba(236,254,255,0.32))] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.88)] backdrop-blur-md">
+        <div className="relative overflow-hidden rounded-[22px] border border-white/72 bg-[linear-gradient(180deg,rgba(255,255,255,0.58),rgba(236,254,255,0.28))] px-3 py-3 shadow-[0_14px_30px_-26px_rgba(15,23,42,0.2),inset_0_1px_0_rgba(255,255,255,0.86)] backdrop-blur-md">
           <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.28),transparent)]" />
           <div className="relative">
             {loading ? (
-              <div className="h-32 animate-pulse rounded-[20px] bg-white/55" />
+              <div className="h-36 animate-pulse rounded-[16px] bg-white/55" />
             ) : chartData.length === 0 ? (
-              <div className="flex h-32 items-center justify-center rounded-[20px] border border-dashed border-white/70 bg-white/35 text-sm text-slate-400">
+              <div className="flex h-36 items-center justify-center rounded-[16px] border border-dashed border-white/70 bg-white/35 text-sm text-slate-400">
                 No application activity yet
               </div>
             ) : (
-              <div className="rounded-[20px] bg-[linear-gradient(180deg,rgba(255,255,255,0.68),rgba(255,255,255,0.24))] px-3 py-2">
-                <div className="mb-2 flex items-center justify-between">
+              <div className="rounded-[16px] bg-[linear-gradient(180deg,rgba(255,255,255,0.7),rgba(255,255,255,0.2))] px-3 py-2">
+                <div className="mb-1 flex items-center justify-between">
                   <span className="text-xs font-semibold text-slate-600">
                     {trendTitle}
                   </span>
@@ -300,9 +319,9 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
                     {trendRangeLabel}
                   </span>
                 </div>
-                <div className="h-28">
+                <div className="h-36 -mx-1">
                   <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={chartData} margin={{ top: 8, right: 4, left: 4, bottom: 0 }}>
+                    <AreaChart data={chartData} margin={{ top: 4, right: 0, left: 0, bottom: 0 }}>
                       <defs>
                         <linearGradient id="progress-fill" x1="0" y1="0" x2="0" y2="1">
                           <stop offset="0%" stopColor="#14b8a6" stopOpacity={0.36} />
@@ -364,13 +383,13 @@ function Metric({
 }) {
   const accentClasses =
     accent === "teal"
-      ? "border-teal-100/80 bg-[linear-gradient(180deg,rgba(204,251,241,0.82),rgba(255,255,255,0.34))] text-slate-950"
-      : "border-white/75 bg-[linear-gradient(180deg,rgba(255,255,255,0.84),rgba(255,255,255,0.32))] text-slate-950";
+      ? "border-teal-100/75 bg-[linear-gradient(180deg,rgba(204,251,241,0.72),rgba(255,255,255,0.28))] text-slate-950"
+      : "border-white/75 bg-[linear-gradient(180deg,rgba(255,255,255,0.7),rgba(255,255,255,0.24))] text-slate-950";
 
   return (
-    <div className={`relative overflow-hidden rounded-[22px] border px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.88)] backdrop-blur-md ${accentClasses}`}>
+    <div className={`relative min-h-[112px] overflow-hidden rounded-[22px] border px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.84)] backdrop-blur-md ${accentClasses}`}>
       <div className={`absolute inset-x-4 top-0 h-px ${accent === "teal" ? "bg-teal-100/80" : "bg-white/90"}`} />
-      <div className={`text-[11px] font-semibold uppercase tracking-[0.24em] ${accent === "teal" ? "text-teal-800/75" : "text-slate-500"}`}>
+      <div className={`text-sm font-medium ${accent === "teal" ? "text-teal-800/80" : "text-slate-500"}`}>
         {label}
       </div>
       <div className="mt-3 text-2xl font-semibold tracking-tight">
