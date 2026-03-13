@@ -12,11 +12,14 @@ import type {
   SplitApplicationRequest,
   SplitApplicationResult,
   ApplicationUpdate,
+  AccountDetails,
   AuthUser,
   DashboardData,
+  DeleteAccountResponse,
   FlowData,
   Journey,
   JourneyCreateRequest,
+  JourneyDeleteResult,
   JourneyUpdateRequest,
   LinkedEmail,
   PendingReviewEmail,
@@ -105,6 +108,23 @@ export function startGoogleLogin(): void {
 
 export async function logout(): Promise<{ status: string }> {
   return request<{ status: string }>("/auth/logout", { method: "POST" });
+}
+
+export async function getAccount(): Promise<AccountDetails> {
+  return request<AccountDetails>("/auth/account", { timeoutMs: 8000 });
+}
+
+export async function updateProfile(data: {
+  display_name: string | null;
+}): Promise<AccountDetails> {
+  return request<AccountDetails>("/auth/profile", {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteAccount(): Promise<DeleteAccountResponse> {
+  return request<DeleteAccountResponse>("/auth/account", { method: "DELETE" });
 }
 
 // ── Applications ─────────────────────────────────────────
@@ -387,5 +407,11 @@ export async function renameJourney(journeyId: number, data: JourneyUpdateReques
   return request<Journey>(`/journeys/${journeyId}`, {
     method: "PATCH",
     body: JSON.stringify(data),
+  });
+}
+
+export async function deleteJourney(journeyId: number): Promise<JourneyDeleteResult> {
+  return request<JourneyDeleteResult>(`/journeys/${journeyId}`, {
+    method: "DELETE",
   });
 }

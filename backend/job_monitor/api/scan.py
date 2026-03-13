@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from job_monitor.auth.deps import get_current_user
-from job_monitor.auth.oauth_google import get_valid_google_access_token
+from job_monitor.auth.oauth_google import GoogleMailboxPermissionsError, get_valid_google_access_token
 from job_monitor.config import AppConfig, get_config
 from job_monitor.database import get_db, get_session_factory
 from job_monitor.models import ScanJob, ScanState, User
@@ -171,6 +171,11 @@ def _maybe_dispatch_background(job_payload: dict, config: AppConfig) -> None:
     dispatch_scan_job_continuation(config, int(job_payload["id"]))
 
 
+def _google_mailbox_http_error(exc: Exception) -> HTTPException:
+    status_code = 403 if isinstance(exc, GoogleMailboxPermissionsError) else 400
+    return HTTPException(status_code=status_code, detail=f"Google mailbox not connected: {exc}")
+
+
 def _create_job(
     current_user: User,
     db: Session,
@@ -189,7 +194,7 @@ def _create_job(
             config,
         )
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Google mailbox not connected: {exc}") from exc
+        raise _google_mailbox_http_error(exc) from exc
 
     job, reused = create_scan_job_record(
         db,
@@ -350,7 +355,7 @@ def step_scan_job(
     try:
         oauth_access_token, _ = get_valid_google_access_token(db, current_user.id, config)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Google mailbox not connected: {exc}") from exc
+        raise _google_mailbox_http_error(exc) from exc
 
     try:
         job, processed_in_step, done = run_scan_job_step(
@@ -395,7 +400,7 @@ def continue_scan_job_in_background(
         job.completed_at = datetime.now(timezone.utc)
         job.last_error = f"Google mailbox not connected: {exc}"
         db.commit()
-        raise HTTPException(status_code=400, detail=f"Google mailbox not connected: {exc}") from exc
+        raise _google_mailbox_http_error(exc) from exc
 
     try:
         updated_job, processed_in_step, done = process_scan_job(

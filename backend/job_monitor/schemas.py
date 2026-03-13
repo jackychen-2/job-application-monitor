@@ -291,6 +291,40 @@ class DashboardDataOut(BaseModel):
     flow: FlowData
 
 
+# ── Auth schemas ─────────────────────────────────────────
+
+
+class AuthUserOut(BaseModel):
+    id: int
+    email: str
+    display_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    active_journey_id: Optional[int] = None
+
+
+class ProfileUpdate(BaseModel):
+    display_name: Optional[str] = Field(None, max_length=200)
+
+
+class AccountOut(BaseModel):
+    id: int
+    email: str
+    display_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    created_at: datetime
+    active_journey_id: Optional[int] = None
+    active_journey_name: Optional[str] = None
+    google_account_email: Optional[str] = None
+    google_account_connected: bool = False
+    gmail_scope_granted: bool = False
+    active_session_count: int = 0
+    journey_count: int = 0
+
+
+class DeleteAccountOut(BaseModel):
+    status: str
+
+
 # ── Journey schemas ───────────────────────────────────────
 
 
@@ -311,3 +345,9 @@ class JourneyOut(BaseModel):
     is_active: bool
 
     model_config = {"from_attributes": True}
+
+
+class JourneyDeleteOut(BaseModel):
+    deleted_journey_id: int
+    active_journey_id: int
+    replacement_created: bool

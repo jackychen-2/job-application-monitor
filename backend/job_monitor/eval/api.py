@@ -16,7 +16,7 @@ from sqlalchemy import distinct, func
 from sqlalchemy.orm import Session
 
 from job_monitor.auth.deps import get_current_user, get_owner_scoped_db
-from job_monitor.auth.oauth_google import get_valid_google_access_token
+from job_monitor.auth.oauth_google import GoogleMailboxPermissionsError, get_valid_google_access_token
 from job_monitor.config import AppConfig, get_config, set_llm_enabled
 from job_monitor.database import get_session_factory
 from job_monitor.eval.cache import download_and_cache_emails
@@ -103,7 +103,16 @@ def cache_download(
     current_user: User = Depends(get_current_user),
 ):
     """Fetch emails from IMAP and cache locally."""
-    oauth_access_token, mailbox_email = get_valid_google_access_token(session, current_user.id, config)
+    try:
+        oauth_access_token, mailbox_email = get_valid_google_access_token(
+            session,
+            current_user.id,
+            config,
+        )
+    except GoogleMailboxPermissionsError as exc:
+        raise HTTPException(403, f"Google mailbox not connected: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(400, f"Google mailbox not connected: {exc}") from exc
     result = download_and_cache_emails(
         config, session,
         owner_user_id=current_user.id,

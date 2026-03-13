@@ -1,7 +1,13 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { activateJourney as activateJourneyApi, createJourney as createJourneyApi, listJourneys, renameJourney as renameJourneyApi } from "../api/client";
+import {
+  activateJourney as activateJourneyApi,
+  createJourney as createJourneyApi,
+  deleteJourney as deleteJourneyApi,
+  listJourneys,
+  renameJourney as renameJourneyApi,
+} from "../api/client";
 import { useAuth } from "../auth/AuthContext";
-import type { Journey } from "../types";
+import type { Journey, JourneyDeleteResult } from "../types";
 
 interface JourneyContextValue {
   loading: boolean;
@@ -11,6 +17,7 @@ interface JourneyContextValue {
   createJourney: (name?: string) => Promise<void>;
   activateJourney: (journeyId: number) => Promise<void>;
   renameJourney: (journeyId: number, name: string) => Promise<void>;
+  deleteJourney: (journeyId: number) => Promise<JourneyDeleteResult>;
 }
 
 const JourneyContext = createContext<JourneyContextValue | null>(null);
@@ -54,6 +61,12 @@ export function JourneyProvider({ children }: { children: React.ReactNode }) {
     await refreshJourneys();
   }, [refreshJourneys]);
 
+  const deleteJourney = useCallback(async (journeyId: number) => {
+    const result = await deleteJourneyApi(journeyId);
+    await Promise.all([refreshJourneys(), refreshAuth()]);
+    return result;
+  }, [refreshAuth, refreshJourneys]);
+
   const activeJourney = useMemo(() => {
     if (journeys.length === 0) return null;
     if (user?.active_journey_id != null) {
@@ -71,7 +84,8 @@ export function JourneyProvider({ children }: { children: React.ReactNode }) {
     createJourney,
     activateJourney,
     renameJourney,
-  }), [loading, journeys, activeJourney, refreshJourneys, createJourney, activateJourney, renameJourney]);
+    deleteJourney,
+  }), [loading, journeys, activeJourney, refreshJourneys, createJourney, activateJourney, renameJourney, deleteJourney]);
 
   return <JourneyContext.Provider value={value}>{children}</JourneyContext.Provider>;
 }

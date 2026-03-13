@@ -56,6 +56,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True, index=True)
     google_sub: Mapped[str | None] = mapped_column(String(200), nullable=True, unique=True, index=True)
     display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     active_journey_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("journeys.id", ondelete="SET NULL"), nullable=True, index=True
     )

@@ -217,6 +217,9 @@ def _run_schema_upgrades(config: AppConfig) -> None:
             if "active_journey_id" not in user_columns:
                 conn.execute(text("ALTER TABLE users ADD COLUMN active_journey_id INTEGER"))
                 logger.info("schema_upgrade_added_column", table="users", column="active_journey_id")
+            if "avatar_url" not in user_columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN avatar_url TEXT"))
+                logger.info("schema_upgrade_added_column", table="users", column="avatar_url")
             conn.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS idx_users_active_journey_id "

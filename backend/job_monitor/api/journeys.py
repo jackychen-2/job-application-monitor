@@ -8,8 +8,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from job_monitor.auth.deps import get_current_user, get_owner_scoped_db
+from job_monitor.database import get_db
 from job_monitor.models import Journey, User
-from job_monitor.schemas import JourneyCreate, JourneyOut, JourneyUpdate
+from job_monitor.schemas import JourneyCreate, JourneyDeleteOut, JourneyOut, JourneyUpdate
 
 router = APIRouter(prefix="/api/journeys", tags=["journeys"])
 
@@ -94,3 +95,43 @@ def rename_journey(
     db.commit()
     db.refresh(journey)
     return _to_journey_out(journey, current_user.active_journey_id)
+
+
+@router.delete("/{journey_id}", response_model=JourneyDeleteOut)
+def delete_journey(
+    journey_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JourneyDeleteOut:
+    journeys = (
+        db.query(Journey)
+        .filter(Journey.owner_user_id == current_user.id)
+        .order_by(Journey.created_at.asc(), Journey.id.asc())
+        .all()
+    )
+    journey = next((item for item in journeys if item.id == journey_id), None)
+    if journey is None:
+        raise HTTPException(status_code=404, detail="Journey not found")
+
+    remaining = [item for item in journeys if item.id != journey.id]
+    replacement_created = False
+    if not remaining:
+        replacement = Journey(owner_user_id=current_user.id, name=_default_journey_name())
+        db.add(replacement)
+        db.flush()
+        remaining = [replacement]
+        replacement_created = True
+
+    if current_user.active_journey_id == journey.id or current_user.active_journey_id is None:
+        current_user.active_journey_id = remaining[0].id
+        db.info["journey_id"] = remaining[0].id
+
+    db.delete(journey)
+    db.flush()
+
+    active_journey_id = int(current_user.active_journey_id or remaining[0].id)
+    return JourneyDeleteOut(
+        deleted_journey_id=journey_id,
+        active_journey_id=active_journey_id,
+        replacement_created=replacement_created,
+    )

@@ -2,6 +2,7 @@ import { Routes, Route } from "react-router-dom";
 import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
 import ApplicationDetail from "./pages/ApplicationDetail";
+import AccountPage from "./pages/AccountPage";
 import { useAuth } from "./auth/AuthContext";
 import AuthModal from "./components/AuthModal";
 
@@ -24,6 +25,7 @@ export default function App() {
     <Routes>
       <Route element={<Layout />}>
         <Route path="/" element={<Dashboard />} />
+        <Route path="/account" element={<AccountPage />} />
         <Route path="/applications/:id" element={<ApplicationDetail />} />
       </Route>
     </Routes>

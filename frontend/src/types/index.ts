@@ -244,12 +244,23 @@ export interface AuthUser {
   id: number;
   email: string;
   display_name: string | null;
+  avatar_url: string | null;
   active_journey_id: number | null;
 }
 
 export interface AuthState {
   loading: boolean;
   user: AuthUser | null;
+}
+
+export interface AccountDetails extends AuthUser {
+  created_at: string;
+  active_journey_name: string | null;
+  google_account_email: string | null;
+  google_account_connected: boolean;
+  gmail_scope_granted: boolean;
+  active_session_count: number;
+  journey_count: number;
 }
 
 export interface Journey {
@@ -267,6 +278,16 @@ export interface JourneyCreateRequest {
 
 export interface JourneyUpdateRequest {
   name: string;
+}
+
+export interface JourneyDeleteResult {
+  deleted_journey_id: number;
+  active_journey_id: number;
+  replacement_created: boolean;
+}
+
+export interface DeleteAccountResponse {
+  status: string;
 }
 
 /** Status value constants */

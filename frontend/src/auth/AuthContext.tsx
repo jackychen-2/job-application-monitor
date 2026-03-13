@@ -1,11 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { authMe, logout, startGoogleLogin } from "../api/client";
+import { authMe, deleteAccount, logout, startGoogleLogin } from "../api/client";
 import type { AuthState, AuthUser } from "../types";
 
 interface AuthContextValue extends AuthState {
   refreshAuth: () => Promise<void>;
   loginWithGoogle: () => void;
   logoutUser: () => Promise<void>;
+  deleteAccountUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -83,6 +84,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearSessionHint();
   }, []);
 
+  const deleteAccountUser = useCallback(async () => {
+    await deleteAccount();
+    setUser(null);
+    clearSessionHint();
+  }, []);
+
   const value = useMemo<AuthContextValue>(
     () => ({
       loading,
@@ -90,8 +97,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       refreshAuth,
       loginWithGoogle,
       logoutUser,
+      deleteAccountUser,
     }),
-    [loading, user, refreshAuth, loginWithGoogle, logoutUser]
+    [loading, user, refreshAuth, loginWithGoogle, logoutUser, deleteAccountUser]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -1,9 +1,8 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { useAuth } from "../auth/AuthContext";
 import JourneySwitcher from "./JourneySwitcher";
+import UserMenu from "./UserMenu";
 
 export default function Layout() {
-  const { user, logoutUser } = useAuth();
   const location = useLocation();
   const dashboardHref =
     location.pathname === "/"
@@ -30,13 +29,7 @@ export default function Layout() {
             <nav className="flex items-center gap-4">
               <Link to={dashboardHref} onClick={markDashboardRestore} className="text-sm text-gray-600 hover:text-gray-900">Dashboard</Link>
               <JourneySwitcher />
-              <span className="text-xs text-gray-500">{user?.email}</span>
-              <button
-                onClick={() => void logoutUser()}
-                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
-              >
-                Log out
-              </button>
+              <UserMenu />
             </nav>
           </div>
         </div>

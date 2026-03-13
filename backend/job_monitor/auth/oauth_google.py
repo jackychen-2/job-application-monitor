@@ -20,6 +20,36 @@ logger = structlog.get_logger(__name__)
 _GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+_MAILBOX_ACCESS_SCOPES = {
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://mail.google.com/",
+}
+
+
+class GoogleMailboxPermissionsError(RuntimeError):
+    """Raised when the linked Google account lacks mailbox-read permissions."""
+
+
+def _scope_tokens(scope: str | None) -> set[str]:
+    if scope is None:
+        return set()
+    return {token.strip() for token in scope.replace(",", " ").split() if token.strip()}
+
+
+def google_account_has_required_gmail_scope(scope: str | None) -> bool:
+    """Treat unknown legacy scope as valid, but reject known insufficient grants."""
+    if scope is None:
+        return True
+    return bool(_scope_tokens(scope) & _MAILBOX_ACCESS_SCOPES)
+
+
+def _ensure_mailbox_scope(scope: str | None) -> None:
+    if google_account_has_required_gmail_scope(scope):
+        return
+    raise GoogleMailboxPermissionsError(
+        "Gmail read access is missing. Reconnect Google and grant Gmail mailbox permissions."
+    )
 
 
 def _utcnow() -> datetime:
@@ -115,13 +145,20 @@ def upsert_user_from_google_oauth(
     google_sub = str(userinfo["sub"]).strip()
     email = str(userinfo["email"]).strip().lower()
     display_name = str(userinfo.get("name") or "").strip() or None
+    avatar_url = str(userinfo.get("picture") or "").strip() or None
 
     user = session.query(User).filter(User.email == email).first()
     if user is None:
         user = session.query(User).filter(User.google_sub == google_sub).first()
 
     if user is None:
-        user = User(email=email, google_sub=google_sub, display_name=display_name, is_active=True)
+        user = User(
+            email=email,
+            google_sub=google_sub,
+            display_name=display_name,
+            avatar_url=avatar_url,
+            is_active=True,
+        )
         session.add(user)
         session.flush()
     else:
@@ -129,6 +166,8 @@ def upsert_user_from_google_oauth(
             user.google_sub = google_sub
         if display_name:
             user.display_name = display_name
+        if avatar_url:
+            user.avatar_url = avatar_url
 
     account = session.query(GoogleAccount).filter(GoogleAccount.user_id == user.id).first()
     if account is None:
@@ -172,6 +211,7 @@ def get_valid_google_access_token(
     account = session.query(GoogleAccount).filter(GoogleAccount.user_id == user_id).first()
     if account is None:
         raise RuntimeError("Google account not linked")
+    _ensure_mailbox_scope(account.scope)
 
     now = _utcnow()
     access_token_expires_at = _as_utc(account.access_token_expires_at)
@@ -200,12 +240,16 @@ def get_valid_google_access_token(
     expires_in = int(token_payload.get("expires_in", 3600))
     if not new_access_token:
         raise RuntimeError("Google refresh token response missing access_token")
+    refreshed_scope = token_payload.get("scope")
+    _ensure_mailbox_scope(refreshed_scope or account.scope)
 
     account.access_token_encrypted = encrypt_token(
         new_access_token,
         config.token_encryption_key.get_secret_value(),
     )
     account.access_token_expires_at = now + timedelta(seconds=expires_in)
+    if refreshed_scope:
+        account.scope = refreshed_scope
     session.flush()
 
     return new_access_token, account.email

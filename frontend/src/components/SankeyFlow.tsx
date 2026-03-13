@@ -170,12 +170,15 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
   }
 
   // Build root edges from current status snapshot.
-  // Skip terminal states — they are reached via recorded transitions, not directly
-  // from Applications, to avoid double-counting the same applications twice.
+  // For terminal states: only add a direct edge if no transition path already leads there
+  // (avoids double-counting; falls back for statuses with no recorded transitions).
   for (const sc of flowData.status_counts) {
     const to = normalizeStatus(sc.status);
     if (sc.count <= 0) continue;
-    if (TERMINAL_NODES.has(to)) continue;
+    if (TERMINAL_NODES.has(to)) {
+      const hasTransitionPath = Array.from(edgeCounts.keys()).some((k) => k.endsWith(`→${to}`));
+      if (hasTransitionPath) continue;
+    }
     addCanonicalEdge("Applications", to, sc.count);
   }
 
