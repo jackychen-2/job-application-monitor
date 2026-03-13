@@ -254,7 +254,7 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
 
 const TERMINAL_NODES = new Set(["拒绝", "Offer", "Onboarding", "Unknown"]);
 // Nodes whose incoming links all converge to center and are rendered as short bars.
-const CONVERGING_NODES = new Set([...TERMINAL_NODES, "OA", "已申请"]);
+const CONVERGING_NODES = new Set([...TERMINAL_NODES, "OA", "已申请", "面试"]);
 
 // Must stay in sync with the `margin` prop passed to <Sankey> below.
 const SANKEY_MARGIN_TOP = 20;
