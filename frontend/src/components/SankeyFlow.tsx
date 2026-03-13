@@ -161,9 +161,9 @@ function remapLinkEnd(
   const top = remap(centerY - hw);
   const bot = remap(centerY + hw);
   const mid = (top + bot) / 2;
-  // Apply minimum thickness of 5px
-  let t = Math.min(top, mid - 5);
-  let b = Math.max(bot, mid + 5);
+  // Apply minimum thickness of 3px (small flows stay visible but not oversized)
+  let t = Math.min(top, mid - 3);
+  let b = Math.max(bot, mid + 3);
   // Clamp within bar bounds so ribbons never overflow the bar
   const barTop = cy - RIBBON_SPREAD_H / 2;
   const barBot = cy + RIBBON_SPREAD_H / 2;
