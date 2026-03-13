@@ -113,6 +113,10 @@ function buildMonthlyChartData(start: Date, end: Date, countMap: Map<string, num
   });
 }
 
+function formatRangeWindow(start: Date, end: Date): string {
+  return `${format(start, "MMM d")} - ${format(end, "MMM d, yyyy")}`;
+}
+
 function buildCountMap(data: DailyCount[]): Map<string, number> {
   const map = new Map<string, number>();
   data.forEach((entry) => {
@@ -168,6 +172,28 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
     }
     return buildDailyChartData(rangeStart, today, countMap, selectedRange === "7d" ? "EEE" : "MMM d");
   }, [countMap, hourlyData, rangeStart, selectedRange, today]);
+  const trendTitle =
+    selectedRange === "24h"
+      ? "Hourly new applications"
+      : selectedRange === "90d"
+        ? "Weekly new applications"
+        : selectedRange === "all"
+          ? "Monthly new applications"
+          : "Daily new applications";
+  const trendRangeLabel = useMemo(() => {
+    if (selectedRange === "24h") {
+      if (hourlyData.length === 0) {
+        return "Last 24 hours";
+      }
+
+      const sortedData = [...hourlyData].sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+      const start = parseISO(sortedData[0].timestamp);
+      const end = parseISO(sortedData[sortedData.length - 1].timestamp);
+      return formatRangeWindow(start, end);
+    }
+
+    return formatRangeWindow(rangeStart, today);
+  }, [hourlyData, rangeStart, selectedRange, today]);
 
   const selectedOption = RANGE_OPTIONS.find((option) => option.key === selectedRange);
   const rangeLabel = selectedOption?.summaryLabel ?? "30D";
@@ -187,17 +213,14 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
       <div className="pointer-events-none absolute inset-x-6 top-0 h-px bg-white/90" />
 
       <div className="relative flex flex-col gap-5">
-        <div className="flex items-start justify-between gap-3">
+        <div>
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-500/90">
               Pipeline Activity
             </p>
             <h2 className="mt-2 text-xl font-semibold tracking-tight text-slate-900">
-              Progress
+              Application Progress
             </h2>
-          </div>
-          <div className="rounded-full border border-white/70 bg-white/45 px-3 py-1 text-xs font-medium text-slate-500 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)] backdrop-blur-md">
-            Live snapshot
           </div>
         </div>
 
@@ -228,9 +251,6 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
               <div className={`mt-4 text-6xl font-semibold tracking-[-0.04em] ${loading ? "animate-pulse text-slate-300" : "text-slate-950"}`}>
                 {loading ? "—" : recentApplications}
               </div>
-              <p className="mt-3 max-w-xs text-sm leading-6 text-slate-600">
-                New application activity across the selected window.
-              </p>
             </div>
           </div>
 
@@ -273,11 +293,11 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
             ) : (
               <div className="rounded-[20px] bg-[linear-gradient(180deg,rgba(255,255,255,0.68),rgba(255,255,255,0.24))] px-3 py-2">
                 <div className="mb-2 flex items-center justify-between">
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">
-                    Trend
+                  <span className="text-xs font-semibold text-slate-600">
+                    {trendTitle}
                   </span>
                   <span className="text-xs font-medium text-slate-500">
-                    {rangeLabel}
+                    {trendRangeLabel}
                   </span>
                 </div>
                 <div className="h-28">
