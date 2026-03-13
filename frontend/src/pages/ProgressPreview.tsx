@@ -75,9 +75,16 @@ const PREVIEW_STATS = buildPreviewStats();
 
 export default function ProgressPreview() {
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,#f8fafc,transparent_28%),linear-gradient(180deg,#f3f4f6,#eef2f7)] px-4 py-10 sm:px-6">
-      <div className="mx-auto max-w-3xl">
-        <div className="mb-5 rounded-[20px] border border-white/70 bg-white/65 px-4 py-3 text-sm text-slate-600 shadow-[0_16px_36px_-28px_rgba(15,23,42,0.35)] backdrop-blur-md">
+    <div className="relative min-h-screen overflow-hidden bg-[linear-gradient(180deg,#e8edf4,#dfe8f2)] px-4 py-10 sm:px-6">
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute -left-24 top-0 h-72 w-72 rounded-full bg-white/70 blur-3xl" />
+        <div className="absolute right-[-7rem] top-16 h-[30rem] w-[30rem] rounded-full bg-cyan-200/48 blur-3xl" />
+        <div className="absolute left-[18%] bottom-[-6rem] h-[20rem] w-[20rem] rounded-full bg-sky-200/32 blur-3xl" />
+        <div className="absolute left-[46%] top-[34%] h-[18rem] w-[18rem] rounded-full bg-emerald-100/18 blur-3xl" />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.86),transparent_22%),radial-gradient(circle_at_82%_24%,rgba(165,243,252,0.42),transparent_26%),radial-gradient(circle_at_76%_82%,rgba(187,247,208,0.24),transparent_22%),linear-gradient(135deg,rgba(255,255,255,0.18),transparent_34%,rgba(125,211,252,0.1)_72%,transparent_100%)]" />
+      </div>
+      <div className="relative mx-auto max-w-[32rem]">
+        <div className="mb-5 rounded-[20px] border border-white/70 bg-white/56 px-4 py-3 text-sm text-slate-600 shadow-[0_20px_42px_-28px_rgba(15,23,42,0.28)] backdrop-blur-xl">
           Progress preview uses mock data and does not require Google login.
         </div>
         <PipelineProgressPanel stats={PREVIEW_STATS} loading={false} />

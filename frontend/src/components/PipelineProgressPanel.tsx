@@ -234,38 +234,49 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
   }, [hourlyData, rangeStart, selectedRange, today]);
   const primaryRangeLabel = describeRange(selectedRange);
   const selectedRangeIndex = RANGE_OPTIONS.findIndex((option) => option.key === selectedRange);
+  const selectedRangeSliderStyle = {
+    width: "calc((100% - 0.5rem) / 5)",
+    transform: `translateX(${selectedRangeIndex * 100}%)`,
+  } as const;
   const recruiterCount = statusCountMap.get("Recruiter Reach-out") ?? 0;
   const interviewCount = statusCountMap.get("面试") ?? 0;
   const offerCount = statusCountMap.get("Offer") ?? 0;
   const secondaryStats = [
-    { label: "Recruiter", value: recruiterCount, dotClass: "bg-amber-400", glowClass: "from-amber-50/85 via-white/45 to-white/15" },
-    { label: "Interviews", value: interviewCount, dotClass: "bg-teal-400", glowClass: "from-teal-50/85 via-white/45 to-white/15" },
-    { label: "Offers", value: offerCount, dotClass: "bg-rose-400", glowClass: "from-rose-50/85 via-white/45 to-white/15" },
-    { label: "Rejected", value: rejectedCount, dotClass: "bg-stone-400", glowClass: "from-stone-50/85 via-white/45 to-white/15" },
+    { label: "Recruiter", value: recruiterCount, dotClass: "bg-amber-400" },
+    { label: "Interviews", value: interviewCount, dotClass: "bg-teal-400" },
+    { label: "Offers", value: offerCount, dotClass: "bg-rose-400" },
+    { label: "Rejected", value: rejectedCount, dotClass: "bg-stone-400" },
   ];
 
   return (
-    <section className="relative overflow-hidden rounded-[28px] border border-white/75 bg-white/44 p-5 shadow-[0_26px_70px_-42px_rgba(15,23,42,0.5),0_16px_36px_-24px_rgba(45,212,191,0.42)] backdrop-blur-xl sm:p-6">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.94),transparent_34%),radial-gradient(circle_at_bottom_right,rgba(45,212,191,0.15),transparent_40%),linear-gradient(180deg,rgba(255,255,255,0.24),rgba(255,255,255,0.06))]" />
-      <div className="pointer-events-none absolute inset-x-6 top-0 h-px bg-white/90" />
+    <section className="relative overflow-hidden rounded-[28px] border border-white/28 bg-[linear-gradient(180deg,rgba(255,255,255,0.16),rgba(255,255,255,0.05)_38%,rgba(224,242,254,0.08)_100%)] p-4 shadow-[0_68px_110px_-74px_rgba(15,23,42,0.62),0_24px_48px_-40px_rgba(45,212,191,0.12),inset_0_1px_0_rgba(255,255,255,0.3)] backdrop-blur-[30px] sm:p-5">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.78),transparent_26%),radial-gradient(circle_at_78%_80%,rgba(125,211,252,0.22),transparent_32%),radial-gradient(circle_at_92%_92%,rgba(187,247,208,0.16),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.01))]" />
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.06),transparent_30%,rgba(103,232,249,0.06)_72%,transparent_100%)] opacity-80" />
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_120%,rgba(15,23,42,0.14),transparent_40%)]" />
+      <div className="pointer-events-none absolute inset-x-6 top-0 h-px bg-white/54" />
+      <div className="pointer-events-none absolute inset-x-8 bottom-0 h-[1px] bg-slate-300/14" />
 
-      <div className="relative flex flex-col gap-4">
+      <div className="relative flex flex-col gap-3">
         <div>
-          <h2 className="whitespace-nowrap text-[2.35rem] font-semibold leading-[0.95] tracking-tight text-slate-950 sm:text-[2.6rem] lg:text-[2.85rem]">
+          <h2 className="whitespace-nowrap text-[1.55rem] font-semibold leading-[0.98] tracking-tight text-slate-950 sm:text-[1.72rem] lg:text-[1.82rem]">
             Application Progress
           </h2>
         </div>
 
-        <div className="relative grid w-full grid-cols-5 rounded-[16px] border border-white/70 bg-white/28 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.7),inset_0_-12px_24px_rgba(15,23,42,0.03)] backdrop-blur-md">
+        <div className="relative grid w-full grid-cols-5 rounded-[16px] border border-white/22 bg-[linear-gradient(180deg,rgba(255,255,255,0.1),rgba(255,255,255,0.04))] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.26),inset_0_14px_20px_rgba(255,255,255,0.03)] backdrop-blur-[16px]">
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-y-1 left-1 rounded-[14px] border border-white/90 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(247,250,252,0.78))] shadow-[0_18px_34px_-24px_rgba(15,23,42,0.42),0_8px_16px_-12px_rgba(59,130,246,0.18),inset_0_1px_0_rgba(255,255,255,1)] transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
-            style={{
-              width: "calc((100% - 0.5rem) / 5)",
-              transform: `translateX(${selectedRangeIndex * 100}%)`,
-            }}
+            className="pointer-events-none absolute inset-y-0 left-1 rounded-[16px] bg-[radial-gradient(circle_at_30%_30%,rgba(255,255,255,1),rgba(191,219,254,0.66)_38%,rgba(125,211,252,0.28)_68%,transparent_100%)] blur-[26px] opacity-100 transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
+            style={selectedRangeSliderStyle}
+          />
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-y-[3px] left-1 rounded-[14px] border border-white/94 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(255,255,255,0.78)_48%,rgba(240,249,255,0.54))] shadow-[0_24px_38px_-24px_rgba(15,23,42,0.34),0_14px_22px_-18px_rgba(125,211,252,0.22),inset_0_1px_0_rgba(255,255,255,1)] transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
+            style={selectedRangeSliderStyle}
           >
-            <div className="absolute inset-[1px] rounded-[13px] bg-[linear-gradient(180deg,rgba(255,255,255,0.55),rgba(255,255,255,0.08))]" />
+            <div className="absolute inset-[1px] rounded-[13px] bg-[linear-gradient(180deg,rgba(255,255,255,0.88),rgba(255,255,255,0.2)_58%,rgba(255,255,255,0.04))]" />
+            <div className="absolute inset-x-4 top-[2px] h-[44%] rounded-full bg-white/76 blur-[2px]" />
+            <div className="absolute bottom-[3px] left-[18%] h-[30%] w-[64%] rounded-full bg-sky-100/56 blur-[12px]" />
           </div>
           {RANGE_OPTIONS.map((option) => (
             <button
@@ -273,10 +284,10 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
               type="button"
               onClick={() => setSelectedRange(option.key)}
               aria-pressed={selectedRange === option.key}
-              className={`relative z-10 rounded-[14px] px-1.5 py-2 text-sm font-semibold whitespace-nowrap transition-[color,transform] duration-200 ease-out focus-visible:outline-none sm:px-2 ${
+              className={`relative z-10 rounded-[14px] px-1 py-1.5 text-[0.95rem] font-semibold whitespace-nowrap transition-[color,transform] duration-300 ease-out focus-visible:outline-none sm:px-2 ${
                 selectedRange === option.key
-                  ? "-translate-y-[1px] text-slate-950"
-                  : "text-slate-500 hover:text-slate-900"
+                  ? "-translate-y-[1px] scale-[1.01] text-slate-950"
+                  : "text-slate-500/95 hover:text-slate-900"
               }`}
             >
               {option.label}
@@ -284,46 +295,61 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
           ))}
         </div>
 
-        <div className="grid items-start gap-3 md:grid-cols-[minmax(0,1fr),176px] lg:grid-cols-[minmax(0,1fr),188px]">
-          <div className="relative min-h-[220px] overflow-hidden rounded-[22px] border border-white/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.82),rgba(244,252,252,0.42))] px-5 py-5 shadow-[0_16px_32px_-26px_rgba(15,23,42,0.28),inset_0_1px_0_rgba(255,255,255,0.92)] backdrop-blur-md">
-            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(125,211,252,0.16),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(45,212,191,0.10),transparent_40%)]" />
+        <div className="grid items-stretch gap-3 md:grid-cols-[minmax(0,1fr),132px] md:min-h-[196px] lg:grid-cols-[minmax(0,1fr),142px]">
+          <div className="relative min-h-[196px] overflow-hidden rounded-[22px] border border-white/12 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03)_42%,rgba(236,254,255,0.06)_100%)] px-4 py-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.22),inset_0_16px_24px_rgba(255,255,255,0.02),inset_0_-18px_28px_rgba(15,23,42,0.06),inset_0_-26px_38px_rgba(34,211,238,0.05)] backdrop-blur-[12px]">
+            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.42),transparent_34%),radial-gradient(circle_at_74%_80%,rgba(103,232,249,0.16),transparent_30%),linear-gradient(135deg,rgba(255,255,255,0.06),transparent_34%,rgba(255,255,255,0.12)_72%,transparent_100%)]" />
+            <div className="pointer-events-none absolute inset-[1px] rounded-[21px] bg-[linear-gradient(180deg,rgba(255,255,255,0.12),transparent_22%,rgba(255,255,255,0.02)_64%,rgba(236,254,255,0.1))]" />
+            <div className="pointer-events-none absolute inset-x-4 top-[2px] h-[20%] rounded-full bg-white/22 blur-[7px]" />
+            <div className="pointer-events-none absolute bottom-3 right-[10%] h-16 w-[40%] rounded-full bg-cyan-100/24 blur-[24px]" />
             <div className="relative">
-              <div className="text-sm font-medium text-slate-500">
+              <div className="text-[0.95rem] font-medium text-slate-500">
                 New applications
               </div>
-              <div className="mt-1 text-sm text-slate-400">
+              <div className="mt-1 text-[0.95rem] text-slate-400/95">
                 {primaryRangeLabel}
               </div>
-              <div className={`mt-5 text-6xl font-semibold tracking-[-0.05em] ${loading ? "animate-pulse text-slate-300" : "text-slate-950"}`}>
+              <div className={`mt-5 text-[3.1rem] font-semibold tracking-[-0.055em] ${loading ? "animate-pulse text-slate-300" : "text-slate-950"}`}>
                 {loading ? "—" : recentApplications}
               </div>
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 self-stretch md:grid-cols-1">
-            <Metric label="Active" value={loading ? "—" : `${activeCount}`} accent="teal" />
-            <Metric label="Total" value={loading ? "—" : `${totalApplications}`} />
+          <div className="relative overflow-hidden rounded-[22px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.02)_42%,rgba(236,254,255,0.05)_100%)] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.18),inset_0_16px_22px_rgba(255,255,255,0.015),inset_0_-18px_28px_rgba(15,23,42,0.06),inset_0_-24px_36px_rgba(34,211,238,0.04)] backdrop-blur-[10px] md:h-full md:min-h-[196px]">
+            <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.06),transparent_44%,rgba(236,254,255,0.04))]" />
+            <div className="relative grid grid-cols-2 gap-0 md:h-full md:grid-cols-1 md:grid-rows-2">
+              <SummaryMetric
+                label="Active"
+                value={loading ? "—" : `${activeCount}`}
+                accent="teal"
+                className="pr-3 md:border-b md:border-white/12 md:pb-3 md:pr-0"
+              />
+              <SummaryMetric
+                label="Total"
+                value={loading ? "—" : `${totalApplications}`}
+                className="border-l border-white/12 pl-3 md:border-l-0 md:pl-0 md:pt-3"
+              />
+            </div>
           </div>
         </div>
 
-        <div className="rounded-[22px] border border-white/65 bg-white/24 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.72)] backdrop-blur-md">
-          <div className="mb-3 text-sm font-medium text-slate-500">
+        <div className="rounded-[22px] border border-white/12 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03)_42%,rgba(236,254,255,0.06)_100%)] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.26),inset_0_18px_26px_rgba(255,255,255,0.02),inset_0_-22px_34px_rgba(15,23,42,0.07),inset_0_-26px_38px_rgba(34,211,238,0.05)] backdrop-blur-[10px]">
+          <div className="mb-2 text-[0.95rem] font-medium text-slate-600">
             Current stages
           </div>
-          <div className="grid grid-cols-2 gap-2.5">
-            {secondaryStats.map((stat) => (
+          <div className="grid grid-cols-2 gap-x-6 gap-y-1 px-3 py-1">
+            {secondaryStats.map((stat, index) => (
               <div
                 key={stat.label}
-                className={`relative flex min-h-[68px] items-center overflow-hidden rounded-[16px] border border-white/65 bg-gradient-to-br ${stat.glowClass} px-3.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.78)] backdrop-blur-md`}
+                className={`flex min-h-[56px] items-center py-3 ${index % 2 === 1 ? "pl-3" : "pr-3"}`}
               >
                 <div className="flex w-full items-center justify-between gap-3">
                   <div className="flex min-w-0 items-center gap-2">
                     <span className={`h-2.5 w-2.5 shrink-0 rounded-full shadow-[0_0_14px_rgba(255,255,255,0.65)] ${stat.dotClass}`} />
-                    <span className="truncate text-sm font-medium text-slate-600">
+                    <span className="truncate text-[0.95rem] font-medium text-slate-600">
                       {stat.label}
                     </span>
                   </div>
-                  <div className="text-sm font-semibold tabular-nums text-slate-900">
+                  <div className="text-[0.95rem] font-semibold tabular-nums text-slate-900">
                     {loading ? "—" : stat.value}
                   </div>
                 </div>
@@ -332,33 +358,33 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
           </div>
         </div>
 
-        <div className="relative overflow-hidden rounded-[22px] border border-white/72 bg-[linear-gradient(180deg,rgba(255,255,255,0.58),rgba(236,254,255,0.28))] px-3 py-3 shadow-[0_14px_30px_-26px_rgba(15,23,42,0.2),inset_0_1px_0_rgba(255,255,255,0.86)] backdrop-blur-md">
-          <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.28),transparent)]" />
-          <div className="relative">
+        <div className="relative overflow-hidden rounded-[22px] border border-white/12 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03)_42%,rgba(236,254,255,0.05)_100%)] px-2.5 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.22),inset_0_14px_22px_rgba(255,255,255,0.02),inset_0_-22px_32px_rgba(34,211,238,0.03)] backdrop-blur-[10px]">
+          <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),transparent)]" />
+          <div className="relative px-3 py-2">
             {loading ? (
-              <div className="h-36 animate-pulse rounded-[16px] bg-white/55" />
+              <div className="h-32 animate-pulse rounded-[12px] bg-white/28" />
             ) : chartData.length === 0 ? (
-              <div className="flex h-36 items-center justify-center rounded-[16px] border border-dashed border-white/70 bg-white/35 text-sm text-slate-400">
+              <div className="flex h-32 items-center justify-center rounded-[12px] border border-dashed border-white/45 bg-white/10 text-sm text-slate-400">
                 No application activity yet
               </div>
             ) : (
-              <div className="rounded-[16px] bg-[linear-gradient(180deg,rgba(255,255,255,0.7),rgba(255,255,255,0.2))] px-3 py-2">
+              <>
                 <div className="mb-1 flex items-start justify-between gap-3">
                   <div>
-                    <div className="text-xs font-semibold text-slate-600">
+                    <div className="text-[0.9rem] font-semibold text-slate-700">
                       {trendTitle}
                     </div>
-                    <div className="mt-0.5 text-[11px] text-slate-400">
+                    <div className="mt-0.5 text-[0.8rem] text-slate-500/75">
                       {trendGroupingLabel}
                     </div>
                   </div>
-                  <span className="text-right text-xs font-medium text-slate-500">
+                  <span className="text-right text-[0.9rem] font-medium text-slate-600/85">
                     {trendRangeLabel}
                   </span>
                 </div>
-                <div className="h-36 -mx-1">
+                <div className="h-32 -mx-3">
                   <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={chartData} margin={{ top: 4, right: 0, left: 0, bottom: 0 }}>
+                    <AreaChart data={chartData} margin={{ top: 4, right: -14, left: -10, bottom: -2 }}>
                       <defs>
                         <linearGradient id="progress-fill" x1="0" y1="0" x2="0" y2="1">
                           <stop offset="0%" stopColor="#14b8a6" stopOpacity={0.36} />
@@ -400,7 +426,7 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
                     </AreaChart>
                   </ResponsiveContainer>
                 </div>
-              </div>
+              </>
             )}
           </div>
         </div>
@@ -409,28 +435,32 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
   );
 }
 
-function Metric({
+function SummaryMetric({
   label,
   value,
   accent = "gray",
+  className = "",
 }: {
   label: string;
   value: string;
   accent?: "gray" | "teal";
+  className?: string;
 }) {
-  const accentClasses =
+  const glowClasses =
     accent === "teal"
-      ? "border-teal-100/75 bg-[linear-gradient(180deg,rgba(204,251,241,0.72),rgba(255,255,255,0.28))] text-slate-950"
-      : "border-white/75 bg-[linear-gradient(180deg,rgba(255,255,255,0.7),rgba(255,255,255,0.24))] text-slate-950";
+      ? "bg-[radial-gradient(circle_at_18%_28%,rgba(255,255,255,0.14),transparent_42%),radial-gradient(circle_at_78%_82%,rgba(110,231,183,0.1),transparent_36%)]"
+      : "bg-[radial-gradient(circle_at_18%_28%,rgba(255,255,255,0.12),transparent_42%),radial-gradient(circle_at_78%_82%,rgba(191,219,254,0.08),transparent_36%)]";
 
   return (
-    <div className={`relative flex min-h-[104px] flex-col justify-between overflow-hidden rounded-[22px] border px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.84)] backdrop-blur-md ${accentClasses}`}>
-      <div className={`absolute inset-x-4 top-0 h-px ${accent === "teal" ? "bg-teal-100/80" : "bg-white/90"}`} />
-      <div className={`text-sm font-medium ${accent === "teal" ? "text-teal-800/80" : "text-slate-500"}`}>
-        {label}
-      </div>
-      <div className="mt-3 text-2xl font-semibold tracking-tight tabular-nums">
-        {value}
+    <div className={`relative flex min-h-[80px] flex-col justify-between overflow-hidden ${className}`}>
+      <div className={`pointer-events-none absolute inset-0 ${glowClasses}`} />
+      <div className="relative flex min-h-[80px] flex-col justify-between px-1 py-0.5">
+        <div className={`text-sm font-medium ${accent === "teal" ? "text-teal-800/80" : "text-slate-500"}`}>
+          {label}
+        </div>
+        <div className="mt-2 text-[1.75rem] font-semibold tracking-tight tabular-nums text-slate-950">
+          {value}
+        </div>
       </div>
     </div>
   );
