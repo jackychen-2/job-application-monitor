@@ -634,7 +634,7 @@ export default function SankeyFlow({
             data={sankeyData}
             node={NodeShape}
             link={LinkShape}
-            nodePadding={14}
+            nodePadding={26}
             nodeWidth={8}
             linkCurvature={0.52}
             iterations={64}
