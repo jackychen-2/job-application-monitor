@@ -157,10 +157,6 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
     selectedRange === "24h"
       ? hourlyData.reduce((total, entry) => total + entry.count, 0)
       : sumRange(rangeStart, today, countMap);
-  const daySpan =
-    selectedRange === "24h"
-      ? 1
-      : Math.max(differenceInCalendarDays(today, rangeStart) + 1, 1);
   const chartData = useMemo(() => {
     if (selectedRange === "24h") {
       return buildHourlyChartData(hourlyData);
