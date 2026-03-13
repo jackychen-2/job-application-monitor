@@ -285,25 +285,37 @@ function LinkShape(props: SankeyLinkRenderProps) {
   }
 
   const visualWidth = Math.max(8, Math.min(24, payload?.visualWidth ?? linkWidth));
-  const targetName = payload?.target?.name ?? "";
-  const isConverging = CONVERGING_NODES.has(targetName);
 
-  if (isConverging) {
-    // All links converge to the vertical center of the target node.
-    // recharts injects y/dy (layout space) onto node objects; link props are in SVG space
-    // (layout + margin.top), so we add SANKEY_MARGIN_TOP to align coordinate spaces.
-    const targetNode = payload?.target;
-    const convergenceY =
-      targetNode?.y !== undefined && targetNode?.dy !== undefined
-        ? targetNode.y + targetNode.dy / 2 + SANKEY_MARGIN_TOP
-        : targetY;
+  // Compute effective source/target Y: converging nodes funnel all links through their center.
+  function nodeCenterY(node: SankeyNodeDatum | undefined, fallback: number): number {
+    return node?.y !== undefined && node?.dy !== undefined
+      ? node.y + node.dy / 2 + SANKEY_MARGIN_TOP
+      : fallback;
+  }
+
+  const sourceNode = payload?.source;
+  const targetNode = payload?.target;
+  const sourceName = sourceNode?.name ?? "";
+  const targetName = targetNode?.name ?? "";
+  const sourceConverging = CONVERGING_NODES.has(sourceName);
+  const targetConverging = CONVERGING_NODES.has(targetName);
+
+  const effSourceY = sourceConverging ? nodeCenterY(sourceNode, sourceY) : sourceY;
+  const effTargetY = targetConverging ? nodeCenterY(targetNode, targetY) : targetY;
+
+  if (sourceConverging || targetConverging) {
     const hw = visualWidth / 2;
     const tipHw = 5;
+    // Taper toward whichever end is a converging node (blunt on converging side, full width on free side).
+    const topSrc = effSourceY - (sourceConverging ? tipHw : hw);
+    const botSrc = effSourceY + (sourceConverging ? tipHw : hw);
+    const topTgt = effTargetY - (targetConverging ? tipHw : hw);
+    const botTgt = effTargetY + (targetConverging ? tipHw : hw);
     const d = [
-      `M ${sourceX},${sourceY - hw}`,
-      `C ${sourceControlX},${sourceY - hw} ${targetControlX},${convergenceY - tipHw} ${targetX},${convergenceY - tipHw}`,
-      `L ${targetX},${convergenceY + tipHw}`,
-      `C ${targetControlX},${convergenceY + tipHw} ${sourceControlX},${sourceY + hw} ${sourceX},${sourceY + hw}`,
+      `M ${sourceX},${topSrc}`,
+      `C ${sourceControlX},${topSrc} ${targetControlX},${topTgt} ${targetX},${topTgt}`,
+      `L ${targetX},${botTgt}`,
+      `C ${targetControlX},${botTgt} ${sourceControlX},${botSrc} ${sourceX},${botSrc}`,
       "Z",
     ].join(" ");
     return <path d={d} fill={stroke} fillOpacity={0.62} stroke="none" />;
