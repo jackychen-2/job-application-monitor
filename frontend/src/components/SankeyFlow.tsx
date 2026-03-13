@@ -41,7 +41,7 @@ type SankeyNodeDatum = {
   rawCount?: number;
   depth?: number;
   value?: number;
-  // Layout properties injected by recharts Sankey engine:
+  // Set by recharts Sankey layout engine (layout space, before margin offset):
   y?: number;
   dy?: number;
 };
@@ -254,6 +254,9 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
 
 const TERMINAL_NODES = new Set(["拒绝", "Offer", "Onboarding", "Unknown"]);
 
+// Must stay in sync with the `margin` prop passed to <Sankey> below.
+const SANKEY_MARGIN_TOP = 20;
+
 function LinkShape(props: SankeyLinkRenderProps) {
   const {
     sourceX,
@@ -280,18 +283,20 @@ function LinkShape(props: SankeyLinkRenderProps) {
   }
 
   const visualWidth = Math.max(8, Math.min(24, payload?.visualWidth ?? linkWidth));
-  const isTerminal = TERMINAL_NODES.has(payload?.target?.name ?? "");
+  const targetName = payload?.target?.name ?? "";
+  const isTerminal = TERMINAL_NODES.has(targetName);
 
   if (isTerminal) {
     // All links converge to the vertical center of the target node.
-    // recharts injects y/dy layout props onto node objects, so we can read the true center.
+    // recharts injects y/dy (layout space) onto node objects; link props are in SVG space
+    // (layout + margin.top), so we add SANKEY_MARGIN_TOP to align coordinate spaces.
     const targetNode = payload?.target;
     const convergenceY =
       targetNode?.y !== undefined && targetNode?.dy !== undefined
-        ? targetNode.y + targetNode.dy / 2
+        ? targetNode.y + targetNode.dy / 2 + SANKEY_MARGIN_TOP
         : targetY;
     const hw = visualWidth / 2;
-    const tipHw = 4;
+    const tipHw = 5;
     const d = [
       `M ${sourceX},${sourceY - hw}`,
       `C ${sourceControlX},${sourceY - hw} ${targetControlX},${convergenceY - tipHw} ${targetX},${convergenceY - tipHw}`,
@@ -326,6 +331,7 @@ function NodeShape(props: SankeyNodeRenderProps) {
   }
 
   const isRoot = payload.name === "Applications";
+  const isTerminal = TERMINAL_NODES.has(payload.name);
   const nodeColor = payload.color || "#94a3b8";
   const value = Math.round(payload.rawCount ?? payload.value ?? 0);
   const showLabelCard = !isRoot;
@@ -338,11 +344,44 @@ function NodeShape(props: SankeyNodeRenderProps) {
   const compactLabel = `${payload.name} ${value}`;
   const compactW = estimateTextWidth(compactLabel, labelFont);
   const cardW = Math.ceil(Math.max(labelWidth, valueWidth, compactW) + 22);
-  const cardH = compact ? 19 : 31;
+  const cardH = 31;
   const depth = payload.depth || 0;
   const placeOnLeft = depth >= 3;
-  const cardX = placeOnLeft ? x - cardW - 8 : x + width + 8;
+
+  // Terminal nodes render as a small circle at their center instead of a tall bar.
+  if (isTerminal) {
+    const cx = x + width / 2;
+    const cy = y + height / 2;
+    const r = 7;
+    const cardX = cx + r + 8;
+    const cardY = cy - cardH / 2;
+    return (
+      <g>
+        <circle cx={cx} cy={cy} r={r} fill={nodeColor} />
+        <rect
+          x={cardX}
+          y={cardY}
+          width={cardW}
+          height={cardH}
+          rx={4}
+          fill="#ffffff"
+          stroke="#e5e7eb"
+          strokeWidth={0.8}
+          opacity={0.97}
+        />
+        <rect x={cardX + 6} y={cardY + 8} width={4} height={4} rx={1} fill={nodeColor} />
+        <text x={cardX + 13} y={cardY + 11} textAnchor="start" fontSize={labelFont} fontWeight={550} fill="#111827">
+          {payload.name}
+        </text>
+        <text x={cardX + 13} y={cardY + 24} textAnchor="start" fontSize={valueFont} fontWeight={500} fill="#334155">
+          {value}
+        </text>
+      </g>
+    );
+  }
+
   const cardY = y + height / 2 - cardH / 2;
+  const cardX = placeOnLeft ? x - cardW - 8 : x + width + 8;
 
   return (
     <g>
