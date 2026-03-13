@@ -41,6 +41,9 @@ type SankeyNodeDatum = {
   rawCount?: number;
   depth?: number;
   value?: number;
+  // Set by recharts Sankey layout engine (layout space, before margin offset):
+  y?: number;
+  dy?: number;
 };
 
 type SankeyLinkDatum = {
@@ -251,6 +254,9 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
 
 const TERMINAL_NODES = new Set(["拒绝", "Offer", "Onboarding", "Unknown"]);
 
+// Must stay in sync with the `margin` prop passed to <Sankey> below.
+const SANKEY_MARGIN_TOP = 20;
+
 function LinkShape(props: SankeyLinkRenderProps) {
   const {
     sourceX,
@@ -277,15 +283,25 @@ function LinkShape(props: SankeyLinkRenderProps) {
   }
 
   const visualWidth = Math.max(8, Math.min(24, payload?.visualWidth ?? linkWidth));
-  const isTerminal = TERMINAL_NODES.has(payload?.target?.name ?? "");
+  const targetName = payload?.target?.name ?? "";
+  const isTerminal = TERMINAL_NODES.has(targetName);
 
   if (isTerminal) {
-    // Tapered filled path: full width at source, converges to a single point at target
+    // All links converge to the vertical center of the target node.
+    // recharts injects y/dy (layout space) onto node objects; link props are in SVG space
+    // (layout + margin.top), so we add SANKEY_MARGIN_TOP to align coordinate spaces.
+    const targetNode = payload?.target;
+    const convergenceY =
+      targetNode?.y !== undefined && targetNode?.dy !== undefined
+        ? targetNode.y + targetNode.dy / 2 + SANKEY_MARGIN_TOP
+        : targetY;
     const hw = visualWidth / 2;
+    const tipHw = 5;
     const d = [
       `M ${sourceX},${sourceY - hw}`,
-      `C ${sourceControlX},${sourceY - hw} ${targetControlX},${targetY} ${targetX},${targetY}`,
-      `C ${targetControlX},${targetY} ${sourceControlX},${sourceY + hw} ${sourceX},${sourceY + hw}`,
+      `C ${sourceControlX},${sourceY - hw} ${targetControlX},${convergenceY - tipHw} ${targetX},${convergenceY - tipHw}`,
+      `L ${targetX},${convergenceY + tipHw}`,
+      `C ${targetControlX},${convergenceY + tipHw} ${sourceControlX},${sourceY + hw} ${sourceX},${sourceY + hw}`,
       "Z",
     ].join(" ");
     return <path d={d} fill={stroke} fillOpacity={0.62} stroke="none" />;
@@ -490,7 +506,7 @@ export default function SankeyFlow({
             linkCurvature={0.52}
             iterations={64}
             sort={true}
-            margin={{ top: 20, right: 84, bottom: 20, left: 72 }}
+            margin={{ top: 20, right: 84, bottom: 20, left: 108 }}
           >
             <Tooltip cursor={false} content={<SankeyTooltipContent />} />
           </Sankey>
