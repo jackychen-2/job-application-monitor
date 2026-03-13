@@ -41,6 +41,9 @@ type SankeyNodeDatum = {
   rawCount?: number;
   depth?: number;
   value?: number;
+  // Layout properties injected by recharts Sankey engine:
+  y?: number;
+  dy?: number;
 };
 
 type SankeyLinkDatum = {
@@ -280,14 +283,20 @@ function LinkShape(props: SankeyLinkRenderProps) {
   const isTerminal = TERMINAL_NODES.has(payload?.target?.name ?? "");
 
   if (isTerminal) {
-    // Tapered filled path: full width at source, blunt tip at target
+    // All links converge to the vertical center of the target node.
+    // recharts injects y/dy layout props onto node objects, so we can read the true center.
+    const targetNode = payload?.target;
+    const convergenceY =
+      targetNode?.y !== undefined && targetNode?.dy !== undefined
+        ? targetNode.y + targetNode.dy / 2
+        : targetY;
     const hw = visualWidth / 2;
     const tipHw = 4;
     const d = [
       `M ${sourceX},${sourceY - hw}`,
-      `C ${sourceControlX},${sourceY - hw} ${targetControlX},${targetY - tipHw} ${targetX},${targetY - tipHw}`,
-      `L ${targetX},${targetY + tipHw}`,
-      `C ${targetControlX},${targetY + tipHw} ${sourceControlX},${sourceY + hw} ${sourceX},${sourceY + hw}`,
+      `C ${sourceControlX},${sourceY - hw} ${targetControlX},${convergenceY - tipHw} ${targetX},${convergenceY - tipHw}`,
+      `L ${targetX},${convergenceY + tipHw}`,
+      `C ${targetControlX},${convergenceY + tipHw} ${sourceControlX},${sourceY + hw} ${sourceX},${sourceY + hw}`,
       "Z",
     ].join(" ");
     return <path d={d} fill={stroke} fillOpacity={0.62} stroke="none" />;
