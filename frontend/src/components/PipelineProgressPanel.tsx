@@ -161,8 +161,6 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
     selectedRange === "24h"
       ? 1
       : Math.max(differenceInCalendarDays(today, rangeStart) + 1, 1);
-  const weeklyPace = recentApplications / daySpan * 7;
-
   const chartData = useMemo(() => {
     if (selectedRange === "24h") {
       return buildHourlyChartData(hourlyData);
@@ -222,16 +220,9 @@ export default function PipelineProgressPanel({ stats, loading }: Props) {
               {rangeLabel} applications
             </div>
           </div>
-          <div className="hidden rounded-2xl bg-teal-50 px-3 py-2 text-right sm:block">
-            <div className="text-[11px] font-medium uppercase tracking-wide text-teal-700">Pace</div>
-            <div className="mt-1 text-xl font-semibold text-teal-900">
-              {loading ? "—" : `${weeklyPace.toFixed(1)}/wk`}
-            </div>
-          </div>
         </div>
 
-        <div className="mt-3 grid grid-cols-3 gap-3">
-          <Metric label="Pace" value={loading ? "—" : `${weeklyPace.toFixed(1)}/wk`} accent="teal" mobileOnly />
+        <div className="mt-3 grid grid-cols-2 gap-3">
           <Metric label="Active" value={loading ? "—" : `${activeCount}`} />
           <Metric label="Total" value={loading ? "—" : `${totalApplications}`} />
         </div>
