@@ -437,13 +437,11 @@ function LiquidGlassCard({
 }: LiquidGlassCardProps) {
   return (
     <div
-      className={`relative overflow-hidden rounded-[24px] border border-white/42 bg-[linear-gradient(180deg,rgba(255,255,255,0.16),rgba(255,255,255,0.05)_42%,rgba(224,242,254,0.1)_100%)] shadow-[0_30px_54px_-38px_rgba(15,23,42,0.3),0_18px_34px_-24px_rgba(14,165,233,0.2),inset_0_1px_0_rgba(255,255,255,0.72),inset_0_-18px_30px_rgba(59,130,246,0.08)] backdrop-blur-[30px] backdrop-saturate-[170%] ${className}`}
+      className={`relative overflow-hidden rounded-[24px] border border-white/34 bg-[linear-gradient(180deg,rgba(255,255,255,0.14),rgba(255,255,255,0.05)_46%,rgba(224,242,254,0.08)_100%)] shadow-[0_20px_36px_-28px_rgba(15,23,42,0.24),inset_0_1px_0_rgba(255,255,255,0.52)] backdrop-blur-[24px] ${className}`}
     >
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_16%_12%,rgba(255,255,255,0.78),transparent_32%),radial-gradient(circle_at_88%_82%,rgba(125,211,252,0.18),transparent_30%),linear-gradient(180deg,rgba(255,255,255,0.14),rgba(255,255,255,0.03)_48%,rgba(236,254,255,0.08)_100%)]" />
-      <div className="pointer-events-none absolute left-[8%] top-[-12%] h-20 w-[54%] rotate-[10deg] rounded-full bg-white/42 blur-xl" />
-      <div className="pointer-events-none absolute -bottom-6 right-[8%] h-24 w-28 rounded-full bg-sky-100/28 blur-[30px]" />
-      <div className="pointer-events-none absolute inset-[1px] rounded-[inherit] border border-white/18" />
-      <div className="pointer-events-none absolute inset-x-5 top-[1px] h-[16%] rounded-full bg-white/32 blur-[10px]" />
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_18%_12%,rgba(255,255,255,0.58),transparent_30%),radial-gradient(circle_at_84%_84%,rgba(125,211,252,0.16),transparent_30%)]" />
+      <div className="pointer-events-none absolute inset-x-5 top-0 h-px bg-white/70" />
+      <div className="pointer-events-none absolute left-[10%] top-[-8%] h-16 w-[46%] rotate-[8deg] rounded-full bg-white/24 blur-xl" />
       <div className={`relative ${contentClassName}`}>{children}</div>
     </div>
   );
