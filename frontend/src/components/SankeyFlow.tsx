@@ -138,8 +138,39 @@ function edgeLayoutWeight(from: string, to: string): number {
 }
 
 const TERMINAL_NODES = new Set(["拒绝", "Offer", "Onboarding", "Unknown"]);
-// Nodes whose incoming links all converge to center and are rendered as short bars.
-const CONVERGING_NODES = new Set([...TERMINAL_NODES, "OA", "已申请", "面试"]);
+// Height of the compact bar rect rendered visually.
+const COMPACT_BAR_H = 20;
+// Ribbon spread zone = bar height so ribbons align exactly with the bar.
+const RIBBON_SPREAD_H = COMPACT_BAR_H;
+// All visible nodes use compact bar rendering (ribbons stacked side-by-side).
+function isCompactNode(name: string): boolean {
+  return !isHiddenNodeName(name);
+}
+// Remaps a ribbon's endpoints proportionally into the spread zone.
+// Proportional mapping guarantees no overlap; minimum 5px enforces visibility.
+function remapLinkEnd(
+  centerY: number,
+  hw: number,
+  node: SankeyNodeDatum,
+): [number, number] {
+  const nodeTopY = (node.y ?? 0) + SANKEY_MARGIN_TOP;
+  const nodeH = node.dy ?? 1;
+  const cy = nodeTopY + nodeH / 2;
+  const remap = (y: number) =>
+    cy - RIBBON_SPREAD_H / 2 + Math.min(1, Math.max(0, (y - nodeTopY) / nodeH)) * RIBBON_SPREAD_H;
+  const top = remap(centerY - hw);
+  const bot = remap(centerY + hw);
+  const mid = (top + bot) / 2;
+  // Apply minimum thickness of 5px
+  let t = Math.min(top, mid - 5);
+  let b = Math.max(bot, mid + 5);
+  // Clamp within bar bounds so ribbons never overflow the bar
+  const barTop = cy - RIBBON_SPREAD_H / 2;
+  const barBot = cy + RIBBON_SPREAD_H / 2;
+  if (t < barTop) { b += barTop - t; t = barTop; }
+  if (b > barBot) { t -= b - barBot; b = barBot; }
+  return [t, b];
+}
 
 function buildSankeyData(flowData: FlowData): SankeyData | null {
   const edgeCounts = new Map<string, number>();
@@ -264,7 +295,7 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
       continue;
     }
     const norm = (raw - minValue) / span;
-    link.visualWidth = 8 + Math.pow(norm, 0.82) * 16; // 8..24, auto-adjusted per chart
+    link.visualWidth = 10 + Math.pow(norm, 0.7) * 10; // 10..20 input to remapLinkEnd
   }
 
   return { nodes, links };
@@ -298,33 +329,34 @@ function LinkShape(props: SankeyLinkRenderProps) {
     return <path d="" fill="none" stroke="none" />;
   }
 
-  const visualWidth = Math.max(8, Math.min(24, payload?.visualWidth ?? linkWidth));
-
-  // Compute effective source/target Y: converging nodes funnel all links through their center.
-  function nodeCenterY(node: SankeyNodeDatum | undefined, fallback: number): number {
-    return node?.y !== undefined && node?.dy !== undefined
-      ? node.y + node.dy / 2 + SANKEY_MARGIN_TOP
-      : fallback;
-  }
+  const visualWidth = Math.max(6, Math.min(24, payload?.visualWidth ?? linkWidth));
 
   const sourceNode = payload?.source;
   const targetNode = payload?.target;
   const sourceName = sourceNode?.name ?? "";
   const targetName = targetNode?.name ?? "";
-  const sourceConverging = CONVERGING_NODES.has(sourceName);
-  const targetConverging = CONVERGING_NODES.has(targetName);
+  const sourceIsCompact = isCompactNode(sourceName);
+  const targetIsCompact = isCompactNode(targetName);
 
-  const effSourceY = sourceConverging ? nodeCenterY(sourceNode, sourceY) : sourceY;
-  const effTargetY = targetConverging ? nodeCenterY(targetNode, targetY) : targetY;
-
-  if (sourceConverging || targetConverging) {
+  if (sourceIsCompact || targetIsCompact) {
     const hw = visualWidth / 2;
-    const tipHw = 5;
-    // Taper toward whichever end is a converging node (blunt on converging side, full width on free side).
-    const topSrc = effSourceY - (sourceConverging ? tipHw : hw);
-    const botSrc = effSourceY + (sourceConverging ? tipHw : hw);
-    const topTgt = effTargetY - (targetConverging ? tipHw : hw);
-    const botTgt = effTargetY + (targetConverging ? tipHw : hw);
+
+    let topSrc: number, botSrc: number;
+    if (sourceIsCompact && sourceNode && (sourceNode.dy ?? 0) > 0) {
+      [topSrc, botSrc] = remapLinkEnd(sourceY, hw, sourceNode);
+    } else {
+      topSrc = sourceY - hw;
+      botSrc = sourceY + hw;
+    }
+
+    let topTgt: number, botTgt: number;
+    if (targetIsCompact && targetNode && (targetNode.dy ?? 0) > 0) {
+      [topTgt, botTgt] = remapLinkEnd(targetY, hw, targetNode);
+    } else {
+      topTgt = targetY - hw;
+      botTgt = targetY + hw;
+    }
+
     const d = [
       `M ${sourceX},${topSrc}`,
       `C ${sourceControlX},${topSrc} ${targetControlX},${topTgt} ${targetX},${topTgt}`,
@@ -359,7 +391,6 @@ function NodeShape(props: SankeyNodeRenderProps) {
   }
 
   const isRoot = payload.name === "Applications";
-  const isConverging = CONVERGING_NODES.has(payload.name);
   const nodeColor = payload.color || "#94a3b8";
   const value = Math.round(payload.rawCount ?? payload.value ?? 0);
   const showLabelCard = !isRoot;
@@ -376,10 +407,31 @@ function NodeShape(props: SankeyNodeRenderProps) {
   const depth = payload.depth || 0;
   const placeOnLeft = depth >= 3;
 
-  // Converging nodes render as a short bar at their center instead of a full-height bar.
-  if (isConverging) {
-    const barH = 20;
+  // All visible nodes render as a short compact bar at their center.
+  if (isCompactNode(payload.name)) {
+    const barH = COMPACT_BAR_H;
     const cy = y + height / 2;
+
+    // Root node: compact bar + left-side text label, no card.
+    if (isRoot) {
+      return (
+        <g>
+          <rect x={x} y={cy - barH / 2} width={width} height={barH} fill={nodeColor} rx={2} />
+          <text
+            x={x - 10}
+            y={cy}
+            textAnchor="end"
+            dominantBaseline="central"
+            fontSize={13}
+            fontWeight={650}
+            fill="#4b5563"
+          >
+            Applications
+          </text>
+        </g>
+      );
+    }
+
     const cardX = x + width + 8;
     const cardY = cy - cardH / 2;
     return (
@@ -556,8 +608,8 @@ export default function SankeyFlow({
 
   return (
     <Shell title={title}>
-      <div className="min-h-0 w-full flex-1 rounded-xl bg-slate-50/70" style={{ height }}>
-        <ResponsiveContainer width="100%" height="100%">
+      <div className="min-h-0 w-full rounded-xl bg-slate-50/70">
+        <ResponsiveContainer width="100%" height={height}>
           <Sankey
             data={sankeyData}
             node={NodeShape}

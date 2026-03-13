@@ -4,6 +4,7 @@ import Dashboard from "./pages/Dashboard";
 import ApplicationDetail from "./pages/ApplicationDetail";
 import AccountPage from "./pages/AccountPage";
 import ProgressPreview from "./pages/ProgressPreview";
+import FlowPreview from "./pages/FlowPreview";
 import { useAuth } from "./auth/AuthContext";
 import AuthModal from "./components/AuthModal";
 
@@ -22,6 +23,7 @@ export default function App() {
     return (
       <Routes>
         <Route path="/preview/progress" element={<ProgressPreview />} />
+        <Route path="/preview/flow" element={<FlowPreview />} />
         <Route path="*" element={<AuthModal />} />
       </Routes>
     );
