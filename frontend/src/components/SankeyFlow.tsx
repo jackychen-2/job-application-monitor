@@ -53,6 +53,9 @@ type SankeyLinkDatum = {
   rawValue?: number;
   visualWidth?: number;
   isHidden?: boolean;
+  // Fraction [0..1] of the compact bar this ribbon occupies at its source/target end.
+  sourceBandFrac?: [number, number];
+  targetBandFrac?: [number, number];
 };
 
 type SankeyData = {
@@ -84,6 +87,8 @@ type SankeyLinkRenderProps = {
     isHidden?: boolean;
     source?: SankeyNodeDatum;
     target?: SankeyNodeDatum;
+    sourceBandFrac?: [number, number];
+    targetBandFrac?: [number, number];
   };
 };
 
@@ -140,36 +145,16 @@ function edgeLayoutWeight(from: string, to: string): number {
 const TERMINAL_NODES = new Set(["拒绝", "Offer", "Onboarding", "Unknown"]);
 // Height of the compact bar rect rendered visually.
 const COMPACT_BAR_H = 20;
-// Ribbon spread zone = bar height so ribbons align exactly with the bar.
-const RIBBON_SPREAD_H = COMPACT_BAR_H;
 // All visible nodes use compact bar rendering (ribbons stacked side-by-side).
 function isCompactNode(name: string): boolean {
   return !isHiddenNodeName(name);
 }
-// Remaps a ribbon's endpoints proportionally into the spread zone.
-// Proportional mapping guarantees no overlap; minimum 5px enforces visibility.
-function remapLinkEnd(
-  centerY: number,
-  hw: number,
-  node: SankeyNodeDatum,
-): [number, number] {
-  const nodeTopY = (node.y ?? 0) + SANKEY_MARGIN_TOP;
-  const nodeH = node.dy ?? 1;
-  const cy = nodeTopY + nodeH / 2;
-  const remap = (y: number) =>
-    cy - RIBBON_SPREAD_H / 2 + Math.min(1, Math.max(0, (y - nodeTopY) / nodeH)) * RIBBON_SPREAD_H;
-  const top = remap(centerY - hw);
-  const bot = remap(centerY + hw);
-  const mid = (top + bot) / 2;
-  // Minimum 1px half-width keeps tiny flows visible without causing overlap
-  let t = Math.min(top, mid - 1);
-  let b = Math.max(bot, mid + 1);
-  // Clamp within bar bounds so ribbons never overflow the bar
-  const barTop = cy - RIBBON_SPREAD_H / 2;
-  const barBot = cy + RIBBON_SPREAD_H / 2;
-  if (t < barTop) { b += barTop - t; t = barTop; }
-  if (b > barBot) { t -= b - barBot; b = barBot; }
-  return [t, b];
+// Maps a precomputed [0..1] band fraction to pixel y coordinates within the compact bar.
+// node.y is in recharts layout space (no margin); SANKEY_MARGIN_TOP converts to screen space.
+function bandFracToY(frac: [number, number], nodeY: number, nodeDy: number): [number, number] {
+  const cy = nodeY + SANKEY_MARGIN_TOP + nodeDy / 2;
+  const barTop = cy - COMPACT_BAR_H / 2;
+  return [barTop + frac[0] * COMPACT_BAR_H, barTop + frac[1] * COMPACT_BAR_H];
 }
 
 function buildSankeyData(flowData: FlowData): SankeyData | null {
@@ -295,7 +280,40 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
       continue;
     }
     const norm = (raw - minValue) / span;
-    link.visualWidth = 10 + Math.pow(norm, 0.7) * 10; // 10..20 input to remapLinkEnd
+    link.visualWidth = 10 + Math.pow(norm, 0.7) * 10;
+  }
+
+  // Assign each ribbon a distinct, non-overlapping band fraction within its node's compact bar.
+  // Ribbons are sorted by the opposing node's stage rank so ordering is visually consistent.
+  const nodeOutLinks = new Map<number, number[]>();
+  const nodeInLinks = new Map<number, number[]>();
+  for (let i = 0; i < links.length; i++) {
+    if (links[i].isHidden) continue;
+    const src = links[i].source;
+    const tgt = links[i].target;
+    if (!nodeOutLinks.has(src)) nodeOutLinks.set(src, []);
+    if (!nodeInLinks.has(tgt)) nodeInLinks.set(tgt, []);
+    nodeOutLinks.get(src)!.push(i);
+    nodeInLinks.get(tgt)!.push(i);
+  }
+
+  function assignBands(linkIndices: number[], rankOf: (li: number) => number, isSrc: boolean) {
+    linkIndices.sort((a, b) => rankOf(a) - rankOf(b));
+    const total = linkIndices.reduce((s, li) => s + (links[li].visualWidth ?? 1), 0);
+    let cum = 0;
+    for (const li of linkIndices) {
+      const frac = (links[li].visualWidth ?? 1) / total;
+      if (isSrc) links[li].sourceBandFrac = [cum, cum + frac];
+      else links[li].targetBandFrac = [cum, cum + frac];
+      cum += frac;
+    }
+  }
+
+  for (const [, idx] of nodeOutLinks) {
+    assignBands(idx, (li) => stageRank(nodes[links[li].target].name), true);
+  }
+  for (const [, idx] of nodeInLinks) {
+    assignBands(idx, (li) => stageRank(nodes[links[li].source].name), false);
   }
 
   return { nodes, links };
@@ -342,16 +360,18 @@ function LinkShape(props: SankeyLinkRenderProps) {
     const hw = visualWidth / 2;
 
     let topSrc: number, botSrc: number;
-    if (sourceIsCompact && sourceNode && (sourceNode.dy ?? 0) > 0) {
-      [topSrc, botSrc] = remapLinkEnd(sourceY, hw, sourceNode);
+    const sf = payload?.sourceBandFrac;
+    if (sourceIsCompact && sourceNode && sf) {
+      [topSrc, botSrc] = bandFracToY(sf, sourceNode.y ?? 0, sourceNode.dy ?? 1);
     } else {
       topSrc = sourceY - hw;
       botSrc = sourceY + hw;
     }
 
     let topTgt: number, botTgt: number;
-    if (targetIsCompact && targetNode && (targetNode.dy ?? 0) > 0) {
-      [topTgt, botTgt] = remapLinkEnd(targetY, hw, targetNode);
+    const tf = payload?.targetBandFrac;
+    if (targetIsCompact && targetNode && tf) {
+      [topTgt, botTgt] = bandFracToY(tf, targetNode.y ?? 0, targetNode.dy ?? 1);
     } else {
       topTgt = targetY - hw;
       botTgt = targetY + hw;
