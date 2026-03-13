@@ -175,13 +175,21 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
   if (edgeCounts.size === 0) return null;
   const filteredCounts = new Map<string, number>(edgeCounts);
 
-  const recruiterRootCount = filteredCounts.get("Applications→Recruiter Reach-out") || 0;
-  const recruiterHasOutgoing = Array.from(filteredCounts.keys()).some((k) => k.startsWith("Recruiter Reach-out→"));
-  if (recruiterRootCount > 0 && !recruiterHasOutgoing) {
-    filteredCounts.set(
-      `Recruiter Reach-out→${HIDDEN_SINK_PREFIX}Recruiter Reach-out`,
-      recruiterRootCount
+  // Intermediate stages that should NOT appear in the last column alongside terminal nodes.
+  // If they have incoming links but no real outgoing links, add a hidden sink so recharts
+  // places them in an earlier column (their natural pipeline depth).
+  const INTERMEDIATE_STAGES = ["Recruiter Reach-out", "已申请", "OA", "面试"];
+  for (const stage of INTERMEDIATE_STAGES) {
+    const hasIncoming = Array.from(filteredCounts.keys()).some((k) => k.endsWith(`→${stage}`));
+    const hasOutgoing = Array.from(filteredCounts.keys()).some(
+      (k) => k.startsWith(`${stage}→`) && !k.includes(HIDDEN_SINK_PREFIX)
     );
+    if (hasIncoming && !hasOutgoing) {
+      const totalIncoming = Array.from(filteredCounts.entries())
+        .filter(([k]) => k.endsWith(`→${stage}`))
+        .reduce((sum, [, v]) => sum + v, 0);
+      filteredCounts.set(`${stage}→${HIDDEN_SINK_PREFIX}${stage}`, totalIncoming);
+    }
   }
 
   const nodeNames = new Set<string>(["Applications"]);
