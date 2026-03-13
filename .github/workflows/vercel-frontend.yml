@@ -43,7 +43,12 @@ jobs:
           fi
 
       - name: Build
-        run: vercel build --token="${{ secrets.VERCEL_TOKEN }}"
+        run: |
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            vercel build --prod --token="${{ secrets.VERCEL_TOKEN }}"
+          else
+            vercel build --token="${{ secrets.VERCEL_TOKEN }}"
+          fi
 
       - name: Deploy frontend
         run: |
