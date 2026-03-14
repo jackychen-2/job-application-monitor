@@ -121,7 +121,7 @@ def _build_flow_data(
     total: int,
     status_counts: list[StatusCount],
 ) -> FlowData:
-    """Build Sankey flow data from the current status snapshot + status history."""
+    """Build Sankey flow data from current status counts and first/next status history."""
     from_status_expr = func.coalesce(StatusHistory.old_status, "Applications")
     transition_rows = (
         db.query(
@@ -132,10 +132,35 @@ def _build_flow_data(
         .group_by(from_status_expr, StatusHistory.new_status)
         .all()
     )
+    transition_counts: dict[tuple[str, str], int] = {}
+
+    for old, new, cnt in transition_rows:
+        if old == new:
+            continue
+        key = (old, new)
+        transition_counts[key] = transition_counts.get(key, 0) + int(cnt)
+
+    # Some legacy/manual rows may exist without an initial status_history record.
+    # Treat the current status as the entry edge so the Sankey still has a stable root.
+    apps_without_history_rows = (
+        db.query(
+            Application.status,
+            func.count(Application.id),
+        )
+        .outerjoin(StatusHistory, StatusHistory.application_id == Application.id)
+        .filter(StatusHistory.id == None)  # noqa: E711
+        .group_by(Application.status)
+        .all()
+    )
+    for status, cnt in apps_without_history_rows:
+        if not status or cnt <= 0:
+            continue
+        key = ("Applications", status)
+        transition_counts[key] = transition_counts.get(key, 0) + int(cnt)
+
     transitions = [
-        StatusTransition(from_status=old, to_status=new, count=int(cnt))
-        for old, new, cnt in transition_rows
-        if old != new
+        StatusTransition(from_status=old, to_status=new, count=count)
+        for (old, new), count in sorted(transition_counts.items())
     ]
 
     return FlowData(

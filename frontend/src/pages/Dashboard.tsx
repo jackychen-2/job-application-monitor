@@ -490,7 +490,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-[392px,minmax(0,1fr)] 2xl:grid-cols-[420px,minmax(0,1fr)] gap-6 items-start">
+      <div className="grid grid-cols-1 xl:grid-cols-[360px,minmax(0,1fr)] 2xl:grid-cols-[388px,minmax(0,1fr)] gap-6 items-start">
         <div className="relative isolate">
           <div className="pointer-events-none absolute inset-[-4%] overflow-hidden rounded-[40px]">
             <div className="absolute inset-0 bg-[linear-gradient(145deg,rgba(255,255,255,0.72),rgba(239,246,255,0.3)_34%,rgba(219,234,254,0.16)_100%)]" />

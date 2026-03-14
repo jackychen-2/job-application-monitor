@@ -22,6 +22,18 @@ const STAGE_ORDER: Record<string, number> = {
   Unknown: 6,
 };
 
+const DISPLAY_ORDER: Record<string, number> = {
+  Applications: -2,
+  "Recruiter Reach-out": -1,
+  已申请: 0,
+  OA: 1,
+  面试: 2,
+  拒绝: 3,
+  Offer: 4,
+  Onboarding: 5,
+  Unknown: 6,
+};
+
 const COLORS: Record<string, { node: string; link: string }> = {
   Applications: { node: "#d16ba5", link: "#f5c5e3" },
   "Recruiter Reach-out": { node: "#f97316", link: "#fed7aa" },
@@ -117,6 +129,10 @@ function stageRank(status: string): number {
   return STAGE_ORDER[status] ?? 99;
 }
 
+function displayRank(status: string): number {
+  return DISPLAY_ORDER[status] ?? stageRank(status);
+}
+
 function isForwardTransition(fromStatus: string, toStatus: string): boolean {
   if (fromStatus === "Applications") return true;
   const fromRank = stageRank(fromStatus);
@@ -142,9 +158,12 @@ function edgeLayoutWeight(from: string, to: string): number {
   return w;
 }
 
-const TERMINAL_NODES = new Set(["拒绝", "Offer", "Onboarding", "Unknown"]);
 // Height of the compact bar rect rendered visually.
 const COMPACT_BAR_H = 20;
+const SANKEY_NODE_WIDTH = 14;
+const SANKEY_NODE_PADDING = 30;
+const NODE_CARD_GAP = 10;
+const SANKEY_MARGIN = { top: 20, right: 64, bottom: 20, left: 72 };
 // All visible nodes use compact bar rendering (ribbons stacked side-by-side).
 function isCompactNode(name: string): boolean {
   return !isHiddenNodeName(name);
@@ -160,6 +179,7 @@ function bandFracToY(frac: [number, number], nodeY: number, nodeDy: number): [nu
 function buildSankeyData(flowData: FlowData): SankeyData | null {
   const edgeCounts = new Map<string, number>();
   const currentCountByStatus = new Map<string, number>();
+  const entryCountByStatus = new Map<string, number>();
   for (const sc of flowData.status_counts) {
     const normalized = normalizeStatus(sc.status);
     currentCountByStatus.set(normalized, (currentCountByStatus.get(normalized) || 0) + sc.count);
@@ -180,26 +200,41 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
     const from = normalizeStatus(transition.from_status);
     const to = normalizeStatus(transition.to_status);
     if (transition.count <= 0 || from === to) continue;
-    // Root stage should represent current snapshot distribution, not historical first status.
-    if (from === "Applications") continue;
+    if (from === "Applications") {
+      entryCountByStatus.set(to, (entryCountByStatus.get(to) || 0) + transition.count);
+      continue;
+    }
     addCanonicalEdge(from, to, transition.count);
   }
 
-  // Build root edges from current status snapshot.
-  // For terminal states: only add a direct edge if no transition path already leads there
-  // (avoids double-counting; falls back for statuses with no recorded transitions).
-  for (const sc of flowData.status_counts) {
-    const to = normalizeStatus(sc.status);
-    if (sc.count <= 0) continue;
-    if (TERMINAL_NODES.has(to)) {
-      const hasTransitionPath = Array.from(edgeCounts.keys()).some((k) => k.endsWith(`→${to}`));
-      if (hasTransitionPath) continue;
+  // Legacy fallback if the API ever returns counts but no explicit entry transitions.
+  if (entryCountByStatus.size === 0) {
+    for (const sc of flowData.status_counts) {
+      const to = normalizeStatus(sc.status);
+      if (sc.count <= 0) continue;
+      entryCountByStatus.set(to, (entryCountByStatus.get(to) || 0) + sc.count);
     }
-    addCanonicalEdge("Applications", to, sc.count);
   }
 
-  if (edgeCounts.size === 0) return null;
   const filteredCounts = new Map<string, number>(edgeCounts);
+
+  // Preserve first-stage volume without drawing a fake "Applications" status.
+  // Hidden sinks keep left-most real stages anchored even when some applications
+  // are still sitting in that first visible status.
+  const visibleOutgoingByStatus = new Map<string, number>();
+  for (const [key, count] of filteredCounts.entries()) {
+    const [from, to] = key.split("→");
+    if (!from || !to || isHiddenNodeName(from) || isHiddenNodeName(to)) continue;
+    visibleOutgoingByStatus.set(from, (visibleOutgoingByStatus.get(from) || 0) + count);
+  }
+  for (const [status, entryCount] of entryCountByStatus.entries()) {
+    const visibleOutgoing = visibleOutgoingByStatus.get(status) || 0;
+    const remainder = Math.max(0, entryCount - visibleOutgoing);
+    if (remainder <= 0) continue;
+    filteredCounts.set(`${status}→${HIDDEN_SINK_PREFIX}entry:${status}`, remainder);
+  }
+
+  if (filteredCounts.size === 0) return null;
 
   // Intermediate stages that should NOT appear in the last column alongside terminal nodes.
   // If they have incoming links but no real outgoing links, add a hidden sink so recharts
@@ -218,7 +253,7 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
     }
   }
 
-  const nodeNames = new Set<string>(["Applications"]);
+  const nodeNames = new Set<string>();
   for (const key of filteredCounts.keys()) {
     const [from, to] = key.split("→");
     if (from) nodeNames.add(from);
@@ -226,7 +261,7 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
   }
 
   const orderedNames = Array.from(nodeNames).sort((a, b) => {
-    const rankDiff = stageRank(a) - stageRank(b);
+    const rankDiff = displayRank(a) - displayRank(b);
     if (rankDiff !== 0) return rankDiff;
     return a.localeCompare(b);
   });
@@ -239,7 +274,7 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
       name,
       color: p.node,
       linkColor: p.link,
-      rawCount: name === "Applications" ? flowData.total : currentCountByStatus.get(name),
+      rawCount: currentCountByStatus.get(name),
     };
   });
 
@@ -310,10 +345,10 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
   }
 
   for (const [, idx] of nodeOutLinks) {
-    assignBands(idx, (li) => stageRank(nodes[links[li].target].name), true);
+    assignBands(idx, (li) => displayRank(nodes[links[li].target].name), true);
   }
   for (const [, idx] of nodeInLinks) {
-    assignBands(idx, (li) => stageRank(nodes[links[li].source].name), false);
+    assignBands(idx, (li) => displayRank(nodes[links[li].source].name), false);
   }
 
   return { nodes, links };
@@ -452,7 +487,7 @@ function NodeShape(props: SankeyNodeRenderProps) {
       );
     }
 
-    const cardX = x + width + 8;
+    const cardX = x + width + NODE_CARD_GAP;
     const cardY = cy - cardH / 2;
     return (
       <g>
@@ -480,7 +515,7 @@ function NodeShape(props: SankeyNodeRenderProps) {
   }
 
   const cardY = y + height / 2 - cardH / 2;
-  const cardX = placeOnLeft ? x - cardW - 8 : x + width + 8;
+  const cardX = placeOnLeft ? x - cardW - NODE_CARD_GAP : x + width + NODE_CARD_GAP;
 
   return (
     <g>
@@ -634,12 +669,12 @@ export default function SankeyFlow({
             data={sankeyData}
             node={NodeShape}
             link={LinkShape}
-            nodePadding={26}
-            nodeWidth={8}
+            nodePadding={SANKEY_NODE_PADDING}
+            nodeWidth={SANKEY_NODE_WIDTH}
             linkCurvature={0.52}
             iterations={64}
-            sort={true}
-            margin={{ top: 20, right: 84, bottom: 20, left: 108 }}
+            sort={false}
+            margin={SANKEY_MARGIN}
           >
             <Tooltip cursor={false} content={<SankeyTooltipContent />} />
           </Sankey>

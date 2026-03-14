@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from job_monitor.api.stats import get_dashboard_data, get_stats
-from job_monitor.models import Application, Base
+from job_monitor.models import Application, Base, StatusHistory
 
 
 def _new_session() -> Session:
@@ -88,6 +88,55 @@ def test_get_dashboard_data_reuses_status_snapshot_for_flow() -> None:
             ("已申请", 1),
             ("面试", 1),
         ]
+        assert sorted(
+            (item.from_status, item.to_status, item.count)
+            for item in dashboard.flow.transitions
+        ) == [
+            ("Applications", "已申请", 1),
+            ("Applications", "面试", 1),
+        ]
         assert dashboard.recent_applications == []
+    finally:
+        session.close()
+
+
+def test_flow_uses_first_status_not_current_status_for_root_edges() -> None:
+    session = _new_session()
+    try:
+        app = Application(
+            company="Anthropic",
+            normalized_company="anthropic",
+            status="已申请",
+            source="email",
+        )
+        session.add(app)
+        session.flush()
+        session.add_all(
+            [
+                StatusHistory(
+                    application_id=app.id,
+                    old_status=None,
+                    new_status="Recruiter Reach-out",
+                    change_source="email",
+                ),
+                StatusHistory(
+                    application_id=app.id,
+                    old_status="Recruiter Reach-out",
+                    new_status="已申请",
+                    change_source="email",
+                ),
+            ]
+        )
+        session.commit()
+
+        dashboard = get_dashboard_data(db=session)
+
+        assert sorted(
+            (item.from_status, item.to_status, item.count)
+            for item in dashboard.flow.transitions
+        ) == [
+            ("Applications", "Recruiter Reach-out", 1),
+            ("Recruiter Reach-out", "已申请", 1),
+        ]
     finally:
         session.close()

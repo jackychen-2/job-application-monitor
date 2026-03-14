@@ -32,6 +32,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/preview/progress" element={<ProgressPreview />} />
+      <Route path="/preview/flow" element={<FlowPreview />} />
       <Route element={<Layout />}>
         <Route path="/" element={<Dashboard />} />
         <Route path="/account" element={<AccountPage />} />

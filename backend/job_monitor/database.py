@@ -874,6 +874,11 @@ def _cleanup_on_startup() -> None:
                 email_dates_updated += 1
 
         # Step 4: Re-evaluate company-linked emails with new linking rules.
+        from job_monitor.extraction.pipeline import (
+            _cleanup_orphaned_app,
+            _refresh_application_from_linked_data,
+            _reconcile_email_derived_status_history,
+        )
         from job_monitor.extraction.rules import extract_status
         from job_monitor.linking.resolver import resolve_by_company
 
@@ -910,13 +915,28 @@ def _cleanup_on_startup() -> None:
 
             if not result.is_linked or result.application_id != app.id:
                 if result.is_linked and result.application_id is not None:
+                    old_app_id = app.id
+                    _reconcile_email_derived_status_history(
+                        session,
+                        previous_email=pe,
+                        current_uid=pe.uid,
+                        target_app_id=result.application_id,
+                    )
                     pe.application_id = result.application_id
                     pe.link_method = "company_relinked"
+                    _cleanup_orphaned_app(
+                        session,
+                        owner_user_id=pe.owner_user_id or 0,
+                        app_id=old_app_id,
+                        exclude_uid=pe.uid,
+                    )
+                    _refresh_application_from_linked_data(session, result.application_id)
+                    _refresh_application_from_linked_data(session, old_app_id)
                     relinked_count += 1
                     logger.info(
                         "startup_relinked_email",
                         email_uid=pe.uid,
-                        old_app_id=app.id,
+                        old_app_id=old_app_id,
                         new_app_id=result.application_id,
                         company=app.company,
                         journey_id=pe.journey_id,

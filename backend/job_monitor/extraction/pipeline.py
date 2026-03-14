@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Optional, TypedDict
 
 import structlog
@@ -22,7 +22,7 @@ ProgressCallback = Callable[[ProgressInfo], None]
 
 from sqlalchemy.orm import Session
 
-from job_monitor.application_dates import assign_applied_at_if_missing
+from job_monitor.application_dates import assign_applied_at_if_missing, refresh_applied_at
 from job_monitor.config import AppConfig
 from job_monitor.dedupe import merge_owner_duplicate_applications
 from job_monitor.email.gmail_client import (
@@ -213,6 +213,7 @@ def _get_or_create_application(
     email_date: Optional[datetime],
     status: str,
     source: str = "email",
+    status_change_source: str = "email_scan",
 ) -> tuple[Application, bool, bool]:
     """Find an existing application or create a new one.
 
@@ -260,7 +261,7 @@ def _get_or_create_application(
             existing.email_sender = email_sender
             changed_existing = True
         if changed_existing:
-            existing.updated_at = datetime.utcnow()
+            existing.updated_at = datetime.now(timezone.utc)
         logger.info("application_merged", app_id=existing.id, company=company, job_title=job_title, req_id=req_id)
         return existing, False, changed_existing
 
@@ -286,7 +287,8 @@ def _get_or_create_application(
             application_id=app.id,
             old_status=None,
             new_status=status,
-            change_source=f"email_scan",
+            change_source=status_change_source,
+            changed_at=email_date or datetime.now(timezone.utc),
         )
     )
     return app, True, False
@@ -334,10 +336,128 @@ def _update_status_if_changed(
             old_status=old,
             new_status=new_status,
             change_source=change_source,
+            changed_at=email_date or datetime.now(timezone.utc),
         )
     )
     logger.info("status_updated", app_id=app.id, old=old, new=new_status)
     return True
+
+
+def _find_existing_processed_email(
+    session: Session,
+    owner_user_id: int,
+    uid: int,
+    account: str,
+    folder: str,
+    gmail_message_id: str | None = None,
+) -> ProcessedEmail | None:
+    """Return the existing processed row for this email, preferring Gmail message ID."""
+    existing = None
+    if gmail_message_id:
+        existing = (
+            session.query(ProcessedEmail)
+            .filter(
+                ProcessedEmail.owner_user_id == owner_user_id,
+                ProcessedEmail.gmail_message_id == gmail_message_id,
+            )
+            .first()
+        )
+    if existing is not None:
+        return existing
+    return (
+        session.query(ProcessedEmail)
+        .filter(
+            ProcessedEmail.owner_user_id == owner_user_id,
+            ProcessedEmail.uid == uid,
+            ProcessedEmail.email_account == account,
+            ProcessedEmail.email_folder == folder,
+        )
+        .first()
+    )
+
+
+def _status_change_source_for_email(existing_email: ProcessedEmail | None, uid: int) -> str:
+    """Return a stable status-history source key for one email across rescans."""
+    source_uid = existing_email.uid if existing_email is not None else uid
+    return f"email_uid_{source_uid}"
+
+
+def _reconcile_email_derived_status_history(
+    session: Session,
+    *,
+    previous_email: ProcessedEmail | None,
+    current_uid: int,
+    target_app_id: int | None,
+) -> None:
+    """Move or delete status-history rows previously attributed to this email.
+
+    This keeps the audit trail aligned when a rescan reclassifies an email as
+    non-job-related or re-links it to a different application.
+    """
+    if previous_email is None or previous_email.application_id is None:
+        return
+
+    source_keys = {f"email_uid_{previous_email.uid}", f"email_uid_{current_uid}"}
+    rows = (
+        session.query(StatusHistory)
+        .filter(
+            StatusHistory.application_id == previous_email.application_id,
+            StatusHistory.change_source.in_(tuple(source_keys)),
+        )
+        .all()
+    )
+    if not rows:
+        return
+
+    if target_app_id is None:
+        for row in rows:
+            session.delete(row)
+        return
+
+    if target_app_id == previous_email.application_id:
+        return
+
+    for row in rows:
+        row.application_id = target_app_id
+
+
+def _refresh_application_from_linked_data(session: Session, app_id: int | None) -> None:
+    """Refresh summary/status fields after email relink or reclassification."""
+    if app_id is None:
+        return
+
+    app = session.get(Application, app_id)
+    if app is None:
+        return
+
+    latest_email = (
+        session.query(ProcessedEmail)
+        .filter(
+            ProcessedEmail.application_id == app.id,
+            ProcessedEmail.is_job_related == True,  # noqa: E712
+        )
+        .order_by(ProcessedEmail.email_date.desc().nullslast(), ProcessedEmail.processed_at.desc())
+        .first()
+    )
+    if latest_email is None:
+        app.email_date = None
+        app.email_subject = None
+        app.email_sender = None
+    else:
+        app.email_date = latest_email.email_date
+        app.email_subject = latest_email.subject
+        app.email_sender = latest_email.sender
+
+    latest_status = (
+        session.query(StatusHistory)
+        .filter(StatusHistory.application_id == app.id)
+        .order_by(StatusHistory.changed_at.desc(), StatusHistory.id.desc())
+        .first()
+    )
+    if latest_status is not None:
+        app.status = latest_status.new_status
+
+    refresh_applied_at(session, app, preserve_existing=False)
 
 
 def _cleanup_orphaned_app(
@@ -366,7 +486,7 @@ def _cleanup_orphaned_app(
         .count()
     )
     if other_refs == 0:
-        app = session.query(Application).get(app_id)
+        app = session.get(Application, app_id)
         if app:
             if _is_manual_source(app.source):
                 logger.info(
@@ -389,27 +509,6 @@ def _cleanup_orphaned_app(
     else:
         logger.info("application_kept_has_other_refs", app_id=app_id, uid=exclude_uid,
                      other_refs=other_refs)
-
-
-def _get_previous_app_id(
-    session: Session,
-    owner_user_id: int,
-    uid: int,
-    account: str,
-    folder: str,
-) -> Optional[int]:
-    """获取该邮件UID之前关联的application_id（用于重新扫描时的清理）。"""
-    existing = (
-        session.query(ProcessedEmail)
-        .filter(
-            ProcessedEmail.owner_user_id == owner_user_id,
-            ProcessedEmail.uid == uid,
-            ProcessedEmail.email_account == account,
-            ProcessedEmail.email_folder == folder,
-        )
-        .first()
-    )
-    return existing.application_id if existing else None
 
 
 def _is_already_processed(
@@ -464,7 +563,7 @@ def _update_scan_state(
         )
         .first()
     )
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if state:
         state.last_uid = last_uid
         state.last_scan_at = now
@@ -553,13 +652,17 @@ def _process_single_email(
     gmail_thread_id = parsed.gmail_thread_id
 
     # ── Step 0: 记住之前的app关联 ─────────────────────────
-    previous_app_id = _get_previous_app_id(
+    previous_email = _find_existing_processed_email(
         session,
         owner_user_id=owner_user_id,
         uid=uid,
         account=mailbox_email,
         folder=mailbox_folder,
+        gmail_message_id=gmail_message_id,
     )
+    previous_app_id = previous_email.application_id if previous_email else None
+    cleanup_exclude_uid = previous_email.uid if previous_email is not None else uid
+    status_change_source = _status_change_source_for_email(previous_email, uid)
 
     # ── Step 1: (Thread linking removed — unreliable for companies
     #    like Amazon that reuse threads for different positions) ────
@@ -597,11 +700,17 @@ def _process_single_email(
         summary.skipped_not_job_related += 1
         if non_job_reason:
             _increment_count(summary.non_job_reason_counts, non_job_reason)
+        _reconcile_email_derived_status_history(
+            session,
+            previous_email=previous_email,
+            current_uid=uid,
+            target_app_id=None,
+        )
         _cleanup_orphaned_app(
             session,
             owner_user_id=owner_user_id,
             app_id=previous_app_id,
-            exclude_uid=uid,
+            exclude_uid=cleanup_exclude_uid,
             summary=summary,
         )
         _record_processed(
@@ -617,17 +726,24 @@ def _process_single_email(
             llm_result=llm_result,
             gmail_message_id=gmail_message_id,
         )
+        _refresh_application_from_linked_data(session, previous_app_id)
         return
 
     extraction = core_prediction.extraction
     if extraction is None:
         logger.warning("trackable_email_missing_extraction", uid=uid)
         summary.skipped_not_job_related += 1
+        _reconcile_email_derived_status_history(
+            session,
+            previous_email=previous_email,
+            current_uid=uid,
+            target_app_id=None,
+        )
         _cleanup_orphaned_app(
             session,
             owner_user_id=owner_user_id,
             app_id=previous_app_id,
-            exclude_uid=uid,
+            exclude_uid=cleanup_exclude_uid,
             summary=summary,
         )
         _record_processed(
@@ -643,6 +759,7 @@ def _process_single_email(
             llm_result=llm_result,
             gmail_message_id=gmail_message_id,
         )
+        _refresh_application_from_linked_data(session, previous_app_id)
         return
 
     company = extraction.company or "Unknown"
@@ -672,7 +789,7 @@ def _process_single_email(
 
     # ── Step 5: Persist application (更新所有字段) ─────────
     if linked_app_id is not None:
-        app = session.query(Application).get(linked_app_id)
+        app = session.get(Application, linked_app_id)
         if app is None:
             # Fallback: linked app was deleted, create new
             logger.warning("linked_app_not_found", application_id=linked_app_id)
@@ -686,6 +803,7 @@ def _process_single_email(
                 email_sender=sender,
                 email_date=email_date,
                 status=status,
+                status_change_source=status_change_source,
             )
             if created:
                 summary.applications_created += 1
@@ -720,12 +838,12 @@ def _process_single_email(
                 app,
                 status,
                 owner_user_id=owner_user_id,
-                change_source=f"email_uid_{uid}",
+                change_source=status_change_source,
                 email_date=email_date,
             ):
                 changed = True
             if changed:
-                app.updated_at = datetime.utcnow()
+                app.updated_at = datetime.now(timezone.utc)
                 logger.info("application_updated_rescan", app_id=app.id, company=company, title=job_title)
             if changed:
                 summary.applications_updated += 1
@@ -741,6 +859,7 @@ def _process_single_email(
             email_sender=sender,
             email_date=email_date,
             status=status,
+            status_change_source=status_change_source,
         )
         if created:
             summary.applications_created += 1
@@ -752,7 +871,7 @@ def _process_single_email(
                 app,
                 status,
                 owner_user_id=owner_user_id,
-                change_source=f"email_uid_{uid}",
+                change_source=status_change_source,
                 email_date=email_date,
             ) or changed
             if changed:
@@ -768,12 +887,18 @@ def _process_single_email(
 
     # ── Step 6: 清理孤立的旧Application ───────────────────
     # 如果这封邮件之前关联到不同的app，清理旧的（如果没有其他邮件引用）
+    _reconcile_email_derived_status_history(
+        session,
+        previous_email=previous_email,
+        current_uid=uid,
+        target_app_id=app.id,
+    )
     if previous_app_id is not None and previous_app_id != app.id:
         _cleanup_orphaned_app(
             session,
             owner_user_id=owner_user_id,
             app_id=previous_app_id,
-            exclude_uid=uid,
+            exclude_uid=cleanup_exclude_uid,
             summary=summary,
         )
 
@@ -786,6 +911,9 @@ def _process_single_email(
         link_method=link_method, needs_review=needs_review,
         gmail_message_id=gmail_message_id,
     )
+    _refresh_application_from_linked_data(session, app.id)
+    if previous_app_id is not None and previous_app_id != app.id:
+        _refresh_application_from_linked_data(session, previous_app_id)
 
 
 def _record_processed(
