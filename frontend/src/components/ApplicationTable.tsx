@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import type { Application, LinkedEmail } from "../types";
 import StatusBadge from "./StatusBadge";
@@ -22,6 +23,9 @@ interface Props {
 
 type EmailCache = Record<number, LinkedEmail[]>;
 type EditField = { id: number; field: "status"; value: string };
+type MenuPosition = { top: number; left: number };
+
+const MENU_GAP_PX = 8;
 
 function mergeApplicationOptions(localApps: Application[], remoteApps: Application[]): Application[] {
   const merged = new Map<number, Application>();
@@ -75,13 +79,15 @@ export default function ApplicationTable({
 }: Props) {
   const location = useLocation();
   const navigate = useNavigate();
-  const rootRef = useRef<HTMLDivElement | null>(null);
   const rowRefs = useRef<Record<number, HTMLTableRowElement | null>>({});
+  const menuButtonRefs = useRef<Record<number, HTMLButtonElement | null>>({});
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const [editing, setEditing] = useState<EditField | null>(null);
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [emailCache, setEmailCache] = useState<EmailCache>({});
   const [loadingEmails, setLoadingEmails] = useState<Set<number>>(new Set());
   const [openMenuId, setOpenMenuId] = useState<number | null>(null);
+  const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null);
 
   const [mergeModalApp, setMergeModalApp] = useState<Application | null>(null);
   const [mergeOptions, setMergeOptions] = useState<Application[]>([]);
@@ -103,14 +109,43 @@ export default function ApplicationTable({
   const updatedIdSet = new Set(recentlyUpdatedIds);
 
   useEffect(() => {
-    if (openMenuId === null) return;
+    if (openMenuId === null) {
+      setMenuPosition(null);
+      return;
+    }
+
+    const updateMenuPosition = () => {
+      const button = menuButtonRefs.current[openMenuId];
+      const menu = menuRef.current;
+      if (!button || !menu) return;
+
+      const buttonRect = button.getBoundingClientRect();
+      const menuRect = menu.getBoundingClientRect();
+      const maxTop = window.innerHeight - MENU_GAP_PX - menuRect.height;
+      const maxLeft = window.innerWidth - MENU_GAP_PX - menuRect.width;
+
+      let top = buttonRect.bottom + MENU_GAP_PX;
+      if (top > maxTop && buttonRect.top - MENU_GAP_PX - menuRect.height >= MENU_GAP_PX) {
+        top = buttonRect.top - MENU_GAP_PX - menuRect.height;
+      }
+      top = Math.max(MENU_GAP_PX, Math.min(top, maxTop));
+
+      const left = Math.max(
+        MENU_GAP_PX,
+        Math.min(buttonRect.right - menuRect.width, maxLeft),
+      );
+
+      setMenuPosition((current) => (
+        current?.top === top && current?.left === left ? current : { top, left }
+      ));
+    };
 
     const handlePointerDown = (event: MouseEvent) => {
       const target = event.target as Node | null;
       if (!target) return;
 
-      const menuRoot = rootRef.current?.querySelector(`[data-menu-root="${openMenuId}"]`);
-      if (menuRoot?.contains(target)) {
+      const button = menuButtonRefs.current[openMenuId];
+      if (button?.contains(target) || menuRef.current?.contains(target)) {
         return;
       }
 
@@ -123,9 +158,15 @@ export default function ApplicationTable({
       }
     };
 
+    const frameId = window.requestAnimationFrame(updateMenuPosition);
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
     document.addEventListener("mousedown", handlePointerDown);
     document.addEventListener("keydown", handleEscape);
     return () => {
+      window.cancelAnimationFrame(frameId);
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
       document.removeEventListener("mousedown", handlePointerDown);
       document.removeEventListener("keydown", handleEscape);
     };
@@ -347,6 +388,11 @@ export default function ApplicationTable({
     }
   };
 
+  const openMenuApp =
+    openMenuId === null
+      ? null
+      : applications.find((application) => application.id === openMenuId) ?? null;
+
   if (loading) {
     return (
       <div className="rounded-lg border border-gray-200 bg-white p-8 text-center text-gray-400 shadow-sm">
@@ -365,7 +411,7 @@ export default function ApplicationTable({
 
   return (
     <>
-      <div ref={rootRef} className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+      <div className="rounded-lg border border-gray-200 bg-white shadow-sm">
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
@@ -514,8 +560,11 @@ export default function ApplicationTable({
                         </div>
                       </td>
                       <td className="whitespace-nowrap px-4 py-4 align-top text-right text-sm">
-                        <div className="relative inline-block text-left" data-menu-root={app.id}>
+                        <div className="inline-block text-left">
                           <button
+                            ref={(node) => {
+                              menuButtonRefs.current[app.id] = node;
+                            }}
                             type="button"
                             onClick={() => setOpenMenuId((current) => (current === app.id ? null : app.id))}
                             aria-haspopup="menu"
@@ -524,45 +573,6 @@ export default function ApplicationTable({
                           >
                             ...
                           </button>
-                          {openMenuId === app.id && (
-                            <div
-                              role="menu"
-                              className="absolute right-0 z-10 mt-2 w-40 rounded-md border border-gray-200 bg-white p-1 shadow-lg"
-                            >
-                            <button
-                              type="button"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                openApplicationDetail(app.id);
-                              }}
-                              className="flex w-full items-center rounded px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50"
-                            >
-                              View Details
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => void openMergeModal(app)}
-                              className="flex w-full items-center rounded px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50"
-                            >
-                              Merge
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => void openSplitModal(app)}
-                              disabled={app.email_count < 2}
-                              className="flex w-full items-center rounded px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-300"
-                            >
-                              Split
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => void handleDelete(app)}
-                              className="flex w-full items-center rounded px-3 py-2 text-left text-sm text-red-600 transition-colors hover:bg-red-50"
-                            >
-                              Delete
-                            </button>
-                            </div>
-                          )}
                         </div>
                       </td>
                     </tr>
@@ -612,6 +622,55 @@ export default function ApplicationTable({
           </table>
         </div>
       </div>
+
+      {openMenuApp
+        ? createPortal(
+            <div
+              ref={menuRef}
+              role="menu"
+              style={
+                menuPosition
+                  ? { top: `${menuPosition.top}px`, left: `${menuPosition.left}px` }
+                  : { top: "0px", left: "0px", visibility: "hidden" }
+              }
+              className="fixed z-50 w-40 rounded-md border border-gray-200 bg-white p-1 shadow-lg"
+            >
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openApplicationDetail(openMenuApp.id);
+                }}
+                className="flex w-full items-center rounded px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50"
+              >
+                View Details
+              </button>
+              <button
+                type="button"
+                onClick={() => void openMergeModal(openMenuApp)}
+                className="flex w-full items-center rounded px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50"
+              >
+                Merge
+              </button>
+              <button
+                type="button"
+                onClick={() => void openSplitModal(openMenuApp)}
+                disabled={openMenuApp.email_count < 2}
+                className="flex w-full items-center rounded px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-300"
+              >
+                Split
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDelete(openMenuApp)}
+                className="flex w-full items-center rounded px-3 py-2 text-left text-sm text-red-600 transition-colors hover:bg-red-50"
+              >
+                Delete
+              </button>
+            </div>,
+            document.body,
+          )
+        : null}
 
       {mergeModalApp && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
