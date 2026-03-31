@@ -17,10 +17,9 @@ from job_monitor.config import AppConfig
 
 logger = structlog.get_logger(__name__)
 
-_TRACKABLE_INBOX_QUERY = "in:inbox -category:social -category:promotions"
+_TRACKABLE_INBOX_QUERY = "in:inbox -category:social"
 _FILTERED_INBOX_LABELS = {
     "CATEGORY_SOCIAL",
-    "CATEGORY_PROMOTIONS",
 }
 
 

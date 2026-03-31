@@ -12,10 +12,7 @@ import CostChart from "../components/CostChart";
 import ReviewQueue from "../components/ReviewQueue";
 import { useJourney } from "../journey/JourneyContext";
 
-const NON_JOB_REASON_LABELS: Record<string, string> = {
-  social_invitation: "social invitation",
-  job_recommendation_digest: "job recommendation digest",
-};
+const SCAN_SUMMARY_AUTO_HIDE_MS = 6000;
 
 function buildPaginationItems(currentPage: number, totalPages: number): Array<number | "ellipsis"> {
   if (totalPages <= 7) {
@@ -33,70 +30,30 @@ function buildPaginationItems(currentPage: number, totalPages: number): Array<nu
   return [1, "ellipsis", currentPage - 1, currentPage, currentPage + 1, "ellipsis", totalPages];
 }
 
-function formatPreEvaluationSkipSummary(result: ScanResult): string {
-  const skippedTotal =
-    (result.skipped_social_or_promotions ?? 0) +
-    (result.skipped_message_unavailable ?? 0);
-
-  if (skippedTotal === 0) {
-    return "0 skipped";
-  }
-
-  const parts: string[] = [];
-  if (result.skipped_social_or_promotions > 0) {
-    parts.push(`${result.skipped_social_or_promotions} social/promotions`);
-  }
-  if (result.skipped_message_unavailable > 0) {
-    parts.push(`${result.skipped_message_unavailable} unavailable`);
-  }
-
-  return `${skippedTotal} skipped (${parts.join(", ")})`;
+function pluralize(value: number, singular: string, plural = `${singular}s`): string {
+  return `${value} ${value === 1 ? singular : plural}`;
 }
 
-function formatNotJobRelatedSummary(result: ScanResult): string | null {
-  if (result.skipped_not_job_related <= 0) {
-    return null;
+function buildScanSummaryText(result: ScanResult): string {
+  const outcome = `Created ${pluralize(result.applications_created, "new application")} and updated ${pluralize(result.applications_updated, "existing application")}.`;
+  const parts: string[] = [outcome];
+
+  if (result.applications_created === 0 && result.applications_updated === 0 && !result.cancelled) {
+    if (result.skipped_social_or_promotions > 0) {
+      parts.push(`${pluralize(result.skipped_social_or_promotions, "email")} skipped (Social tab).`);
+    }
+    if (result.skipped_not_job_related > 0) {
+      parts.push(`${pluralize(result.skipped_not_job_related, "email")} not job-related.`);
+    }
+    if (result.emails_scanned === 0) {
+      parts.push("No new emails found since last scan.");
+    }
   }
 
-  const topReasons = Object.entries(result.non_job_reason_counts ?? {})
-    .sort((left, right) => right[1] - left[1])
-    .slice(0, 2)
-    .map(([reason, count]) => `${count} ${NON_JOB_REASON_LABELS[reason] ?? reason}`)
-    .join(", ");
-
-  return topReasons
-    ? `${result.skipped_not_job_related} not job-related (${topReasons})`
-    : `${result.skipped_not_job_related} not job-related`;
-}
-
-function buildCompletedScanSegments(result: ScanResult): string[] {
-  const evaluatedCount = Math.max(
-    0,
-    result.emails_scanned -
-      (result.skipped_social_or_promotions ?? 0) -
-      (result.skipped_message_unavailable ?? 0)
-  );
-
-  const segments = [
-    `${result.emails_scanned} emails found`,
-    formatPreEvaluationSkipSummary(result),
-    `${evaluatedCount} evaluated`,
-    `${result.emails_matched} matched`,
-  ];
-
-  const notJobRelatedSummary = formatNotJobRelatedSummary(result);
-  if (notJobRelatedSummary) {
-    segments.push(notJobRelatedSummary);
+  if (result.cancelled) {
+    parts.push("The scan stopped before it finished.");
   }
-
-  segments.push(`${result.applications_created} new`);
-  segments.push(`${result.applications_updated} updated`);
-
-  if (result.applications_deleted > 0) {
-    segments.push(`${result.applications_deleted} deleted`);
-  }
-
-  return segments;
+  return parts.join(" ");
 }
 
 export default function Dashboard() {
@@ -113,6 +70,7 @@ export default function Dashboard() {
   const [lastScan, setLastScan] = useState<ScanResult | null>(null);
   const [scanState, setScanState] = useState<ScanState | null>(null);
   const [scanStateLoading, setScanStateLoading] = useState(true);
+  const [scanSummaryVisible, setScanSummaryVisible] = useState(false);
   const [showScanErrors, setShowScanErrors] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [creatingApplication, setCreatingApplication] = useState(false);
@@ -132,11 +90,28 @@ export default function Dashboard() {
   const pageSize = 20;
   const journeyInitializedRef = useRef<number | null | undefined>(undefined);
   const restoredScrollKeyRef = useRef<string | null>(null);
+  const scanSummaryTimeoutRef = useRef<number | null>(null);
   const parsedPage = Number(searchParams.get("page") || "1");
   const page = Number.isFinite(parsedPage) && parsedPage > 0 ? Math.floor(parsedPage) : 1;
   const statusFilter = searchParams.get("status") || "";
   const companySearch = searchParams.get("company") || "";
   const dashboardKey = `${location.pathname}${location.search}`;
+
+  const clearScanSummaryTimer = useCallback(() => {
+    if (scanSummaryTimeoutRef.current !== null) {
+      window.clearTimeout(scanSummaryTimeoutRef.current);
+      scanSummaryTimeoutRef.current = null;
+    }
+  }, []);
+
+  const scheduleScanSummaryHide = useCallback(() => {
+    clearScanSummaryTimer();
+    scanSummaryTimeoutRef.current = window.setTimeout(() => {
+      setScanSummaryVisible(false);
+      setShowScanErrors(false);
+      scanSummaryTimeoutRef.current = null;
+    }, SCAN_SUMMARY_AUTO_HIDE_MS);
+  }, [clearScanSummaryTimer]);
 
   const updateDashboardSearch = useCallback((updates: {
     page?: number;
@@ -243,6 +218,8 @@ export default function Dashboard() {
     setLastScan(null);
     setScanState(null);
     setScanStateLoading(true);
+    clearScanSummaryTimer();
+    setScanSummaryVisible(false);
     setShowScanErrors(false);
     setScanHighlights({ createdIds: [], updatedIds: [] });
 
@@ -252,7 +229,7 @@ export default function Dashboard() {
       updateDashboardSearch({ page: 1 });
     }
     journeyInitializedRef.current = nextJourneyId;
-  }, [activeJourney?.id, updateDashboardSearch]);
+  }, [activeJourney?.id, clearScanSummaryTimer, updateDashboardSearch]);
 
   useEffect(() => {
     if (scanHighlights.createdIds.length === 0 && scanHighlights.updatedIds.length === 0) {
@@ -265,6 +242,17 @@ export default function Dashboard() {
 
     return () => window.clearTimeout(timeoutId);
   }, [scanHighlights]);
+
+  useEffect(() => {
+    if (!scanSummaryVisible || scanSummaryTimeoutRef.current !== null) {
+      return;
+    }
+    scheduleScanSummaryHide();
+  }, [scanSummaryVisible, scheduleScanSummaryHide]);
+
+  useEffect(() => () => {
+    clearScanSummaryTimer();
+  }, [clearScanSummaryTimer]);
 
   useEffect(() => {
     window.sessionStorage.setItem("dashboard:returnTo", dashboardKey);
@@ -319,7 +307,9 @@ export default function Dashboard() {
 
   const handleScanComplete = (result: ScanResult) => {
     setLastScan(result);
+    setScanSummaryVisible(true);
     setShowScanErrors(false);
+    scheduleScanSummaryHide();
     const createdIds = result.created_application_ids ?? [];
     const updatedIds = (result.updated_application_ids ?? []).filter((id) => !createdIds.includes(id));
     setScanHighlights({ createdIds, updatedIds });
@@ -398,7 +388,7 @@ export default function Dashboard() {
   const showingFrom = total === 0 ? 0 : (page - 1) * pageSize + 1;
   const showingTo = total === 0 ? 0 : Math.min(page * pageSize, total);
   const paginationItems = buildPaginationItems(page, totalPages);
-  const completedScanSegments = lastScan ? buildCompletedScanSegments(lastScan) : [];
+  const scanSummaryText = lastScan ? buildScanSummaryText(lastScan) : "";
   const hasImportedEmailData = Boolean(scanState?.last_scan_at) || (stats?.total_emails_scanned ?? 0) > 0;
   const scanButtonMode =
     scanStateLoading && scanState === null && stats === null
@@ -406,6 +396,15 @@ export default function Dashboard() {
       : hasImportedEmailData
         ? "default"
         : "initial";
+  const toggleScanErrors = () => {
+    if (showScanErrors) {
+      setShowScanErrors(false);
+      scheduleScanSummaryHide();
+      return;
+    }
+    clearScanSummaryTimer();
+    setShowScanErrors(true);
+  };
 
   return (
     <div className="space-y-6">
@@ -415,7 +414,6 @@ export default function Dashboard() {
           <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
           <p className="text-sm text-gray-500 mt-1">
             {total} application{total !== 1 ? "s" : ""} tracked
-            {stats ? ` · ${stats.total_emails_scanned} emails scanned · $${stats.total_llm_cost.toFixed(4)} LLM cost` : ""}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -428,57 +426,68 @@ export default function Dashboard() {
       </div>
 
       {/* Scan result banner */}
-	      {lastScan && (
-	        <div className={`rounded-md p-3 text-sm ${
-	          lastScan.cancelled
-	            ? "bg-orange-50 border border-orange-200 text-orange-700"
-	            : "bg-indigo-50 border border-indigo-200 text-indigo-700"
-	        }`}>
-	          <div className="space-y-3">
-	            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-	              <div className="leading-6">
-	                {lastScan.cancelled ? (
-                  <>
-                    Scan was cancelled · LLM cost: <span className="font-semibold">${lastScan.total_estimated_cost.toFixed(4)}</span>
-                    {lastScan.errors.length > 0 && ` · ${lastScan.errors.length} error(s)`}
-                  </>
-                ) : (
-	                  <>
-	                    {completedScanSegments.join(" · ")}
-	                    {" · "}LLM cost: <span className="font-semibold">${lastScan.total_estimated_cost.toFixed(4)}</span>
-	                    {lastScan.errors.length > 0 && ` · ${lastScan.errors.length} error(s)`}
-	                  </>
-                )}
+      {lastScan && scanSummaryVisible && (
+        <div
+          aria-live="polite"
+          className={`rounded-2xl border p-4 shadow-sm ${
+            lastScan.cancelled
+              ? "border-orange-200 bg-orange-50/90 text-orange-900"
+              : "border-indigo-200 bg-indigo-50/90 text-slate-900"
+          }`}
+        >
+          <div className="space-y-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="space-y-1">
+                <div className="text-sm font-semibold">
+                  {lastScan.cancelled ? "Scan stopped early" : "Scan complete"}
+                </div>
+                <p className="text-sm leading-6 text-slate-700">
+                  {scanSummaryText}
+                </p>
               </div>
-              {lastScan.errors.length > 0 && (
+
+              <div className="flex items-center gap-2">
+                {lastScan.errors.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={toggleScanErrors}
+                    className={`shrink-0 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+                      lastScan.cancelled
+                        ? "border-orange-300 bg-white/90 text-orange-800 hover:bg-white"
+                        : "border-indigo-300 bg-white/90 text-indigo-700 hover:bg-white"
+                    }`}
+                  >
+                    {showScanErrors ? "Hide errors" : `View ${lastScan.errors.length} errors`}
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={() => setShowScanErrors((current) => !current)}
-                  className={`shrink-0 self-start rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
-                    lastScan.cancelled
-                      ? "border-orange-300 bg-white/80 text-orange-700 hover:bg-white"
-                      : "border-indigo-300 bg-white/80 text-indigo-700 hover:bg-white"
-                  }`}
+                  onClick={() => {
+                    clearScanSummaryTimer();
+                    setScanSummaryVisible(false);
+                    setShowScanErrors(false);
+                  }}
+                  className="shrink-0 rounded-full border border-slate-300 bg-white/80 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-white"
                 >
-                  {showScanErrors ? "Hide errors" : `View ${lastScan.errors.length} errors`}
+                  Dismiss
                 </button>
-              )}
+              </div>
             </div>
 
             {showScanErrors && lastScan.errors.length > 0 && (
-              <div className={`rounded-md border p-3 ${
+              <div className={`rounded-xl border p-3 ${
                 lastScan.cancelled
-                  ? "border-orange-200 bg-white/70"
-                  : "border-indigo-200 bg-white/70"
+                  ? "border-orange-200 bg-white/80"
+                  : "border-indigo-200 bg-white/80"
               }`}>
-                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
                   Error details
                 </div>
                 <ol className="space-y-2">
                   {lastScan.errors.map((error, index) => (
                     <li
                       key={`${index}-${error}`}
-                      className="rounded-md bg-gray-900 px-3 py-2 font-mono text-xs leading-5 text-gray-100 whitespace-pre-wrap break-words"
+                      className="rounded-md bg-slate-950 px-3 py-2 font-mono text-xs leading-5 text-slate-100 whitespace-pre-wrap break-words"
                     >
                       {index + 1}. {error}
                     </li>
@@ -490,8 +499,8 @@ export default function Dashboard() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-[360px,minmax(0,1fr)] 2xl:grid-cols-[388px,minmax(0,1fr)] gap-6 items-start">
-        <div className="relative isolate">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[360px,minmax(0,1fr)] xl:items-stretch 2xl:grid-cols-[388px,minmax(0,1fr)]">
+        <div className="relative isolate h-full">
           <div className="pointer-events-none absolute inset-[-4%] overflow-hidden rounded-[40px]">
             <div className="absolute inset-0 bg-[linear-gradient(145deg,rgba(255,255,255,0.72),rgba(239,246,255,0.3)_34%,rgba(219,234,254,0.16)_100%)]" />
             <div className="absolute -left-10 top-9 h-44 w-44 rounded-full bg-sky-300/46 blur-[76px]" />
@@ -507,7 +516,7 @@ export default function Dashboard() {
         <SankeyFlow
           flowData={flowData}
           loading={flowLoading}
-          height={340}
+          fillHeight
           showSummary={false}
           title="Flow"
         />
