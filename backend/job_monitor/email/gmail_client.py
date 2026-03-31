@@ -303,7 +303,6 @@ class GmailClient:
         while True:
             params: dict[str, Any] = {
                 "startHistoryId": str(start_history_id),
-                "historyTypes": "messageAdded",
                 "maxResults": 500,
             }
             if page_token:
@@ -339,6 +338,12 @@ class GmailClient:
             if not page_token:
                 break
 
+        logger.info(
+            "gmail_history_scan_result",
+            start_history_id=start_history_id,
+            latest_history_id=latest_history_id,
+            messages_found=len(ids),
+        )
         return ids, latest_history_id
 
     def fetch_message(
