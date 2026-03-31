@@ -46,7 +46,7 @@ function buildScanSummaryText(result: ScanResult): string {
       parts.push(`${pluralize(result.skipped_not_job_related, "email")} not job-related.`);
     }
     if (result.emails_scanned === 0) {
-      parts.push("No new emails found since last scan.");
+      parts.push("No new emails found since last scan. Use Advanced Scan to re-scan a recent date range.");
     }
   }
 
