@@ -8,6 +8,7 @@ interface Props {
   height?: number;
   showSummary?: boolean;
   title?: string;
+  fillHeight?: boolean;
 }
 
 const STAGE_ORDER: Record<string, number> = {
@@ -146,34 +147,43 @@ function estimateTextWidth(text: string, fontSize: number): number {
 }
 
 function toLayoutValue(raw: number): number {
-  // Compress large values for layout so dominant columns don't span the full height.
-  return Math.max(1, Math.pow(raw, 0.72));
+  // Keep large stages visually substantial so the chart doesn't feel too airy.
+  return Math.max(1, Math.pow(raw, 0.84));
 }
 
 function edgeLayoutWeight(from: string, to: string): number {
-  // Make root and reject pillars shorter without changing displayed counts.
+  // Nudge the dominant root / reject columns down slightly, but keep the plot dense.
   let w = 1;
-  if (from === "Applications") w *= 0.68;
-  if (to === "拒绝") w *= 0.74;
+  if (from === "Applications") w *= 0.9;
+  if (to === "拒绝") w *= 0.9;
   return w;
 }
 
-// Height of the compact bar rect rendered visually.
-const COMPACT_BAR_H = 20;
+const COMPACT_BAR_MIN_H = 22;
+const COMPACT_BAR_MAX_H = 108;
 const SANKEY_NODE_WIDTH = 14;
-const SANKEY_NODE_PADDING = 30;
-const NODE_CARD_GAP = 10;
-const SANKEY_MARGIN = { top: 20, right: 64, bottom: 20, left: 72 };
+const SANKEY_NODE_PADDING = 62;
+const NODE_CARD_GAP = 8;
+const SANKEY_MARGIN = { top: 8, right: 88, bottom: 8, left: 156 };
 // All visible nodes use compact bar rendering (ribbons stacked side-by-side).
 function isCompactNode(name: string): boolean {
   return !isHiddenNodeName(name);
 }
+
+function compactBarHeight(nodeDy: number): number {
+  if (!Number.isFinite(nodeDy) || nodeDy <= 0) {
+    return COMPACT_BAR_MIN_H;
+  }
+  return Math.max(COMPACT_BAR_MIN_H, Math.min(COMPACT_BAR_MAX_H, nodeDy * 0.82));
+}
+
 // Maps a precomputed [0..1] band fraction to pixel y coordinates within the compact bar.
 // node.y is in recharts layout space (no margin); SANKEY_MARGIN_TOP converts to screen space.
 function bandFracToY(frac: [number, number], nodeY: number, nodeDy: number): [number, number] {
+  const barH = compactBarHeight(nodeDy);
   const cy = nodeY + SANKEY_MARGIN_TOP + nodeDy / 2;
-  const barTop = cy - COMPACT_BAR_H / 2;
-  return [barTop + frac[0] * COMPACT_BAR_H, barTop + frac[1] * COMPACT_BAR_H];
+  const barTop = cy - barH / 2;
+  return [barTop + frac[0] * barH, barTop + frac[1] * barH];
 }
 
 function buildSankeyData(flowData: FlowData): SankeyData | null {
@@ -202,6 +212,7 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
     if (transition.count <= 0 || from === to) continue;
     if (from === "Applications") {
       entryCountByStatus.set(to, (entryCountByStatus.get(to) || 0) + transition.count);
+      addEdge(from, to, transition.count);
       continue;
     }
     addCanonicalEdge(from, to, transition.count);
@@ -213,33 +224,18 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
       const to = normalizeStatus(sc.status);
       if (sc.count <= 0) continue;
       entryCountByStatus.set(to, (entryCountByStatus.get(to) || 0) + sc.count);
+      addEdge("Applications", to, sc.count);
     }
   }
 
   const filteredCounts = new Map<string, number>(edgeCounts);
-
-  // Preserve first-stage volume without drawing a fake "Applications" status.
-  // Hidden sinks keep left-most real stages anchored even when some applications
-  // are still sitting in that first visible status.
-  const visibleOutgoingByStatus = new Map<string, number>();
-  for (const [key, count] of filteredCounts.entries()) {
-    const [from, to] = key.split("→");
-    if (!from || !to || isHiddenNodeName(from) || isHiddenNodeName(to)) continue;
-    visibleOutgoingByStatus.set(from, (visibleOutgoingByStatus.get(from) || 0) + count);
-  }
-  for (const [status, entryCount] of entryCountByStatus.entries()) {
-    const visibleOutgoing = visibleOutgoingByStatus.get(status) || 0;
-    const remainder = Math.max(0, entryCount - visibleOutgoing);
-    if (remainder <= 0) continue;
-    filteredCounts.set(`${status}→${HIDDEN_SINK_PREFIX}entry:${status}`, remainder);
-  }
 
   if (filteredCounts.size === 0) return null;
 
   // Intermediate stages that should NOT appear in the last column alongside terminal nodes.
   // If they have incoming links but no real outgoing links, add a hidden sink so recharts
   // places them in an earlier column (their natural pipeline depth).
-  const INTERMEDIATE_STAGES = ["Recruiter Reach-out", "已申请", "OA", "面试"];
+  const INTERMEDIATE_STAGES = ["Recruiter Reach-out", "已申请", "Unknown", "OA", "面试"];
   for (const stage of INTERMEDIATE_STAGES) {
     const hasIncoming = Array.from(filteredCounts.keys()).some((k) => k.endsWith(`→${stage}`));
     const hasOutgoing = Array.from(filteredCounts.keys()).some(
@@ -274,7 +270,7 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
       name,
       color: p.node,
       linkColor: p.link,
-      rawCount: currentCountByStatus.get(name),
+      rawCount: name === "Applications" ? flowData.total : currentCountByStatus.get(name),
     };
   });
 
@@ -298,24 +294,15 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
 
   if (links.length === 0) return null;
 
-  const visibleLinks = links.filter((l) => !l.isHidden);
-  const rawValues = visibleLinks.map((l) => l.rawValue ?? l.value);
-  const minValue = rawValues.length ? Math.min(...rawValues) : 1;
-  const maxValue = rawValues.length ? Math.max(...rawValues) : 1;
-  const span = Math.max(1, maxValue - minValue);
-
   for (const link of links) {
     if (link.isHidden) {
       link.visualWidth = 0.1;
       continue;
     }
     const raw = link.rawValue ?? link.value;
-    if (maxValue === minValue) {
-      link.visualWidth = 12;
-      continue;
-    }
-    const norm = (raw - minValue) / span;
-    link.visualWidth = 10 + Math.pow(norm, 0.7) * 10;
+    // Keep tiny branches visible without letting them consume the same band
+    // thickness as dominant flows.
+    link.visualWidth = 0.8 + Math.pow(raw, 0.68);
   }
 
   // Assign each ribbon a distinct, non-overlapping band fraction within its node's compact bar.
@@ -355,7 +342,7 @@ function buildSankeyData(flowData: FlowData): SankeyData | null {
 }
 
 // Must stay in sync with the `margin` prop passed to <Sankey> below.
-const SANKEY_MARGIN_TOP = 20;
+const SANKEY_MARGIN_TOP = SANKEY_MARGIN.top;
 
 function LinkShape(props: SankeyLinkRenderProps) {
   const {
@@ -382,7 +369,7 @@ function LinkShape(props: SankeyLinkRenderProps) {
     return <path d="" fill="none" stroke="none" />;
   }
 
-  const visualWidth = Math.max(6, Math.min(24, payload?.visualWidth ?? linkWidth));
+  const visualWidth = Math.max(2, Math.min(18, payload?.visualWidth ?? linkWidth));
 
   const sourceNode = payload?.source;
   const targetNode = payload?.target;
@@ -464,24 +451,32 @@ function NodeShape(props: SankeyNodeRenderProps) {
 
   // All visible nodes render as a short compact bar at their center.
   if (isCompactNode(payload.name)) {
-    const barH = COMPACT_BAR_H;
+    const barH = compactBarHeight(height);
     const cy = y + height / 2;
 
-    // Root node: compact bar + left-side text label, no card.
     if (isRoot) {
+      const cardX = Math.max(12, x - cardW - 14);
+      const cardY = cy - cardH / 2;
       return (
         <g>
           <rect x={x} y={cy - barH / 2} width={width} height={barH} fill={nodeColor} rx={2} />
-          <text
-            x={x - 10}
-            y={cy}
-            textAnchor="end"
-            dominantBaseline="central"
-            fontSize={13}
-            fontWeight={650}
-            fill="#4b5563"
-          >
-            Applications
+          <rect
+            x={cardX}
+            y={cardY}
+            width={cardW}
+            height={cardH}
+            rx={4}
+            fill="#ffffff"
+            stroke="#e5e7eb"
+            strokeWidth={0.8}
+            opacity={0.97}
+          />
+          <rect x={cardX + 6} y={cardY + 8} width={4} height={4} rx={1} fill={nodeColor} />
+          <text x={cardX + 13} y={cardY + 11} textAnchor="start" fontSize={labelFont} fontWeight={550} fill="#111827">
+            {payload.name}
+          </text>
+          <text x={cardX + 13} y={cardY + 24} textAnchor="start" fontSize={valueFont} fontWeight={500} fill="#334155">
+            {value}
           </text>
         </g>
       );
@@ -520,20 +515,6 @@ function NodeShape(props: SankeyNodeRenderProps) {
   return (
     <g>
       <rect x={x} y={y} width={width} height={height} fill={nodeColor} rx={2} />
-
-      {isRoot && (
-        <text
-          x={x - 10}
-          y={y + height / 2}
-          textAnchor="end"
-          dominantBaseline="central"
-          fontSize={13}
-          fontWeight={650}
-          fill="#4b5563"
-        >
-          Applications
-        </text>
-      )}
 
       {showLabelCard && (
         <g>
@@ -616,6 +597,7 @@ export default function SankeyFlow({
   height = 340,
   showSummary = true,
   title = "Application Flow",
+  fillHeight = false,
 }: Props) {
   const sankeyData = useMemo(() => {
     if (!flowData) {
@@ -662,23 +644,29 @@ export default function SankeyFlow({
   })();
 
   return (
-    <Shell title={title}>
-      <div className="min-h-0 w-full rounded-xl bg-slate-50/70">
-        <ResponsiveContainer width="100%" height={height}>
-          <Sankey
-            data={sankeyData}
-            node={NodeShape}
-            link={LinkShape}
-            nodePadding={SANKEY_NODE_PADDING}
-            nodeWidth={SANKEY_NODE_WIDTH}
-            linkCurvature={0.52}
-            iterations={64}
-            sort={false}
-            margin={SANKEY_MARGIN}
-          >
-            <Tooltip cursor={false} content={<SankeyTooltipContent />} />
-          </Sankey>
-        </ResponsiveContainer>
+    <Shell title={title} fillHeight={fillHeight}>
+      <div className={`min-h-0 w-full ${fillHeight ? "flex-1" : ""}`}>
+        <div
+          className={`w-full rounded-[24px] bg-slate-50/70 px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.4)] ${
+            fillHeight ? "h-full min-h-[340px]" : ""
+          }`}
+        >
+          <ResponsiveContainer width="100%" height={fillHeight ? "100%" : height}>
+            <Sankey
+              data={sankeyData}
+              node={NodeShape}
+              link={LinkShape}
+              nodePadding={SANKEY_NODE_PADDING}
+              nodeWidth={SANKEY_NODE_WIDTH}
+              linkCurvature={0.46}
+              iterations={64}
+              sort={false}
+              margin={SANKEY_MARGIN}
+            >
+              <Tooltip cursor={false} content={<SankeyTooltipContent />} />
+            </Sankey>
+          </ResponsiveContainer>
+        </div>
       </div>
       {showSummary && (
         <div className="mt-3 flex flex-wrap gap-2">
@@ -698,9 +686,17 @@ export default function SankeyFlow({
   );
 }
 
-function Shell({ children, title }: { children: React.ReactNode; title: string }) {
+function Shell({
+  children,
+  title,
+  fillHeight = false,
+}: {
+  children: React.ReactNode;
+  title: string;
+  fillHeight?: boolean;
+}) {
   return (
-    <div className="flex h-full flex-col rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+    <div className={`flex w-full flex-col rounded-lg border border-gray-200 bg-white p-5 shadow-sm ${fillHeight ? "h-full" : ""}`}>
       <h2 className="mb-4 text-lg font-semibold text-gray-900">{title}</h2>
       {children}
     </div>
